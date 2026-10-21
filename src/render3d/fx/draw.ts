@@ -48,8 +48,15 @@ let scratch = new Float32Array(FLOATS * 4 * 256);
 let groupOf = new Int32Array(256), order = new Int32Array(256);
 const CORNERS = new Float64Array(8);
 
-const shown = (cur: number, target: number, remain: number, count: number) =>
-  count ? (target + ((cur - target) * remain) / count) / 255 : cur / 255;
+/** a particle's color byte part-way to its target as the game draws it (getColorPrimEnv): the share left,
+ *  65536 * remain / count, an integer division, then ((target << 16) + (color - target) * share) >> 16, kept
+ *  to a byte as the GXColor it is stored in */
+export function psColorByte(cur: number, target: number, remain: number, count: number): number {
+  if (!count) return cur & 0xff;
+  const scale = Math.trunc((65536 * remain) / count);
+  return (((target << 16) + (cur - target) * scale) >> 16) & 0xff;
+}
+const shown = (cur: number, target: number, remain: number, count: number) => psColorByte(cur, target, remain, count) / 255;
 
 const WORLD_AXES = { right: [1, 0, 0], up: [0, 1, 0] };
 

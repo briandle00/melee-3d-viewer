@@ -34,7 +34,7 @@ export interface LetterBatch { sprite: { key: string; w: number; h: number; rgba
 export interface LetterRenderer {
   liveTarget(image: unknown, w: number, h: number): unknown;
   target(w: number, h: number): unknown;
-  overlay(viewProj: Float32Array, view: Float32Array, target: unknown, clear: [number, number, number, number] | null, mirrored: boolean): void;
+  overlay(proj: Float32Array, view: Float32Array, target: unknown, clear: [number, number, number, number] | null, mirrored: boolean): void;
   drawParticles(data: Float32Array, batches: LetterBatch[]): void;
   endOverlay(): void;
 }
@@ -43,8 +43,8 @@ export interface LetterRenderer {
 interface Shown { at: number; mode: number; player: number }
 
 const W = 250, H = 160;
-/** the camera into the screen's picture: its pixels, y down, row 0 the top */
-const SCREEN_VP = Float32Array.from([2 / W, 0, 0, 0, 0, 2 / H, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1]);
+/** the camera into the screen's picture: its pixels, y down, row 0 the top (its projection; the view is none) */
+const SCREEN_PROJ = Float32Array.from([2 / W, 0, 0, 0, 0, 2 / H, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1]);
 const SCREEN_VIEW = Float32Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 /** the joint each mode shows (the code's bits: 0x40 the screen itself) */
 const JOINT_OF: Record<number, number> = { 2: 6, 3: 3, 4: 4, 5: 9, 6: 7, 15: 8, 16: 5 };
@@ -526,7 +526,7 @@ export class StadiumScreen implements StageLogic {
     const shows = this.mode === 7 || this.mode === 8;
     const target = shows ? (this.scratch ??= Object.assign(r.target(W, H) as object, { erase: true })) : r.liveTarget(image, W, H);
     if (!target) return;
-    r.overlay(SCREEN_VP, SCREEN_VIEW, target, [0, 0, 0, 1], true);
+    r.overlay(SCREEN_PROJ, SCREEN_VIEW, target, [0, 0, 0, 1], true);
     r.drawParticles(this.letters.data, this.letters.batches);
     r.endOverlay();
   }

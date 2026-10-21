@@ -28,6 +28,10 @@ export interface Lighting {
   attnK: Float32Array;
   /** the lights, as the math in gx.ts takes them */
   lights: GxLight[];
+  /** per light (8 x vec4): its place in the world as its LObj has it (float32), and a spot's interest (w 1 when
+   *  it has one) */
+  place: Float32Array;
+  interest: Float32Array;
   /** changes whenever the rest does (the renderer uploads only then) */
   version: number;
 }
@@ -38,6 +42,7 @@ export function packLighting(ambient: [number, number, number], lights: GxLight[
   const out: Lighting = {
     ambient, n: Math.min(8, lights.length), pos: new Float32Array(32), axis: new Float32Array(32),
     color: new Float32Array(32), attnA: new Float32Array(32), attnK: new Float32Array(32), lights, version: ++versions,
+    place: new Float32Array(32), interest: new Float32Array(32),
   };
   lights.slice(0, 8).forEach((l, i) => {
     out.pos.set(l.pos, i * 4);
@@ -45,6 +50,9 @@ export function packLighting(ambient: [number, number, number], lights: GxLight[
     out.color.set(l.color, i * 4);
     out.attnA.set([l.attn[0], l.attn[1], l.attn[2], (l.diffuse ? 1 : 0) + (l.specular ? 2 : 0)], i * 4);
     out.attnK.set([l.attn[3], l.attn[4], l.attn[5], 0], i * 4);
+    const pl = l.place ?? [l.pos[0], l.pos[1], l.pos[2]];
+    out.place.set([pl[0], pl[1], pl[2], 1], i * 4);
+    if (l.interest) out.interest.set([l.interest[0], l.interest[1], l.interest[2], 1], i * 4);
   });
   return out;
 }
@@ -153,9 +161,11 @@ export class LightSet {
           const t = (l.interest ?? [0, 0, 0]).map((v) => v * k);
           const d = [p[0] - t[0], p[1] - t[1], p[2] - t[2]], n = Math.hypot(d[0], d[1], d[2]) || 1;
           axis = [d[0] / n, d[1] / n, d[2] / n];
+          out.push({ pos, axis, color: [...l.color], attn, diffuse, specular, place: p, interest: t as [number, number, number] });
+          continue;
         }
       }
-      out.push({ pos, axis, color: [...l.color], attn, diffuse, specular });
+      out.push({ pos, axis, color: [...l.color], attn, diffuse, specular, place: p });
     }
     return packLighting(ambient ?? [0, 0, 0], out);
   }

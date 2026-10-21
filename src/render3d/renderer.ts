@@ -14,11 +14,18 @@
  * are filtered as the file says, with the file's own mip levels.
  */
 import { Archive, Image, MObj, TObj, Tlut, decodeImage } from "./hsd";
-import { DrawGroup, Drawable, MatState, Skeleton, TexState } from "./skeleton";
+import { DrawGroup, Drawable, MatState, Skeleton, TexState, billboardViewOf } from "./skeleton";
 import { Mat, invert, lookAt, mul } from "./math";
+import { HSD_MtxInverseTranspose, concatGL, mtxFromGL, mtxToGL3 } from "./gxmath";
+import { type ViewLights, jointInView, lightsInView, newViewLights, specularDirs } from "./gxlights";
 import { SHADOW_SIZE, shadowGray } from "./shadow";
 import type { Tint as ColTint } from "./fx/colanim";
-import { Fog, MatProgram, RENDER, compileMaterial, defaultAlphaTest, minFilter, mipLevels, tevScalar, textureMatrix } from "./gx";
+import { FOG_GLSL, type FogRegs, NO_FOG, gxSetFog, nearFar } from "./fog";
+import {
+  ALPHA_MAP_IN, COLOR_MAP_IN, Fog, MatProgram, RENDER, compileMaterial, defaultAlphaTest, minFilter, mipLevels, tevScalar,
+  textureMatrix,
+} from "./gx";
+import { CNST_ALPHA, CNST_BLEND, CNST_DIFFUSE, CNST_SPECULAR, CNST_TEXREG, IN_CNST, IN_RAS, IN_STAGE, IN_TEX, IN_VALUE, type TevProgram, compileTExp, packTev } from "./texp";
 import { DEFAULT_LIGHTS, LightSet, Lighting } from "./lightset";
 import { LOOK_H, LOOK_W, Look480 } from "./look480";
 import { GamePicture, type PictureOptions } from "./picture";
@@ -35,25 +42,154 @@ const MAX_SHADOWS = 4, SHADOW_UNIT = 4;
 
 // uMatF (vec4s): 0 diffuse.rgb alpha | 1 ambient.rgb shininess | 2 specular.rgb
 //   | 3 each sampler's blend | 4 each sampler's LOD bias | 5 alpha test refs
-//   (0..255) | 6..17 each sampler's texture matrix (3 rows) | 18..29 each
-//   sampler's own TEV colors: konst, tev0, tev1
+//   (0..255), the alpha's TEV byte / 255 | 6..17 each sampler's texture
+//   matrix (3 rows) | 18..29 each sampler's own TEV colors: konst, tev0, tev1
 // uMatI (ivec4s): 0 stages, channel, flags (1 vertex base, 2 lit, 4
 //   specular), alpha test (comp0 | comp1 << 3 | op << 6) | 1 each sampler's
-//   coordinates (TexGen, -1 unused) | 2..5 each sampler's own TEV: color
-//   inputs a..d (a byte each), alpha inputs, color mode, alpha mode (op |
-//   bias << 4 | scale << 6 | clamp << 8 | on << 9) | 6, 7 the stages (tex |
-//   color map << 2 | (alpha map + 1) << 6 | phase << 10)
-const MATF = 30, MATI = 8;
+//   coordinates (TexGen, -1 unused) | 2 the TEV program's stage count, its
+//   output stage, the textures modulated after it (count, samplers 2 bits
+//   each) | 3.. its stages, three each (texp.ts packTev): the color inputs,
+//   the alpha inputs, (color mode, alpha mode, sampler, channel)
+const MAX_TEV = 16;
+/** the material block's size: its vec4s and its ivec4s */
+export const MATF = 30, MATI = 3 + MAX_TEV * 3;
+// the programs of the materials that are no material's own: the diffuse color as it is, or lit
+const PLAIN_TEV = compileTExp({ renderMode: 0 } as MObj, [], () => -1);
+const LIT_TEV = compileTExp({ renderMode: RENDER.DIFFUSE } as MObj, [], () => -1);
+/** a TEV program into a material block's integers (uMatI 2..) */
+function putTev(I: Int32Array, p: TevProgram): number {
+  const n = packTev(p, I, 12, MAX_TEV);
+  I[8] = n;
+  I[9] = Math.max(0, Math.min(p.out, n - 1));
+  return n;
+}
 // (a uniform block: each material keeps its own buffer of them, sent again
 // only when something in it changes, and a draw only binds it)
 const MAT_DECL = `layout(std140) uniform Mat {\n  vec4 uMatF[${MATF}];\n  ivec4 uMatI[${MATI}];\n};`;
 const MAT_BYTES = (MATF + MATI) * 16;
+
+// GX's TEV in its integers (gx.ts tevStage, tevCompare, colorMap, alphaMap,
+// alphaTest: the same arithmetic, one stage function for every stage): 8-bit
+// inputs, 10-bit signed results, the lerp over 256 with its rounding bias
+const TEV_GLSL = `
+// a color as the bytes it stands for (a value kept as byte / 255; a texel round(t * 255))
+ivec4 bytes(vec4 v) { return ivec4(floor(clamp(v, 0.0, 1.0) * 255.0 + 0.5)); }
+int bytes1(float v) { return int(floor(clamp(v, 0.0, 1.0) * 255.0 + 0.5)); }
+// one stage on four channels: a, b, c bytes (their low 8 bits), d 10-bit; sub 1 where it subtracts; bias
+// (GX_TB_*), scale (GX_CS_*), clamped to 0..255 or kept to -1024..1023
+ivec4 tev4(ivec4 a, ivec4 b, ivec4 c, ivec4 d, ivec4 sub, int bias, int scale, bool cl) {
+  a &= 255; b &= 255; c &= 255;
+  int s = scale == 1 ? 1 : scale == 2 ? 2 : 0;
+  bool halve = scale == 3;
+  ivec4 dd = (d + (bias == 1 ? 128 : bias == 2 ? -128 : 0)) << s;
+  ivec4 l = ((((a << 8) + (b - a) * (c + (c >> 7))) << s) + (halve ? ivec4(0) : 128 - sub)) >> 8;
+  ivec4 v = dd + l * (1 - 2 * sub);
+  if (halve) v >>= 1;
+  return cl ? clamp(v, 0, 255) : clamp(v, -1024, 1023);
+}
+bool tevPass(bool eq, int x, int y) { return eq ? x == y : x > y; }
+// a compare stage (GX_TEV_COMP_*): d + c where a compares to b as asked (rgb, or the alpha in .a)
+ivec4 tevCmp(int op, ivec4 a, ivec4 b, ivec4 c, ivec4 d, bool alpha, bool cl) {
+  a &= 255; b &= 255; c &= 255;
+  bool eq = (op & 1) == 1;
+  int mode = (op >> 1) & 3;
+  int va = mode == 1 ? a.r + (a.g << 8) : mode == 2 ? a.r + (a.g << 8) + (a.b << 16) : a.r;
+  int vb = mode == 1 ? b.r + (b.g << 8) : mode == 2 ? b.r + (b.g << 8) + (b.b << 16) : b.r;
+  bool all = tevPass(eq, va, vb);
+  ivec4 add = mode == 3 ? ivec4(tevPass(eq, a.r, b.r) ? c.r : 0, tevPass(eq, a.g, b.g) ? c.g : 0, tevPass(eq, a.b, b.b) ? c.b : 0,
+                                tevPass(eq, a.a, b.a) ? c.a : 0) : all ? c : ivec4(0);
+  ivec4 v = d + add;
+  return cl ? clamp(v, 0, 255) : clamp(v, -1024, 1023);
+}
+// a texture's color map and alpha map (TObjMakeTExp's stages), their inputs by gx.ts COLOR_MAP_IN, ALPHA_MAP_IN:
+// 0 zero, 1 the color so far, 2 the texel, 3 its alpha, 4 the blending
+const int CMAP[45] = int[45](${COLOR_MAP_IN.flat().join(", ")});
+const int AMAP[40] = int[40](${ALPHA_MAP_IN.flat().join(", ")});
+ivec3 pickC(int k, ivec3 p, ivec4 t, int b) { return k == 1 ? p : k == 2 ? t.rgb : k == 3 ? ivec3(t.a) : k == 4 ? ivec3(b) : ivec3(0); }
+int pickA(int k, int p, int t, int b) { return k == 1 ? p : k == 3 ? t : k == 4 ? b : 0; }
+ivec3 colorMap(int op, ivec3 p, ivec4 t, int b) {
+  int o = (op < 0 || op > 8 ? 0 : op) * 5;
+  return tev4(ivec4(pickC(CMAP[o], p, t, b), 0), ivec4(pickC(CMAP[o + 1], p, t, b), 0), ivec4(pickC(CMAP[o + 2], p, t, b), 0),
+              ivec4(pickC(CMAP[o + 3], p, t, b), 0), ivec4(CMAP[o + 4]), 0, 0, true).rgb;
+}
+int alphaMap(int op, int p, int t, int b) {
+  int o = (op < 0 || op > 7 ? 0 : op) * 5;
+  return tev4(ivec4(pickA(AMAP[o], p, t, b)), ivec4(pickA(AMAP[o + 1], p, t, b)), ivec4(pickA(AMAP[o + 2], p, t, b)),
+              ivec4(pickA(AMAP[o + 3], p, t, b)), ivec4(AMAP[o + 4]), 0, 0, true).a;
+}
+// GX's alpha test on the alpha's byte: two comparisons (GX_NEVER .. GX_ALWAYS) and their logic (GX_AOP_*)
+bool cmpI(int f, int a, int r) {
+  return f == 0 ? false : f == 1 ? a < r : f == 2 ? a == r : f == 3 ? a <= r : f == 4 ? a > r : f == 5 ? a != r : f == 6 ? a >= r : true;
+}
+bool alphaPass(int a, int comp0, int ref0, int op, int comp1, int ref1) {
+  bool p = cmpI(comp0, a, ref0), q = cmpI(comp1, a, ref1);
+  return op == 0 ? (p && q) : op == 1 ? (p || q) : op == 2 ? (p != q) : (p == q);
+}`;
+
+// A material's TEV program (texp.ts compileTExp, runTev: the same table, run the same way): each stage's inputs
+// fetched by their codes (kind | part << 3 | index << 6), its color and alpha through tev4 / tevCmp, the result of
+// each kept for the stages after. Reads uMatI and uMatF (MAT_DECL), and tevTx (each sampler's texel) and tevRas
+// (the two rasterized colors), set before it runs.
+const TEV_PROG_GLSL = `
+ivec4 tevTx[4];
+ivec4 tevRas[2];
+ivec4 tevRes[${MAX_TEV}];
+// a constant (texp.ts CNST_*): the diffuse color, the alpha, the specular color, a sampler's blend, its own TEV colors
+ivec4 tevCnst(int id) {
+  if (id == ${CNST_DIFFUSE}) return ivec4(bytes(uMatF[0]).rgb, 255);
+  if (id == ${CNST_ALPHA}) return ivec4(bytes1(uMatF[5].z));
+  if (id == ${CNST_SPECULAR}) return ivec4(bytes(uMatF[2]).rgb, 255);
+  if (id < ${CNST_TEXREG}) return ivec4(bytes1(uMatF[3][id - ${CNST_BLEND}]));
+  return bytes(uMatF[18 + id - ${CNST_TEXREG}]);
+}
+ivec4 tevIn(int x, int tex, int chan) {
+  int kind = x & 7, part = (x >> 3) & 7, idx = x >> 6;
+  ivec4 v;
+  if (kind == ${IN_VALUE}) return ivec4(idx);
+  else if (kind == ${IN_TEX}) v = tex >= 0 ? tevTx[tex] : ivec4(0);
+  else if (kind == ${IN_RAS}) v = chan >= 0 ? tevRas[chan] : ivec4(0);
+  else if (kind == ${IN_CNST}) v = tevCnst(idx);
+  else if (kind == ${IN_STAGE}) v = tevRes[idx];
+  else return ivec4(0);
+  if (part == 0) return v;
+  return ivec4(part == 1 ? v.r : part == 2 ? v.g : part == 3 ? v.b : v.a);
+}
+ivec4 tevProgram() {
+  ivec4 h = uMatI[2];
+  for (int k = 0; k < ${MAX_TEV}; k++) {
+    if (k >= h.x) break;
+    ivec4 ci = uMatI[3 + k * 3], ai = uMatI[4 + k * 3], md = uMatI[5 + k * 3];
+    int tex = md.z, ch = md.w, cm = md.x, am = md.y;
+    ivec4 A = tevIn(ci.x, tex, ch), B = tevIn(ci.y, tex, ch), C = tevIn(ci.z, tex, ch), D = tevIn(ci.w, tex, ch);
+    ivec4 o = ivec4(0);
+    if ((cm & 512) != 0) {
+      int op = cm & 15;
+      bool cl = (cm & 256) != 0;
+      o.rgb = op >= 8 ? tevCmp(op, A, B, C, D, false, cl).rgb : tev4(A, B, C, D, ivec4(op), (cm >> 4) & 3, (cm >> 6) & 3, cl).rgb;
+    }
+    if ((am & 512) != 0) {
+      ivec4 a = tevIn(ai.x, tex, ch), b = tevIn(ai.y, tex, ch), c = tevIn(ai.z, tex, ch), d = tevIn(ai.w, tex, ch);
+      int op = am & 15;
+      bool cl = (am & 256) != 0;
+      o.a = op >= 8 ? tevCmp(op, ivec4(A.rgb, a.a), ivec4(B.rgb, b.a), ivec4(0, 0, 0, c.a), ivec4(0, 0, 0, d.a), true, cl).a
+                    : tev4(a, b, c, d, ivec4(op), (am >> 4) & 3, (am >> 6) & 3, cl).a;
+    }
+    tevRes[k] = o;
+  }
+  return h.x > 0 ? tevRes[h.y] : ivec4(0);
+}`;
 
 const VS = `#version 300 es
 in vec3 aPos; in vec3 aNrm; in vec2 aUv0; in vec2 aUv1; in vec4 aClr; in float aMtx; in vec3 aBin; in vec3 aTan;
 uniform mat4 uViewProj;
 uniform mat4 uView;
 uniform mat4 uMats[10];
+// what GX is loaded with: each matrix's modelview (the view times the model's
+// matrix, made on the CPU as the game makes it) and the projection
+uniform mat4 uMV[10];
+uniform mat4 uProj;
+// and each one's normal matrix (HSD_MtxInverseTranspose of the modelview: the normals GX lights in view space)
+uniform mat3 uNrm[10];
 uniform float uInflate; // a ghost's outline: pushed out along the normal, world units
 uniform float uPointSize; // a point list's points, pixels across (GX's point size)
 ${MAT_DECL}
@@ -64,7 +200,11 @@ uniform vec3 uAmbLight;
 uniform int uNumLights;
 uniform vec4 uLPos[8]; uniform vec4 uLAxis[8]; uniform vec4 uLCol[8]; uniform vec4 uLA[8]; uniform vec4 uLK[8];
 uniform vec3 uEye;    // the camera, world space
-uniform vec3 uSpecAt; // the drawn joint: the specular half-way vectors are aimed from it
+// the lights as GX is loaded with them for the view drawn through (gxlights.ts): each one's position in view
+// space (an infinite one's 2^20 out, a point), a spot's axis toward it, each specular light's half-way
+// direction for the drawn joint (HSD_LObjSetupSpecularInit), and the color animation light's position
+uniform vec4 uLPosV[8]; uniform vec4 uLAxisV[8]; uniform vec4 uLSpecV[8];
+uniform vec3 uOverPosV;
 // a fighter's color animation (fx/colanim.ts): a light from uOverDir
 // (ftCo_8009F5AC's x588). Mode 1 (x7C_light_enable): a white light added to
 // the fighter's own (its alpha the strength, LOBJ_ALPHA), whose alpha channel
@@ -77,7 +217,7 @@ uniform int uOverMode;
 // (each texture's s, t and q: GX divides by q at each pixel, which a
 // projected texture - the stage's mirror image - needs across big triangles)
 out vec4 vRas0; out vec3 vRas1; out vec3 vT0; out vec3 vT1; out vec3 vT2; out vec3 vT3;
-out vec3 vNrmV; out vec3 vPosV; out vec3 vOverAdd; out vec3 vPosW;
+out vec3 vNrmV; out vec3 vPosV; out float vOverA; out vec3 vPosW;
 out vec2 vBump; // an emboss bump map's coordinates, shifted toward the first diffuse light
 
 vec3 texGen(int i, vec2 uv0, vec2 uv1, vec3 nv, vec4 W) {
@@ -120,70 +260,93 @@ vec3 texGen(int i, vec2 uv0, vec2 uv1, vec3 nv, vec4 W) {
 // and the set's first light only, without the added light
 bool firstLightOnly() { return uOverMode == 1 && (uMatI[0].z & 512) != 0; }
 
-// GX's color channel: the ambient, then each diffuse light by its angle and
-// distance attenuation and the normal's turn to it, clamped
-vec3 diffuseLights(vec3 W, vec3 N) {
-  vec3 L = uAmbLight * uMatF[1].rgb;
+// a color as the bytes it stands for (a value kept as byte / 255)
+ivec3 bytes3(vec3 v) { return ivec3(floor(clamp(v, 0.0, 1.0) * 255.0 + 0.5)); }
+// a light's term into a channel, rounded to the channel's integers
+ivec3 term(float f, vec3 color) { return ivec3(floor(f * vec3(bytes3(color)) + 0.5)); }
+// a channel's output: the material color (white) times the clamped sum (gx.ts chanColor)
+vec3 chanOut(ivec3 acc) { ivec3 l = clamp(acc, 0, 255); return vec3((255 * (l + (l >> 7))) >> 8) / 255.0; }
+
+// GX's color channel, in its integers (gx.ts diffuseChannel): the ambient
+// register (the ambient light times the material's ambient, HSD_MulColor),
+// then each diffuse light by its angle and distance attenuation and the
+// normal's turn to it, each term rounded, the sum clamped
+// (in view space, as GX lights: V the vertex, N its normal through the normal matrix; every light a point - an
+// infinite one 2^20 out - its way to the vertex normalized, its spot attenuation by that way and its axis, its
+// distance attenuation by the distance)
+vec3 toLightV(vec3 p, vec3 V, out float dist) { vec3 v = p - V; dist = length(v); return v / max(dist, 1e-30); }
+vec3 diffuseLights(vec3 V, vec3 N) {
+  ivec3 L = (bytes3(uAmbLight) * bytes3(uMatF[1].rgb)) / 255;
   bool first = firstLightOnly();
   for (int k = 0; k < 8; k++) {
     if (k >= uNumLights || (first && k > 0)) break;
     vec4 a = uLA[k];
     if ((int(a.w) & 1) == 0 || uOverMode == 2) continue;
-    vec4 p = uLPos[k];
-    vec3 ld = p.xyz; float dist = 0.0;
-    if (p.w != 0.0) { vec3 v = p.xyz - W; dist = length(v); ld = v / max(dist, 1e-6); }
-    float c = max(dot(ld, uLAxis[k].xyz), 0.0);
+    float dist;
+    vec3 ld = toLightV(uLPosV[k].xyz, V, dist);
+    float c = max(dot(ld, uLAxisV[k].xyz), 0.0);
     vec3 kk = uLK[k].xyz;
-    float att = max(a.x + a.y * c + a.z * c * c, 0.0) / max(kk.x + kk.y * dist + kk.z * dist * dist, 1e-6);
-    L += uLCol[k].rgb * (att * max(dot(N, ld), 0.0));
+    float att = max(a.x + a.y * c + a.z * c * c, 0.0) / (kk.x + kk.y * dist + kk.z * dist * dist);
+    L += term(att * max(dot(N, ld), 0.0), uLCol[k].rgb);
   }
-  if (uOverMode == 2) L += uOverLight.rgb * max(dot(N, uOverDir), 0.0);
-  else if (uOverMode == 1 && !first) L += vec3(max(dot(N, uOverDir), 0.0));
-  return min(L, vec3(1.0));
+  float od;
+  vec3 ol = toLightV(uOverPosV, V, od);
+  if (uOverMode == 2) L += term(max(dot(N, ol), 0.0), uOverLight.rgb);
+  else if (uOverMode == 1 && !first) L += term(max(dot(N, ol), 0.0), vec3(1.0));
+  return chanOut(L);
 }
 
 // the specular channel: each specular light aimed along the half-way vector
 // between it and the eye as seen from the joint, attenuated by the material's
 // shininess as GX's specular lights are
-vec3 specularLights(vec3 W, vec3 N) {
-  vec3 S = vec3(0.0);
-  if (uOverMode == 2 || firstLightOnly()) return S;
-  vec3 cdir = normalize(uSpecAt - uEye);
+vec3 specularLights(vec3 V, vec3 N) {
+  ivec3 S = ivec3(0);
+  if (uOverMode == 2 || firstLightOnly()) return vec3(0.0);
   float k0 = 0.5 * uMatF[1].w, k2 = 1.0 - k0;
   for (int k = 0; k < 8; k++) {
     if (k >= uNumLights) break;
     if ((int(uLA[k].w) & 2) == 0) continue;
-    vec4 p = uLPos[k];
-    vec3 lv = p.w == 0.0 ? -p.xyz : normalize(uSpecAt - p.xyz);
-    vec3 h = -normalize(lv + cdir);
-    vec3 ld = p.w == 0.0 ? p.xyz : normalize(p.xyz - W);
+    // (GX_AF_SPEC: the light's direction - the half-way one - against the normal, where the light is in front)
+    vec3 h = uLSpecV[k].xyz;
+    float dist;
+    vec3 ld = toLightV(uLPosV[k].xyz, V, dist);
     float nl = dot(N, ld);
     float c = nl >= 0.0 ? max(dot(N, h), 0.0) : 0.0;
     float att = c * c / max(k0 + k2 * c * c, 1e-6);
-    S += uLCol[k].rgb * (att * max(nl, 0.0));
+    S += term(att * max(nl, 0.0), uLCol[k].rgb);
   }
-  return min(S, vec3(1.0));
+  return chanOut(S);
 }
 
 void main() {
-  mat4 M = uMats[int(aMtx + 0.5)];
+  int mi = int(aMtx + 0.5);
+  mat4 M = uMats[mi];
   vec3 n = mat3(M) * aNrm;
   vec3 N = normalize(n + vec3(0.0, 0.0, 1e-9));
   vec4 w = M * vec4(aPos, 1.0);
   if (uInflate > 0.0) w.xyz += normalize(n + vec3(0.0, 0.0, 1e-4)) * uInflate;
-  vec3 nv = normalize(mat3(uView) * N);
+  // (the vertex and its normal as GX has them: through the modelview and its normal matrix)
+  vec3 pv = (uMV[mi] * vec4(aPos, 1.0)).xyz;
+  vec3 nv = normalize(uNrm[mi] * aNrm + vec3(0.0, 0.0, 1e-30));
   vNrmV = nv;
-  vPosV = (uView * w).xyz;
+  vPosV = pv;
   vPosW = w.xyz;
   ivec4 m0 = uMatI[0];
   vRas0 = vec4(1.0);
   if (m0.y == 1) vRas0 = aClr;
-  else if (m0.y == 2) vRas0 = vec4(diffuseLights(w.xyz, N), 1.0);
-  vRas1 = (m0.z & 4) != 0 ? specularLights(w.xyz, N) : vec3(0.0);
+  else if (m0.y == 2) vRas0 = vec4(diffuseLights(pv, nv), 1.0);
+  vRas1 = (m0.z & 4) != 0 ? specularLights(pv, nv) : vec3(0.0);
   // (the added color is the light's times the rasterized alpha, GX_CC_RASA: a lit material's alpha channel is
   // lit by the added light alone (LOBJ_ALPHA); an unlit one's is its vertex alpha or its material's)
-  float rasA = m0.y == 2 ? uOverLight.a * max(dot(N, uOverDir), 0.0) : m0.y == 1 ? aClr.a : uMatF[0].a;
-  vOverAdd = uOverMode == 1 ? uOverLight.rgb * rasA : vec3(0.0);
+  // (the alpha channel's byte: the light's alpha by the turn, through the channel; the fragment shader adds
+  // the light's color times it, ftMaterial_800BF534's stage)
+  float od;
+  vec3 ol = toLightV(uOverPosV, pv, od);
+  float rasA = m0.y == 2 ? chanOut(term(max(dot(nv, ol), 0.0), vec3(uOverLight.a))).x : m0.y == 1 ? aClr.a : uMatF[0].a;
+  vOverA = uOverMode == 1 ? rasA : -1.0;
+  // (and that lit alpha is the rasterized alpha the material's alpha stage takes, lerp(0, alpha, ras.a), as it
+  // is the color's: while the light adds, a lit material's alpha is its alpha times the light's alpha by the turn)
+  if (m0.y == 2 && uOverMode == 1) vRas0.a = rasA;
   vT0 = texGen(0, aUv0, aUv1, nv, w);
   vT1 = texGen(1, aUv0, aUv1, nv, w);
   vT2 = texGen(2, aUv0, aUv1, nv, w);
@@ -205,7 +368,8 @@ void main() {
     vec2 base = b3.xy / b3.z;
     vBump = base + vec2(dot(mat3(M) * aTan, L), dot(mat3(M) * aBin, L));
   }
-  gl_Position = uViewProj * w;
+  // (a ghost's outline is pushed out in the world: the one draw not through the modelview)
+  gl_Position = uInflate > 0.0 ? uViewProj * w : uProj * (uMV[mi] * vec4(aPos, 1.0));
   gl_PointSize = uPointSize;
 }`;
 
@@ -213,7 +377,7 @@ const FS = `#version 300 es
 precision highp float;
 precision highp int;
 in vec4 vRas0; in vec3 vRas1; in vec3 vT0; in vec3 vT1; in vec3 vT2; in vec3 vT3;
-in vec3 vNrmV; in vec3 vPosV; in vec3 vOverAdd; in vec2 vBump; in vec3 vPosW;
+in vec3 vNrmV; in vec3 vPosV; in float vOverA; in vec2 vBump; in vec3 vPosW;
 uniform sampler2D uTex0; uniform sampler2D uTex1; uniform sampler2D uTex2; uniform sampler2D uTex3;
 // the fighters' shadows (shadow.ts): each a picture and its world-to-(s, t)
 // matrix, laid on a material that takes them (RENDER_SHADOW); and a shadow
@@ -229,142 +393,46 @@ uniform vec4 uFlat; // one flat color (a ghost's outline), when a > 0
 uniform vec4 uOutline; // the lit color toward rgb by a, when a > 0 (Mr. Game & Watch's outline: ftmaterial.c)
 uniform float uFlash; // toward white (an L-cancel's flash), 0..1
 uniform vec4 uOverColor; // a color animation's color, blended over by its alpha
-uniform vec4 uFog; // GX fog: type (0 none), start, end (eye depth)
-uniform vec3 uFogColor;
+uniform vec4 uOverLight; // the color animation's added light (its color laid on where its alpha falls)
+${FOG_GLSL}
 out vec4 outColor;
 
-// a texture's own TEV stage (HSD_TObjTevDesc): GX_CC_* / GX_CA_* inputs, or
-// TOBJ_TEV_* picks of its konst, tev0 and tev1 colors
-vec3 tevC(int code, vec4 t, int i) {
-  if (code == 8) return t.rgb;
-  if (code == 9) return vec3(t.a);
-  if (code == 12) return vec3(1.0);
-  if (code == 13) return vec3(0.5);
-  if (code < 0x80) return vec3(0.0);
-  vec4 k = uMatF[18 + i * 3], r0 = uMatF[19 + i * 3], r1 = uMatF[20 + i * 3];
-  if (code == 0x80) return k.rgb;
-  if (code == 0x81) return vec3(k.r);
-  if (code == 0x82) return vec3(k.g);
-  if (code == 0x83) return vec3(k.b);
-  if (code == 0x84) return vec3(k.a);
-  if (code == 0x85) return r0.rgb;
-  if (code == 0x86) return vec3(r0.a);
-  if (code == 0x87) return r1.rgb;
-  if (code == 0x88) return vec3(r1.a);
-  return vec3(0.0);
-}
-float tevA(int code, vec4 t, int i) {
-  if (code == 4) return t.a;
-  if (code < 0x40) return 0.0;
-  vec4 k = uMatF[18 + i * 3], r0 = uMatF[19 + i * 3], r1 = uMatF[20 + i * 3];
-  if (code == 0x40) return k.r;
-  if (code == 0x41) return k.g;
-  if (code == 0x42) return k.b;
-  if (code == 0x43) return k.a;
-  if (code == 0x44) return r0.a;
-  if (code == 0x45) return r1.a;
-  return 0.0;
-}
-int byteOf(int v, int b) { return (v >> (8 * b)) & 0xff; }
-vec4 tevStep(vec4 d, vec4 abc0, vec4 abc1, vec4 c, int mode) {
-  // d + lerp(a, b, c) (or minus), biased, scaled, clamped
-  vec4 m = mix(abc0, abc1, c);
-  vec4 v = (mode & 15) == 1 ? d - m : d + m;
-  int bias = (mode >> 4) & 3, scale = (mode >> 6) & 3;
-  if (bias == 1) v += 0.5; else if (bias == 2) v -= 0.5;
-  if (scale == 1) v *= 2.0; else if (scale == 2) v *= 4.0; else if (scale == 3) v *= 0.5;
-  return ((mode >> 8) & 1) != 0 ? clamp(v, 0.0, 1.0) : v;
-}
-vec4 tevPre(int i, vec4 t) {
-  int cm = uMatI[4][i], am = uMatI[5][i];
-  vec4 o = t;
-  if (((cm >> 9) & 1) != 0) {
-    int ci = uMatI[2][i];
-    vec3 a = tevC(byteOf(ci, 0), t, i), b = tevC(byteOf(ci, 1), t, i);
-    vec3 c = tevC(byteOf(ci, 2), t, i), d = tevC(byteOf(ci, 3), t, i);
-    o.rgb = tevStep(vec4(d, 0.0), vec4(a, 0.0), vec4(b, 0.0), vec4(c, 0.0), cm).rgb;
-  }
-  if (((am >> 9) & 1) != 0) {
-    int ai = uMatI[3][i];
-    float a = tevA(byteOf(ai, 0), t, i), b = tevA(byteOf(ai, 1), t, i);
-    float c = tevA(byteOf(ai, 2), t, i), d = tevA(byteOf(ai, 3), t, i);
-    o.a = tevStep(vec4(d), vec4(a), vec4(b), vec4(c), am).a;
-  }
-  return o;
-}
-vec4 sampleTex(int i) {
+${TEV_GLSL}
+${TEV_PROG_GLSL}
+// a texel as the TEV takes it: round(t * 255)
+ivec4 sampleTex(int i) {
   float bias = uMatF[4][i];
   vec4 t;
   if (i == 0) t = texture(uTex0, vT0.xy / vT0.z, bias);
   else if (i == 1) t = texture(uTex1, vT1.xy / vT1.z, bias);
   else if (i == 2) t = texture(uTex2, vT2.xy / vT2.z, bias);
   else t = texture(uTex3, vT3.xy / vT3.z, bias);
-  return tevPre(i, t);
-}
-// a texture's color map and alpha map (HSD's TObjMakeTExp), laid on
-vec3 colorMap(int op, vec3 c, vec4 t, float b) {
-  if (op == 1) return mix(c, t.rgb, t.a);
-  if (op == 2) return mix(c, t.rgb, t.rgb);
-  if (op == 3) return mix(c, t.rgb, b);
-  if (op == 4) return c * t.rgb;
-  if (op == 5) return t.rgb;
-  if (op == 7) return c + t.rgb;
-  if (op == 8) return c - t.rgb;
-  return c;
-}
-float alphaMap(int op, float a, float t, float b) {
-  if (op == 1) return mix(a, t, t);
-  if (op == 2) return mix(a, t, b);
-  if (op == 3) return a * t;
-  if (op == 4) return t;
-  if (op == 6) return a + t;
-  if (op == 7) return a - t;
-  return a;
-}
-bool cmp(int f, float a, float r) {
-  if (f == 0) return false;
-  if (f == 1) return a < r;
-  if (f == 2) return a == r;
-  if (f == 3) return a <= r;
-  if (f == 4) return a > r;
-  if (f == 5) return a != r;
-  if (f == 6) return a >= r;
-  return true;
+  return bytes(t);
 }
 void main() {
   if (uCast.a > 0.0) { outColor = vec4(uCast.rgb, 1.0); return; }
   ivec4 m0 = uMatI[0];
-  int nSt = m0.x, flags = m0.z;
-  vec4 tx[4];
-  for (int i = 0; i < 4; i++) tx[i] = uMatI[1][i] >= 0 ? sampleTex(i) : vec4(0.0);
-  vec3 c = (flags & 1) != 0 ? vRas0.rgb : uMatF[0].rgb;
-  float a = (flags & 1) != 0 ? vRas0.a : uMatF[0].a;
-  vec3 sp = uMatF[2].rgb;
-  for (int phase = 0; phase < 4; phase++) {
-    if (phase == 1 && (flags & 4) == 0) continue;
-    for (int s = 0; s < 8; s++) {
-      if (s >= nSt) break;
-      int d = s < 4 ? uMatI[6][s] : uMatI[7][s - 4];
-      if (((d >> 10) & 3) != phase) continue;
-      int i = d & 3;
-      vec4 t = tx[i];
-      float b = uMatF[3][i];
-      int am = ((d >> 6) & 15) - 1;
-      if (phase == 1) sp = clamp(colorMap((d >> 2) & 15, sp, t, b), 0.0, 1.0);
-      else c = clamp(colorMap((d >> 2) & 15, c, t, b), 0.0, 1.0);
-      if (am >= 0) a = clamp(alphaMap(am, a, t.a, b), 0.0, 1.0);
-    }
-    // after the diffuse textures, the lighting; after the specular ones, the
-    // specular term added
-    if (phase == 0 && (flags & 2) != 0) { c *= vRas0.rgb; a *= vRas0.a; }
-    if (phase == 1) c = clamp(c + clamp(sp * vRas1, 0.0, 1.0), 0.0, 1.0);
-    // after everything HSD compiled, the emboss: plus the map, minus the map
-    // shifted toward the light, both times the lit color
-    int bs = ((flags >> 4) & 7) - 1;
-    if (phase == 2 && bs >= 0) {
-      vec4 u = bs == 0 ? texture(uTex0, vBump) : bs == 1 ? texture(uTex1, vBump) : bs == 2 ? texture(uTex2, vBump) : texture(uTex3, vBump);
-      c = clamp(c + tx[bs].rgb * vRas0.rgb - u.rgb * vRas0.rgb, 0.0, 1.0);
-    }
+  int flags = m0.z;
+  for (int i = 0; i < 4; i++) tevTx[i] = uMatI[1][i] >= 0 ? sampleTex(i) : ivec4(0);
+  // (the TEV, HSD_TExpCompile's stages in bytes: gx.ts evalMaterial)
+  ivec4 r0 = bytes(vRas0);
+  tevRas[0] = r0; tevRas[1] = ivec4(bytes(vec4(vRas1, 1.0)).rgb, 255);
+  ivec4 res = tevProgram();
+  ivec3 ci = res.rgb;
+  int ai = res.a;
+  // after everything HSD compiled, the emboss (SetupEmbossBumpTev): plus the
+  // map times the lit color unclamped, minus the map shifted toward the light
+  int bs = ((flags >> 4) & 7) - 1;
+  if (bs >= 0) {
+    vec4 u = bs == 0 ? texture(uTex0, vBump) : bs == 1 ? texture(uTex1, vBump) : bs == 2 ? texture(uTex2, vBump) : texture(uTex3, vBump);
+    ci = tev4(ivec4(0), ivec4(tevTx[bs].rgb, 0), r0, ivec4(ci, 0), ivec4(0), 0, 0, false).rgb;
+    ci = tev4(ivec4(0), ivec4(bytes(u).rgb, 0), r0, ivec4(ci, 0), ivec4(1), 0, 0, true).rgb;
+  }
+  // a texture the game made a shadow-style projection of: the color times its texel (the stages' phase 3)
+  ivec4 h = uMatI[2];
+  for (int s = 0; s < 4; s++) {
+    if (s >= h.z) break;
+    ci = tev4(ivec4(0), ivec4(ci, 0), tevTx[(h.w >> (s * 2)) & 3], ivec4(0), ivec4(0), 0, 0, true).rgb;
   }
   // the shadows, after all of the material's own stages: its color times
   // each one's texel (HSD_TObjSetupVolatileTev's TObjSetupTevModulateShadow)
@@ -373,31 +441,31 @@ void main() {
       if (k >= uShadowN) break;
       if (((uShadowMask >> k) & 1) == 0) continue;
       vec2 st = (uShadowM[k] * vec4(vPosW, 1.0)).xy;
-      vec3 s = k == 0 ? textureLod(uShadow0, st, 0.0).rgb : k == 1 ? textureLod(uShadow1, st, 0.0).rgb
-             : k == 2 ? textureLod(uShadow2, st, 0.0).rgb : textureLod(uShadow3, st, 0.0).rgb;
-      c = clamp(c * s, 0.0, 1.0);
+      vec4 s = k == 0 ? textureLod(uShadow0, st, 0.0) : k == 1 ? textureLod(uShadow1, st, 0.0)
+             : k == 2 ? textureLod(uShadow2, st, 0.0) : textureLod(uShadow3, st, 0.0);
+      ci = tev4(ivec4(0), ivec4(ci, 0), bytes(s), ivec4(0), ivec4(0), 0, 0, true).rgb;
     }
   }
-  // (the overlay light's added color: ftMaterial_800BF534 lays it on opaque materials only)
-  if ((flags & 512) == 0) c += vOverAdd;
-  if (uOverColor.a > 0.0) c = mix(clamp(c, 0.0, 1.0), uOverColor.rgb, uOverColor.a);
-  // the alpha test, on the 8-bit alpha
-  float a8 = floor(clamp(a, 0.0, 1.0) * 255.0 + 0.5);
+  // (the overlay light's added color, prev + konst x ras.a: ftMaterial_800BF534 lays it on opaque materials only)
+  if ((flags & 512) == 0 && vOverA >= 0.0)
+    ci = tev4(ivec4(0), ivec4(bytes(uOverLight).rgb, 0), ivec4(bytes1(vOverA)), ivec4(ci, 0), ivec4(0), 0, 0, true).rgb;
+  // a color animation's color, toward it by its alpha; an outline's the same (ftMaterial_800BF6BC)
+  if (uOverColor.a > 0.0)
+    ci = tev4(ivec4(ci, 0), ivec4(bytes(uOverColor).rgb, 0), ivec4(bytes1(uOverColor.a)), ivec4(0), ivec4(0), 0, 0, true).rgb;
+  if (uOutline.a > 0.0)
+    ci = tev4(ivec4(ci, 0), ivec4(bytes(uOutline).rgb, 0), ivec4(bytes1(uOutline.a)), ivec4(0), ivec4(0), 0, 0, true).rgb;
+  // what leaves the last stage for the pixel engine: the register's low 8 bits
+  ci &= 255; ai &= 255;
+  // the alpha test, on the alpha's byte
   int at = m0.w;
-  bool p0 = cmp(at & 7, a8, uMatF[5].x), p1 = cmp((at >> 3) & 7, a8, uMatF[5].y);
-  int op = (at >> 6) & 3;
-  if (!(op == 0 ? (p0 && p1) : op == 1 ? (p0 || p1) : op == 2 ? (p0 != p1) : (p0 == p1))) discard;
-  c = clamp(c, 0.0, 1.0);
-  if (uFog.x > 0.0) {
-    int ft = int(uFog.x) & 7;
-    float f = max((-vPosV.z - uFog.y) / max(uFog.z - uFog.y, 1e-6), 0.0);
-    float k = ft == 2 ? f : ft == 4 ? 1.0 - exp2(-8.0 * f) : ft == 5 ? 1.0 - exp2(-8.0 * f * f)
-            : ft == 6 ? exp2(-8.0 * (1.0 - f)) : ft == 7 ? exp2(-8.0 * (1.0 - f) * (1.0 - f)) : 0.0;
-    c = mix(c, uFogColor, clamp(k, 0.0, 1.0));
-  }
-  a = clamp(a, 0.0, 1.0);
+  if (!alphaPass(ai, at & 7, int(uMatF[5].x + 0.5), (at >> 6) & 3, (at >> 3) & 7, int(uMatF[5].y + 0.5))) discard;
+  // the fog, on the 8-bit color at the pixel's 24-bit depth (fog.ts)
+  ci = gxFogI(ci);
+  vec3 c = vec3(ci) / 255.0;
+  float a = float(ai) / 255.0;
   if (uFlat.a > 0.0) { outColor = uFlat; return; }
-  if (uOutline.a > 0.0) { outColor = vec4(mix(c, uOutline.rgb, uOutline.a), a); return; }
+  // (an outline's color was laid on in the TEV; nothing after it but the fog)
+  if (uOutline.a > 0.0) { outColor = vec4(c, a); return; }
   if (uTint.a > 0.0) {
     // a ghost: the model's shading in the ghost's color at full strength (a
     // dark green read as a hole in the stage), and a white rim at the edges,
@@ -424,43 +492,34 @@ void main() {
 }`;
 const PARTICLE_FS = `#version 300 es
 precision highp float;
+precision highp int;
 in vec2 vUv; in vec4 vPrim; in vec4 vEnv; flat in vec3 vCmp; flat in float vTex;
 uniform sampler2D uTex;
 out vec4 outColor;
-bool cmp(int f, float a, float r) {
-  if (f == 0) return false;
-  if (f == 1) return a < r;
-  if (f == 2) return a == r;
-  if (f == 3) return a <= r;
-  if (f == 4) return a > r;
-  if (f == 5) return a != r;
-  if (f == 6) return a >= r;
-  return true;
-}
+${TEV_GLSL}
 void main() {
-  vec4 c = vPrim;
+  // (psdisptev.c's stage: lerp(env, prim, texel); without a texture, the primitive color)
+  ivec4 c = bytes(vPrim);
   if (vTex > 0.5) {
     // mirrored repeat, as the game's MirrorS/T texture coordinates want
     vec2 uv = 1.0 - abs(mod(vUv, 2.0) - 1.0);
-    vec4 t = texture(uTex, uv);
-    c = mix(vEnv, vPrim, t);
+    c = tev4(bytes(vEnv), c, bytes(texture(uTex, uv)), ivec4(0), ivec4(0), 0, 0, true);
   }
   int mode = int(vCmp.x + 0.5);
-  float a = floor(clamp(c.a, 0.0, 1.0) * 255.0 + 0.5);
-  bool p0 = cmp((mode >> 3) & 7, a, vCmp.y), p1 = cmp(mode & 7, a, vCmp.z);
-  int op = (mode >> 6) & 3;
-  bool pass = op == 0 ? (p0 && p1) : op == 1 ? (p0 || p1) : op == 2 ? (p0 != p1) : (p0 == p1);
-  if (!pass) discard;
-  outColor = clamp(c, 0.0, 1.0);
+  if (!alphaPass(c.a, (mode >> 3) & 7, int(vCmp.y + 0.5), (mode >> 6) & 3, mode & 7, int(vCmp.z + 0.5))) discard;
+  outColor = vec4(c) / 255.0;
 }`;
+
+/** the programs' sources (the tests compile them in a browser) */
+export const SHADERS = { VS, FS, PARTICLE_VS, PARTICLE_FS, TEV_GLSL, TEV_PROG_GLSL, MAT_DECL, MATF, MATI };
 
 // the model programs' attribute slots (the meshes' vertex arrays serve both),
 // the uniforms looked up once they are linked, and the particles' slots
 const ATTRS = ["aPos", "aNrm", "aUv0", "aUv1", "aClr", "aMtx", "aBin", "aTan"];
-const UNIFORMS = ["uViewProj", "uView", "uMats", "uAmbLight", "uNumLights", "uLPos", "uLAxis",
-                  "uLCol", "uLA", "uLK", "uEye", "uSpecAt", "uTint", "uTex0", "uTex1", "uTex2", "uTex3", "uInflate",
+const UNIFORMS = ["uViewProj", "uView", "uMats", "uMV", "uProj", "uAmbLight", "uNumLights", "uLPos", "uLAxis",
+                  "uLCol", "uLA", "uLK", "uEye", "uNrm", "uLPosV", "uLAxisV", "uLSpecV", "uOverPosV", "uTint", "uTex0", "uTex1", "uTex2", "uTex3", "uInflate",
                   "uFlat", "uOutline", "uFlash", "uOverColor", "uOverLight", "uOverDir", "uOverMode",
-                  "uFog", "uFogColor", "uPointSize", "uShadow0", "uShadow1", "uShadow2", "uShadow3", "uShadowM",
+                  "uFogI", "uFogF", "uFogColor", "uPointSize", "uShadow0", "uShadow1", "uShadow2", "uShadow3", "uShadowM",
                   "uShadowN", "uShadowMask", "uCast"];
 const PARTICLE_ATTRS = ["aPos", "aUv", "aPrim", "aEnv", "aCmp", "aTex"];
 /** a particle quad buffer's layout (17 floats a vertex), into the vertex array bound */
@@ -1186,12 +1245,15 @@ void main() {
    *  the depth cleared (the HUD: the game draws it with cameras of its own,
    *  over the match), or into a target, cleared to a color first (the
    *  magnifier's picture). endOverlay() puts the match camera back. */
-  overlay(viewProj: Mat, view: Mat, target: RenderTarget | null = null, clear: [number, number, number, number] | null = null,
+  overlay(proj: Mat, view: Mat, target: RenderTarget | null = null, clear: [number, number, number, number] | null = null,
           mirrored = false) {
     const gl = this.gl;
     this.endPass();
     // (a camera that turns the picture over turns the faces' winding too)
     this.mirrored = mirrored;
+    this.ovProj.set(proj);
+    this.ovView.set(view);
+    const viewProj = mul(this.ovVP, this.ovProj, this.ovView);
     this.overlayVP = viewProj;
     this.setCull(viewProj);
     if (target) {
@@ -1202,13 +1264,18 @@ void main() {
     if (clear) gl.clearColor(clear[0], clear[1], clear[2], clear[3]);
     gl.clear(gl.DEPTH_BUFFER_BIT | (clear ? gl.COLOR_BUFFER_BIT : 0));
     gl.uniformMatrix4fv(this.loc.uViewProj, false, viewProj);
-    gl.uniformMatrix4fv(this.loc.uView, false, view);
-    this.camera(viewProj, view);
+    gl.uniformMatrix4fv(this.loc.uView, false, this.ovView);
+    gl.uniformMatrix4fv(this.loc.uProj, false, this.ovProj);
+    this.camera(viewProj, this.ovView, this.ovProj);
     this.dirty();
   }
 
   private mirrored = false;
   private overlayVP: Mat | null = null;
+  /** an overlay's camera, as it was handed over */
+  private ovProj: Mat = new Float32Array(16);
+  private ovView: Mat = new Float32Array(16);
+  private ovVP: Mat = new Float32Array(16);
 
   // ---- a shift of what is drawn next, in world units: a fighter's hitlag
   // shake. The game adds it to the camera's view for the fighter's draw
@@ -1217,13 +1284,24 @@ void main() {
   /** the camera draws go through now (the frame's, an overlay's, the mirror's) */
   private camVP: Mat = new Float32Array(16);
   private camView: Mat = new Float32Array(16);
+  /** the projection uploaded for it (uProj), and the GX projection it was made from when there is one */
+  private camProj: Mat = new Float32Array(16);
+  private camGx: Float32Array | null = null;
+  /** the frame camera's GX projection (row major, as C_MTXPerspective makes it), or null */
+  private gxFrame: Float32Array | null = null;
+  private gxFrameBuf = new Float32Array(16);
   private shiftVP: Mat = new Float32Array(16);
   private shiftView: Mat = new Float32Array(16);
   private shifted = false;
-  private camera(vp: Mat, view: Mat) {
+  /** a count of the views draws have gone through: a drawable's modelview is made again under another */
+  private viewVer = 0;
+  private camera(vp: Mat, view: Mat, proj: Mat) {
     this.camVP = vp;
     this.camView = view;
+    this.camProj = proj;
+    this.camGx = proj === this.proj ? this.gxFrame : null;
     this.shifted = false;
+    this.viewVer++;
   }
   /** move what is drawn from now on by (dx, dy) in the world; (0, 0) ends it */
   shiftDraws(dx: number, dy: number) {
@@ -1231,12 +1309,14 @@ void main() {
     if (!dx && !dy) {
       if (!this.shifted) return;
       this.shifted = false;
+      this.viewVer++;
       gl.uniformMatrix4fv(this.loc.uViewProj, false, this.camVP);
       gl.uniformMatrix4fv(this.loc.uView, false, this.camView);
       this.setCull(this.camVP);
       return;
     }
     this.shifted = true;
+    this.viewVer++;
     // M x translate(dx, dy, 0): M's last column gains dx its first and dy its second
     const at = (out: Mat, m: Mat) => {
       out.set(m);
@@ -1259,7 +1339,8 @@ void main() {
     this.bindPicture();
     gl.uniformMatrix4fv(this.loc.uViewProj, false, this.viewProj);
     gl.uniformMatrix4fv(this.loc.uView, false, this.view);
-    this.camera(this.viewProj, this.view);
+    gl.uniformMatrix4fv(this.loc.uProj, false, this.proj);
+    this.camera(this.viewProj, this.view, this.proj);
     this.dirty();
   }
 
@@ -1312,8 +1393,8 @@ void main() {
    *  pixels it covers, when the browser says - with a CRT on (crt.ts), the
    *  canvas takes exactly those, so the grille's stripes land on the screen's
    *  own pixels (the scene is drawn at 640 x 480 then, whatever the canvas) */
-  begin(viewProj: Mat, view: Mat, clear: [number, number, number], cssW: number, cssH: number,
-        device?: [number, number]) {
+  begin(proj: Mat, view: Mat, clear: [number, number, number], cssW: number, cssH: number,
+        device?: [number, number], gxProj: Float32Array | null = null, nearFar: [number, number] | null = null) {
     const gl = this.gl;
     // (its size follows the element, the screen's pixel ratio counted, within a cap: drawsize.ts)
     if (this.maxDim === 0) {
@@ -1339,12 +1420,16 @@ void main() {
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);
-    this.viewProj.set(viewProj);
+    this.proj.set(proj);
     this.view.set(view);
-    this.camera(this.viewProj, this.view);
+    this.gxFrame = gxProj ? (this.gxFrameBuf.set(gxProj), this.gxFrameBuf) : null;
+    this.frameNearFar = nearFar;
+    mul(this.viewProj, this.proj, this.view);
+    this.camera(this.viewProj, this.view, this.proj);
     this.setCull(this.viewProj);
     this.culled = 0;
-    mul(this.proj, viewProj, invert(tmpM, view));
+    this.bbFrame = billboardViewOf(this.view);
+    invert(tmpM, view);
     this.eye = [tmpM[12], tmpM[13], tmpM[14]];
     gl.useProgram(this.prog);
     this.frameUniforms(this.loc);
@@ -1360,6 +1445,7 @@ void main() {
     const gl = this.gl;
     gl.uniformMatrix4fv(l.uViewProj, false, this.viewProj);
     gl.uniformMatrix4fv(l.uView, false, this.view);
+    gl.uniformMatrix4fv(l.uProj, false, this.proj);
     gl.uniform3f(l.uEye, this.eye[0], this.eye[1], this.eye[2]);
     gl.uniform4f(l.uTint, 0, 0, 0, 0);
     gl.uniform4f(l.uFlat, 0, 0, 0, 0);
@@ -1459,6 +1545,11 @@ void main() {
     if (li) {
       gl.uniform4f(l.uOverLight, li.rgb[0], li.rgb[1], li.rgb[2], li.a);
       gl.uniform3f(l.uOverDir, li.dir[0], li.dir[1], li.dir[2]);
+      const od = this.overDir;
+      if (!od || od[0] !== li.dir[0] || od[1] !== li.dir[1] || od[2] !== li.dir[2]) {
+        this.overDir = [li.dir[0], li.dir[1], li.dir[2]];
+        this.overVer++;
+      }
     }
   }
   private tinted = true;
@@ -1485,12 +1576,29 @@ void main() {
     gl.uniform4fv(loc.uLK, l.attnK);
   }
 
-  /** the fog the draws that follow are in (null: none, as the game's effects are) */
-  setFog(f: Fog | null) {
+  /** the fog the draws that follow are in (null: none, as the game's effects are): packed as GXSetFog packs it
+   *  (fog.ts), with the near and far of the camera drawn through now (HSD_FogSet: HSD_CObjGetNear, GetFar) unless
+   *  they are given */
+  setFog(f: Fog | null, near?: number, far?: number) {
     const gl = this.gl, l = this.loc;
-    gl.uniform4f(l.uFog, f ? f.type : 0, f?.start ?? 0, f?.end ?? 0, 0);
-    if (f) gl.uniform3f(l.uFogColor, f.color[0], f.color[1], f.color[2]);
+    let r = NO_FOG;
+    if (f) {
+      // (the camera's own near and far, as its CObj has them, when the frame's camera is the game's; else
+      // taken back from the projection)
+      const [n, fa] = near !== undefined && far !== undefined ? [near, far]
+        : this.frameNearFar && this.camProj === this.proj ? this.frameNearFar : nearFar(this.camProj);
+      r = gxSetFog(f.type, f.start, f.end, n, fa, [0, 1, 2].map((i) => Math.round(Math.min(Math.max(f.color[i], 0), 1) * 255)) as
+        [number, number, number]);
+    }
+    this.fogRegs = r;
+    gl.uniform4i(l.uFogI, r.fsel, r.bMag, r.bShift, r.proj);
+    gl.uniform2f(l.uFogF, r.a, r.c);
+    gl.uniform3i(l.uFogColor, r.color[0], r.color[1], r.color[2]);
   }
+  /** the frame camera's near and far planes, when it is the game's */
+  private frameNearFar: [number, number] | null = null;
+  /** the fog's registers as last packed and uploaded */
+  private fogRegs: FogRegs = NO_FOG;
 
   /** a debug aid (?debug=flat): what is drawn next in one flat color, over
    *  every pixel the material lets through, or back to its own (null) */
@@ -1513,9 +1621,9 @@ void main() {
    *  shadow camera, every pixel the stage's shadow intensity (0..255) as the
    *  copy keeps it (shadowGray), two pixels in from each edge
    *  (HSD_ShadowStartRender); endShadow() puts the frame back */
-  beginShadow(t: RenderTarget, viewProj: Mat, view: Mat, intensity: number) {
+  beginShadow(t: RenderTarget, proj: Mat, view: Mat, intensity: number) {
     const gl = this.gl;
-    this.overlay(viewProj, view, t, [1, 1, 1, 1]);
+    this.overlay(proj, view, t, [1, 1, 1, 1]);
     this.casting = true;
     const gray = shadowGray(intensity);
     gl.uniform4f(this.loc.uCast, gray, gray, gray, 1);
@@ -1669,6 +1777,8 @@ void main() {
                                            M[o + 4] * M[o + 4] + M[o + 5] * M[o + 5] + M[o + 6] * M[o + 6],
                                            M[o + 8] * M[o + 8] + M[o + 9] * M[o + 9] + M[o + 10] * M[o + 10]));
     }
+    // (a matrix that is not all numbers is drawn as GX would draw it: never culled - the plane tests are false for NaN)
+    for (let k = 0; k < n * 4; k++) if (!Number.isFinite(W[k])) return false;
     for (let q = 0; q < 24; q += 4) {
       let out = true;
       for (let k = 0; k < n && out; k++) {
@@ -1688,9 +1798,6 @@ void main() {
     return !out;
   }
 
-  private setFogUniforms(l: Record<string, WebGLUniformLocation | null>, f: Fog | null) {
-    this.gl.uniform4f(l.uFog, f ? f.type : 0, f?.start ?? 0, f?.end ?? 0, 0);
-  }
 
   private ghostRef = 0;
 
@@ -1758,31 +1865,92 @@ void main() {
   private plainMaterial() {
     const F = this.matF, I = this.matI;
     F.fill(0); I.fill(0);
-    F[0] = F[1] = F[2] = F[3] = 1;
+    F[0] = F[1] = F[2] = F[3] = F[22] = 1;
     I[4] = I[5] = I[6] = I[7] = -1;
     I[3] = 7 | (7 << 3);
+    I[0] = putTev(I, PLAIN_TEV);
     this.uploadMaterial();
   }
 
   /** a drawable's matrices, when they are not the ones already there */
   private mats(d: Drawable) {
-    if (d === this.lastMatsD && d.stamp === this.lastMatsStamp) return;
+    if (d === this.lastMatsD && d.stamp === this.lastMatsStamp && this.viewVer === this.lastMatsView) return;
     // (the same matrices as the draw before - two meshes on one joint - are
     // not sent again)
     const n = d.nMats * 16, L = this.lastMats, M = d.mats;
-    let same = this.lastMatsD !== null && n === this.lastMatsN && n <= L.length;
+    let same = this.lastMatsD !== null && n === this.lastMatsN && n <= L.length && this.viewVer === this.lastMatsView;
     for (let k = 0; same && k < n; k++) if (M[k] !== L[k]) same = false;
     this.lastMatsD = d;
     this.lastMatsStamp = d.stamp;
     if (same) return;
     // only the ones it has: a vertex picks among its own (a rigid part's all
     // pick the first)
-    this.gl.uniformMatrix4fv(this.loc.uMats, false, M, 0, n);
-    this.lastMatsN = n;
+    this.uploadMats(M, d.nMats, d);
     if (n <= L.length) L.set(M.subarray(0, n));
+  }
+  /** model matrices (world) and their modelviews under the camera drawn through now, into the shader: each
+   *  PSMTXConcat(vmtx, model) in float32, as HSD_JObjDisp and SetupEnvelopeModelMtx make what GX is loaded with */
+  private uploadMats(M: Float32Array, count: number, d: Drawable | null = null) {
+    const n = count * 16, V = this.shifted ? this.shiftView : this.camView, MV = this.mvBuf;
+    // (a billboard drawn through the view it was made under: its modelview as the game made it - every slot but a
+    // shared-vertex skin's second joint's)
+    const bb = d && d.bbMV && d.bbMVView === this.bbFrame && !this.shifted && this.camView === this.view ? d.bbMV : null;
+    const N = this.nrmBuf, T = this.nrmTmp;
+    for (let k = 0; k < count; k++) {
+      if (bb && !(k === 1 && d!.second >= 0)) MV.set(bb, k * 16);
+      else concatGL(MV, k * 16, V, 0, M, k * 16);
+      // (and its normal matrix: HSD_MtxInverseTranspose of the modelview, as SetupRigidModelMtx loads it)
+      mtxToGL3(HSD_MtxInverseTranspose(mtxFromGL(MV, T, k * 16), T), N, k * 9);
+    }
+    this.gl.uniformMatrix4fv(this.loc.uMats, false, M, 0, n);
+    this.gl.uniformMatrix4fv(this.loc.uMV, false, MV, 0, n);
+    this.gl.uniformMatrix3fv(this.loc.uNrm, false, N, 0, count * 9);
+    this.lastMatsN = n;
+    this.lastMatsView = this.viewVer;
   }
   private lastMats = new Float32Array(32);
   private lastMatsN = 0;
+  private lastMatsView = -1;
+  /** the billboard view (skeleton.ts) when it is the frame's view, else -1 */
+  private bbFrame = -1;
+  /** the modelviews last uploaded (uMV), the drawable's own: view times each of its matrices */
+  private mvBuf = new Float32Array(160);
+  /** and their normal matrices (uNrm: 3 x 3s, column major) */
+  private nrmBuf = new Float32Array(90);
+  private nrmTmp = new Float32Array(12);
+
+  // ---- the lights as GX is loaded with them for the view drawn through now (gxlights.ts), made again when the
+  // lighting, the view or the color animation's light changes; and each specular joint's half-way directions
+  /** what the uploaded view lights were made from: lighting version, view version, color animation light version */
+  private lightVKey = [-1, -1, -1];
+  private overVer = 0;
+  private overDir: number[] | null = null;
+  /** the view-space lights as uploaded (the draw log reads them) */
+  private lightV: ViewLights = newViewLights();
+  private lightMtx = new Float32Array(12);
+  private specDirs = new Float32Array(32);
+  private specKey = [NaN, NaN, NaN, -1];
+  private specPos = [0, 0, 0];
+  private viewLights() {
+    const l = this.lighting, K = this.lightVKey;
+    if (!l || (K[0] === l.version && K[1] === this.viewVer && K[2] === this.overVer)) return;
+    K[0] = l.version; K[1] = this.viewVer; K[2] = this.overVer;
+    const V = mtxFromGL(this.shifted ? this.shiftView : this.camView, this.lightMtx, 0);
+    const v = lightsInView(l, V, this.overDir, this.lightV);
+    const gl = this.gl, loc = this.loc;
+    gl.uniform4fv(loc.uLPosV, v.pos);
+    gl.uniform4fv(loc.uLAxisV, v.axis);
+    gl.uniform3f(loc.uOverPosV, v.over[0], v.over[1], v.over[2]);
+    this.specKey[3] = -1;
+  }
+  /** the specular lights' half-way directions for a joint at (x, y, z) in the world */
+  private specularAt(x: number, y: number, z: number) {
+    const l = this.lighting, S = this.specKey;
+    if (!l || (S[0] === x && S[1] === y && S[2] === z && S[3] === 1)) return;
+    S[0] = x; S[1] = y; S[2] = z; S[3] = 1;
+    jointInView(this.lightMtx, x, y, z, this.specPos);
+    this.gl.uniform4fv(this.loc.uLSpecV, specularDirs(l, this.lightV, this.specPos, this.specDirs));
+  }
 
   private drawGeometry(d: Drawable) {
     const gl = this.gl;
@@ -1812,14 +1980,13 @@ void main() {
   // (-1: not known - something else set it directly). A frame makes several
   // hundred draws; most share their state with the one before.
   private cs = { cull: -1, blend: -1, src: -1, dst: -1, eq: -1, dmask: -1, dfunc: -1, cmask: -1 };
-  // the texture unit last made active, and the specular point last sent (not known: -1, NaN)
+  // the texture unit last made active (not known: -1)
   private unit = -1;
-  private specX = NaN; private specY = NaN; private specZ = NaN;
   private dirty() {
     const c = this.cs;
     c.cull = c.blend = c.src = c.dst = c.eq = c.dmask = c.dfunc = c.cmask = -1;
     this.unit = -1;
-    this.specX = NaN;
+    this.specKey[3] = -1;
     this.lastMatsD = null;
     this.vaoBound = undefined;
   }
@@ -1974,7 +2141,7 @@ void main() {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.uniformMatrix4fv(this.loc.uViewProj, false, this.mirrorViewProj);
     gl.uniformMatrix4fv(this.loc.uView, false, this.mirrorView);
-    this.camera(this.mirrorViewProj, this.mirrorView);
+    this.camera(this.mirrorViewProj, this.mirrorView, this.proj);
     this.setCull(this.mirrorViewProj);
     // (particles and strips through it too)
     this.overlayVP = this.mirrorViewProj;
@@ -1988,7 +2155,7 @@ void main() {
     this.bindPicture();
     gl.uniformMatrix4fv(this.loc.uViewProj, false, this.viewProj);
     gl.uniformMatrix4fv(this.loc.uView, false, this.view);
-    this.camera(this.viewProj, this.view);
+    this.camera(this.viewProj, this.view, this.proj);
     this.setCull(this.viewProj);
     this.dirty();
     this.endPass();
@@ -2044,26 +2211,18 @@ void main() {
     const bytes = new Uint8Array(MAT_BYTES);
     const F = new Float32Array(bytes.buffer, 0, MATF * 4), I = new Int32Array(bytes.buffer, MATF * 16, MATI * 4);
     I[4] = I[5] = I[6] = I[7] = -1;
-    const pack = (x: number[]) => (x[0] | (x[1] << 8) | (x[2] << 16) | (x[3] << 24)) | 0;
-    const md = (op: number, b: number, sc: number, clamp: number, on: boolean) =>
-      (op & 15) | ((b & 3) << 4) | ((sc & 3) << 6) | (clamp ? 1 << 8 : 0) | (on ? 1 << 9 : 0);
     p.textures.forEach((ti, n) => {
       const t = s.tex[ti].tobj;
       I[4 + n] = p.texGen[n];
       F[16 + n] = t.lod ? t.lod.bias : 0;
-      const tv = t.tev;
-      if (!tv) return;
-      I[8 + n] = pack(tv.colorIn);
-      I[12 + n] = pack(tv.alphaIn);
-      I[16 + n] = md(tv.colorOp, tv.colorBias, tv.colorScale, tv.colorClamp, (tv.active & 0x40000000) !== 0);
-      I[20 + n] = md(tv.alphaOp, tv.alphaBias, tv.alphaScale, tv.alphaClamp, (tv.active & 0x80000000) !== 0);
     });
-    const st = p.stages;
-    for (let k = 0; k < st.length && k < 8; k++) {
-      const q = st[k];
-      I[24 + k] = q.tex | (q.colorMap << 2) | ((q.alphaMap + 1) << 6) | (q.phase << 10);
-    }
-    I[0] = Math.min(st.length, 8);
+    // the TEV program, as texp.ts packs it, and the textures modulated after it (the stages' phase 3)
+    const nTev = putTev(I, p.tev);
+    if (nTev < p.tev.stages.length) console.warn(`a material's TEV has ${p.tev.stages.length} stages: ${MAX_TEV} run`);
+    const late = p.stages.filter((q) => q.phase === 3).slice(0, 4);
+    I[10] = late.length;
+    I[11] = late.reduce((m, q, k) => m | ((q.tex & 3) << (k * 2)), 0);
+    I[0] = nTev;
     I[1] = p.channel;
     I[2] = (p.vertexBase ? 1 : 0) | (p.lit ? 2 : 0) | (p.specular ? 4 : 0) | ((p.bump + 1) << 4) |
            (s.mobj.renderMode & RENDER.SHADOW ? 256 : 0) | (s.mobj.renderMode & RENDER.XLU ? 512 : 0);
@@ -2106,6 +2265,9 @@ void main() {
     if (F[2] !== dif[2]) { F[2] = dif[2]; ch = true; }
     const al = Math.fround(s.alpha);
     if (F[3] !== al) { F[3] = al; ch = true; }
+    // (the alpha as the TEV takes it: HSD_TExpSetReg's byte)
+    const ab = Math.fround(tevScalar(s.alpha));
+    if (F[22] !== ab) { F[22] = ab; ch = true; }
     if (F[4] !== amb[0]) { F[4] = amb[0]; ch = true; }
     if (F[5] !== amb[1]) { F[5] = amb[1]; ch = true; }
     if (F[6] !== amb[2]) { F[6] = amb[2]; ch = true; }
@@ -2144,12 +2306,10 @@ void main() {
       gl.bufferSubData(gl.UNIFORM_BUFFER, 0, c.bytes);
       c.sent = true;
     }
+    this.viewLights();
     if (p.specular && sk) {
       const j = d.jobj.index * 16, W = sk.world;
-      if (W[j + 12] !== this.specX || W[j + 13] !== this.specY || W[j + 14] !== this.specZ) {
-        gl.uniform3f(this.loc.uSpecAt, W[j + 12], W[j + 13], W[j + 14]);
-        this.specX = W[j + 12]; this.specY = W[j + 13]; this.specZ = W[j + 14];
-      }
+      this.specularAt(W[j + 12], W[j + 13], W[j + 14]);
     }
     if (ghost) {
       // a ghost keeps what is at least half there: the material's block, its alpha test changed, through the scratch one
@@ -2187,15 +2347,17 @@ void main() {
     const mats = new Float32Array(16);
     mats[0] = mats[5] = mats[10] = radius; mats[15] = 1;
     mats[12] = center[0]; mats[13] = center[1]; mats[14] = center[2];
-    gl.uniformMatrix4fv(this.loc.uMats, false, mats);
+    this.uploadMats(mats, 1);
+    this.viewLights();
     const F = this.matF, I = this.matI;
     F.fill(0); I.fill(0);
-    F[0] = color[0]; F[1] = color[1]; F[2] = color[2]; F[3] = alpha;
+    F[0] = color[0]; F[1] = color[1]; F[2] = color[2]; F[3] = alpha; F[22] = tevScalar(alpha);
     F[4] = F[5] = F[6] = 1;
     I[4] = I[5] = I[6] = I[7] = -1;
     I[1] = 2; I[2] = 2; I[3] = 7 | (7 << 3);
+    I[0] = putTev(I, LIT_TEV);
     this.uploadMaterial();
-    this.specX = NaN;
+    this.specKey[3] = -1;
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(false);

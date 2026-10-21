@@ -25,7 +25,7 @@ import * as files from "./files";
 import { Hud3D } from "./Hud3D";
 import { CRT_LOOKS, type CrtPreset, isCrtPreset, tubeOutline, unbend } from "./crt";
 import { invert, lookAt, mat, perspective, translation, mul } from "./math";
-import { CAM_STRIDE, CamActor, CameraRun, cameraRun, playerScales } from "./camera";
+import { CAM_ASPECT, CAM_STRIDE, cameraPlanes, CamActor, CameraRun, cameraRun, gameProjection, gameView, playerScales } from "./camera";
 import { chargeShakeAt, floorHeights, HIT_FEEL, hitShakeAt, quakeOf, shakeKindOf } from "./hitlag";
 import { setBillboardView } from "./skeleton";
 import { DEFAULT_LIGHTING, Renderer } from "./renderer";
@@ -850,6 +850,11 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     return [(hit?.[0] ?? 0) + (charge?.[0] ?? 0), (hit?.[1] ?? 0) + (charge?.[1] ?? 0)];
   };
   const viewProj = mat(), view = mat(), proj = mat();
+  // (the game camera's projection as GX is loaded with it: the draw log's)
+  const gxProj = new Float32Array(16);
+  let gxProjOn = false;
+  // (and its near and far planes: the stage's, when its code sets them)
+  let camPlanes = cameraPlanes(null);
   // every (character, costume) the replay and its runs need, and whether all are in
   const wantedKeys = createMemo(() => {
     const data = rawData(), want = new Set<string>();
@@ -952,7 +957,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const track = camTrackTo(f);
     if (!track || (f + 1) * CAM_STRIDE > track.length) return null;
     const t = f * CAM_STRIDE;
-    lookAt(camViewScratch, [track[t], track[t + 1], track[t + 2]], [track[t + 3], track[t + 4], track[t + 5]]);
+    gameView(camViewScratch, [track[t], track[t + 1], track[t + 2]], [track[t + 3], track[t + 4], track[t + 5]]);
     return invert(camInvScratch, camViewScratch);
   };
 
@@ -1448,11 +1453,16 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const t = fno * CAM_STRIDE, z = Math.max(0.05, replayStore.zoom);
       const at = [track[t + 3], track[t + 4], track[t + 5]];
       const eye = [0, 1, 2].map((i) => at[i] + (track[t + i] - at[i]) / z);
-      lookAt(view, eye, at);
+      // (its matrices as the game makes them: camera.ts gameView, gameProjection - its near and far, and its
+      // aspect when the picture is the game's shape)
+      gameView(view, eye, at);
       const d = Math.hypot(eye[0] - at[0], eye[1] - at[1], eye[2] - at[2]);
-      perspective(proj, (track[t + 6] * Math.PI) / 180, aspect, Math.max(1, d * 0.05), d * 40);
+      camPlanes = cameraPlanes(rawData()?.settings.stageId);
+      gameProjection(proj, gxProj, track[t + 6], Math.abs(aspect - CAM_ASPECT) < 0.01 ? CAM_ASPECT : aspect, ...camPlanes);
+      gxProjOn = true;
       cam.dist = d; cam.x = at[0]; cam.y = at[1];
     } else {
+      gxProjOn = false;
       const lift = cam.dist * LIFT;
       translation(view, -cam.x, -(cam.y + lift), -cam.dist);
       const f = 1 / Math.tan(FOVY / 2);
@@ -1496,7 +1506,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // stage is lit by its own lights, everything else by its player lights,
     // and all but the effects are in its fog
     prof.mark("stageLogic");
-    r.begin(viewProj, view, st ? st.clear : [0.02, 0.02, 0.05], w, h, [box.dw, box.dh]);
+    r.begin(proj, view, st ? st.clear : [0.02, 0.02, 0.05], w, h, [box.dw, box.dh], gxProjOn ? gxProj : null,
+            gxProjOn ? camPlanes : null);
     // (Stadium's screen: the game's lettering, a quad a glyph drawn into its picture, first of the frame's draws)
     if (st?.screen && scene?.screen) scene.screen.drawLetters(r, st.screen.image);
     const stageLit = st ? st.lighting.at(fno) : DEFAULT_LIGHTING;
@@ -1771,7 +1782,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const cam = cameraOf(fi, a);
         if (!cam) continue;
         const t = r.shadowTarget(shadowMaps.length);
-        r.beginShadow(t, cam.viewProj, cam.view, st.shadowIntensity);
+        r.beginShadow(t, cam.proj, cam.view, st.shadowIntensity);
         if (p) {
           const look = lookOf(fi, a, actorKey(a.player, a.nana));
           // (its low-detail model, as in a mirror: ftDrawCommon_80081200 switches every fighter to it first)

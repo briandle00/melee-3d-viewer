@@ -11,6 +11,8 @@
  * and its tables (math_data.c), step for step, each operation rounded to
  * single precision as the console's is.
  */
+import { madd } from "../gxmath";
+
 const f32 = Math.fround;
 
 const QUADRANT = [0, 1, 1, 0, 0, -1, -1, 0];
@@ -20,9 +22,8 @@ const FOUR_OVER_PI_M1 = [0.25, 0.0232393741608, 1.70555722434e-7, 1.86736494323e
 const EPSILON = f32(3.45266983e-4);
 const TWO_OVER_PI = f32(2 / f32(Math.PI));
 
-/** a * b + c, rounded once to single precision (the console's fmadds: the
- *  product of two singles is exact in a double) */
-const fmadd = (a: number, b: number, c: number) => f32(a * b + c);
+/** a * b + c, rounded once to single precision (the console's fmadds: gxmath's madd) */
+const fmadd = madd;
 
 /** the angle as eighths of a turn from the nearest quarter turn, and which quarter */
 function reduce(x: number): [number, number] {
@@ -92,7 +93,7 @@ export function atanf(value: number): number {
     const a = ATAN[39 + at], b = ATAN[33 + at];
     r = f32(1 / f32(b + f32(x + a)));
     // (c - a * b, each rounded once: the console's fnmsubs)
-    r = f32(f32(b - r * ATAN[7 + at]) + f32(a - r * ATAN[13 + at]));
+    r = f32(-madd(r, ATAN[7 + at], -b) + -madd(r, ATAN[13 + at], -a));
   } else r = x;
   const sq = f32(r * r);
   let poly = ATAN[6];

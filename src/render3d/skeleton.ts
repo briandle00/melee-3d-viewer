@@ -8,7 +8,10 @@ import {
   AObj, Archive, DObj, Image, JObj, JOBJ, MatAnim, Mesh, MObj, PObj, TObj, Tlut, Track,
   aobjFrame, decodePObj, sample, splineAt,
 } from "./hsd";
-import { Mat, ident, invert, mul, mulAt, srt } from "./math";
+import { Mat, ident, invert, mul, srt } from "./math";
+import {
+  HSD_MtxSRT, PSMTXConcat, PSMTXIdentity, PSMTXInverse, concatGL, madd, mkBillBoardMtx, mtxFromGL, mtxToGL,
+} from "./gxmath";
 
 /** what a texture animation can change, per TObj */
 export interface TexState {
@@ -85,11 +88,18 @@ export interface Drawable {
   group?: DrawGroup;
   /** the renderer's own note of its buffers */
   gpu?: { owner: object; epoch: number; mesh: unknown };
+  /** a billboard's modelview as the game makes it (HSD_JObjMakePositionMtx: the billboard made of the view times
+   *  its joint's matrix), under the billboard view numbered bbMVView; the renderer loads it as it is when it draws
+   *  through that view */
+  bbMV?: Float32Array | null;
+  bbMVView?: number;
 }
 
 let stamps = 0;
 
 const tmpA = new Float32Array(16), tmpB = new Float32Array(16), tmpC = new Float32Array(16);
+const tmpL = new Float32Array(12), tmpP12 = new Float32Array(12), tmpRS = new Float32Array(3);
+const tmpS3 = new Float32Array(3), tmpR3 = new Float32Array(3), tmpT3 = new Float32Array(3);
 const tmpP = [0, 0, 0];
 
 // the camera the billboards face: its view matrix and that inverted (HSD
@@ -101,6 +111,15 @@ let bbIdentity = true;
 let bbViewId = 0;
 // (?noposeskip: every update poses again, for checking that skipping changes nothing)
 const SKIP_SAME = typeof location === "undefined" || !new URLSearchParams(location.search).has("noposeskip");
+
+const bbV12 = new Float32Array(12), bbW12 = new Float32Array(12), bbP12 = new Float32Array(12);
+
+/** the number of the billboard view when it is this view (the renderer's frame view), else -1 */
+export function billboardViewOf(view: ArrayLike<number>): number {
+  if (bbIdentity) return -1;
+  for (let k = 0; k < 16; k++) if (view[k] !== bbView[k]) return -1;
+  return bbViewId;
+}
 
 /** the view the billboards face from now on (the viewer sets it each frame,
  *  before it poses anything) */
@@ -114,6 +133,24 @@ export function setBillboardView(view: Float32Array) {
 /** a joint that turns to face the camera (HSD's mkBillBoardMtx and kin): its
  *  world matrix carried into view space, the rotation replaced there, its
  *  scale and place kept, and carried back */
+const nodeX = new Float32Array(12), nodeM = new Float32Array(12), nodeE = new Float32Array(12);
+
+/** the node matrix of an envelope mesh on joint m whose skeleton joint (HSD_JObjFindSkeleton) is x, another joint:
+ *  x's matrix - taken with its envelope matrix when x is a SKELETON joint (`envX`), alone when it is the
+ *  SKELETON_ROOT (null) - times the inverse of m's, in float32 (PSMTXConcat, PSMTXInverse). This is the order the
+ *  game's draws show in its recordings; read literally, _HSD_mkEnvelopeModelNodeMtx's HSD_MtxInverseConcat(x, m)
+ *  would be the other one (inverse(x) times m), and the recordings say it is not. Column-major 4 x 4s at offsets;
+ *  into out (16) */
+export function envelopeNodeMtx(out: Float32Array, wx: Float32Array, xo: number, wm: Float32Array, mo: number,
+                                envX: Float32Array | null): Float32Array {
+  mtxFromGL(wx, nodeX, xo);
+  if (envX) { mtxFromGL(envX, nodeE, 0); PSMTXConcat(nodeX, nodeE, nodeX); }
+  mtxFromGL(wm, nodeE, mo);
+  if (!PSMTXInverse(nodeE, nodeM)) PSMTXIdentity(nodeM);
+  PSMTXConcat(nodeX, nodeM, nodeM);
+  return mtxToGL(nodeM, out);
+}
+
 function billboard(out: Float32Array, m: Float32Array, kind: number, rotZ: number) {
   if (bbIdentity) { billboardInView(out, m, kind, rotZ); return; }
   mul(bbA, bbView, m);
@@ -174,7 +211,9 @@ export class Skeleton {
   /** where each joint's subtree ends in the (preorder) joint list */
   private readonly subEnd: Int32Array;
   private readonly rest: Float32Array; // rot, scale, trans per joint (9 each)
+  /** each joint's accumulated scale (jobj->scl), and whether it has one */
   private readonly accScale: Float32Array;
+  private readonly hasScl: Uint8Array;
   readonly world: Float32Array; // 16 per joint
   private readonly skin: Float32Array; // world * invBind, 16 per joint
   private readonly invBind: (Mat | null)[];
@@ -200,6 +239,7 @@ export class Skeleton {
     }
     this.rest = new Float32Array(n * 9);
     this.accScale = new Float32Array(n * 3);
+    this.hasScl = new Uint8Array(n);
     this.world = new Float32Array(n * 16);
     this.skin = new Float32Array(n * 16);
     this.invBind = joints.map((j) => j.invBind);
@@ -284,7 +324,9 @@ export class Skeleton {
     d.nodeJoint = s;
     if (s === j) {
       d.node = 1;
-      d.nodeConst = invert(new Float32Array(16), this.invBind[j] ?? ident(new Float32Array(16)));
+      // (MTXInverse of the joint's envelope matrix: _HSD_mkEnvelopeModelNodeMtx)
+      const ib = mtxFromGL(this.invBind[j] ?? ident(new Float32Array(16)), new Float32Array(12)), inv = new Float32Array(12);
+      d.nodeConst = PSMTXInverse(ib, inv) ? mtxToGL(inv, new Float32Array(16)) : ident(new Float32Array(16));
     } else d.node = this.flags[s] & JOBJ.SKELETON_ROOT ? 2 : 3;
   }
 
@@ -398,30 +440,34 @@ export class Skeleton {
     this.remember(parentWorld);
     this.updates++;
     const W = this.world;
+    // HSD_JObjMakeMatrix: each joint's HSD_MtxSRT, given its parent's accumulated scale (jobj->scl) when it has
+    // one, then PSMTXConcat(parent->mtx, jobj->mtx); in float32, as the game does
+    const L = tmpL, P = tmpP12, R = this.rot, Sc = this.scale, T = this.trans, A = this.accScale;
+    const rs = this.rootScale;
     for (let i = 0; i < this.n; i++) {
       const p = this.parent[i];
       const r = i * 3;
-      const rs = this.rootScale;
-      const ps0 = p < 0 ? (rs ? rs[0] : 1) : this.accScale[p * 3], ps1 = p < 0 ? (rs ? rs[1] : 1) : this.accScale[p * 3 + 1],
-            ps2 = p < 0 ? (rs ? rs[2] : 1) : this.accScale[p * 3 + 2];
-      const sx = this.scale[r], sy = this.scale[r + 1], sz = this.scale[r + 2];
-      srt(tmpA, sx, sy, sz, this.rot[r], this.rot[r + 1], this.rot[r + 2], this.trans[r], this.trans[r + 1], this.trans[r + 2]);
-      // Maya's segment scale compensation: a parent's non-uniform scale does
-      // not shear its children
-      if (ps0 !== ps1 || ps0 !== ps2) {
-        tmpA[1] *= ps0 / ps1; tmpA[2] *= ps0 / ps2;
-        tmpA[4] *= ps1 / ps0; tmpA[6] *= ps1 / ps2;
-        tmpA[8] *= ps2 / ps0; tmpA[9] *= ps2 / ps1;
-      }
+      let ps: Float32Array | null = null;
+      if (p >= 0) { if (this.hasScl[p]) { tmpRS[0] = A[p * 3]; tmpRS[1] = A[p * 3 + 1]; tmpRS[2] = A[p * 3 + 2]; ps = tmpRS; } }
+      else if (rs) { tmpRS[0] = rs[0]; tmpRS[1] = rs[1]; tmpRS[2] = rs[2]; ps = tmpRS; }
+      // (a parent scale with a 0 in it - or one not a number - would make HSD_MtxSRT's 1.0 / scale infinite and
+      // the joint NaN; the game's draws in its recordings have no such joints, so the turn is made without the
+      // parent's scale taken out, as for a joint without one)
+      const psOk = !!ps && ps[0] !== 0 && ps[1] !== 0 && ps[2] !== 0 && Number.isFinite(ps[0] + ps[1] + ps[2]);
       if (this.flags[i] & JOBJ.CLASSICAL_SCALE) {
-        this.accScale[r] = ps0; this.accScale[r + 1] = ps1; this.accScale[r + 2] = ps2;
+        if (ps) { A[r] = ps[0]; A[r + 1] = ps[1]; A[r + 2] = ps[2]; }
+        this.hasScl[i] = ps ? 1 : 0;
       } else {
-        this.accScale[r] = sx * ps0; this.accScale[r + 1] = sy * ps1; this.accScale[r + 2] = sz * ps2;
+        if (ps) { A[r] = Sc[r] * ps[0]; A[r + 1] = Sc[r + 1] * ps[1]; A[r + 2] = Sc[r + 2] * ps[2]; }
+        else { A[r] = Sc[r]; A[r + 1] = Sc[r + 1]; A[r + 2] = Sc[r + 2]; }
+        this.hasScl[i] = 1;
       }
+      for (let k = 0; k < 3; k++) { tmpS3[k] = Sc[r + k]; tmpR3[k] = R[r + k]; tmpT3[k] = T[r + k]; }
+      HSD_MtxSRT(L, tmpS3, tmpR3, tmpT3, psOk ? ps : null);
       const o = i * 16;
-      if (p >= 0) mulAt(W, o, W, p * 16, tmpA, 0);
-      else if (parentWorld) mulAt(W, o, parentWorld, 0, tmpA, 0);
-      else W.set(tmpA, o);
+      if (p >= 0) { mtxFromGL(W, P, p * 16); PSMTXConcat(P, L, L); }
+      else if (parentWorld) { mtxFromGL(parentWorld, P, 0); PSMTXConcat(P, L, L); }
+      mtxToGL(L, W, o);
       // (a joint held somewhere else, its children with it)
       if (this.shift && this.shift.joint === i) { W[o + 12] += this.shift.d[0]; W[o + 13] += this.shift.d[1]; W[o + 14] += this.shift.d[2]; }
     }
@@ -430,7 +476,8 @@ export class Skeleton {
     for (let k = 0; k < this.skinUsed.length; k++) {
       const j = this.skinUsed[k], o = j * 16;
       const ib = this.invBind[j];
-      if (ib) mulAt(S, o, W, o, ib, 0);
+      // (MTXConcat(jobj->mtx, jobj->envelopemtx): SetupEnvelopeModelMtx)
+      if (ib) concatGL(S, o, W, o, ib, 0);
       else for (let q = 0; q < 16; q++) S[o + q] = W[o + q];
     }
     for (const d of this.drawables) {
@@ -471,7 +518,18 @@ export class Skeleton {
     if (d.pobj.kind !== "envelope") {
       const bb = this.flags[j] & 0xe00;
       const M = d.mats, o = j * 16;
-      if (bb) billboard(M, W.subarray(o, o + 16), bb, this.rot[j * 3 + 2]);
+      if (bb && !bbIdentity) {
+        // (in view space, as the game makes it: mkBillBoardMtx and kin on PSMTXConcat(vmtx, jobj->mtx), in
+        // float32; the world matrix the rest takes - the lighting, the culling - is the view's inverse times it)
+        mtxFromGL(bbView, bbV12, 0);
+        mtxFromGL(W, bbW12, o);
+        PSMTXConcat(bbV12, bbW12, bbW12);
+        mkBillBoardMtx(bb, (this.flags[j] & 0x2000) !== 0, this.rot[j * 3 + 2], bbW12, bbP12);
+        const mv = (d.bbMV ??= new Float32Array(16));
+        mtxToGL(bbP12, mv);
+        d.bbMVView = bbViewId;
+        mul(M, bbInv, mv);
+      } else if (bb) { billboard(M, W.subarray(o, o + 16), bb, this.rot[j * 3 + 2]); d.bbMV = null; }
       else for (let q = 0; q < 16; q++) M[q] = W[o + q];
       if (d.second >= 0) for (let q = 0, s = d.second * 16; q < 16; q++) M[16 + q] = W[s + q];
       for (let m = d.filled; m < d.nMats; m++) d.mats.copyWithin(m * 16, 0, 16);
@@ -481,12 +539,7 @@ export class Skeleton {
     // (the node matrix, the same for all of the mesh's matrices)
     if (d.node >= 2) {
       const s = d.nodeJoint;
-      invert(tmpB, W.subarray(j * 16, j * 16 + 16));
-      if (d.node === 2) mul(tmpC, W.subarray(s * 16, s * 16 + 16), tmpB);
-      else {
-        mul(tmpC, W.subarray(s * 16, s * 16 + 16), this.invBind[s] ?? ident(tmpC));
-        mul(tmpC, tmpC, tmpB);
-      }
+      envelopeNodeMtx(tmpC, W, s * 16, W, j * 16, d.node === 3 ? this.invBind[s] : null);
     }
     const M = d.mats;
     for (let m = 0; m < d.env.length; m++) {
@@ -498,17 +551,21 @@ export class Skeleton {
       } else {
         const u = d.env[m].u!, B = this.blendMats, b = u * 16;
         if (this.blendAt[u] !== this.updates) {
+          // the weighted sum, from zero, each joint's matrix added by HSD_MtxScaledAdd (a fused multiply-add an
+          // entry); a 3 x 4 to GX, so the last row stays 0 0 0 1
           for (let q = 0; q < 16; q++) B[b + q] = 0;
           for (let k = 0; k < joints.length; k++) {
-            const e = joints[k] * 16, w = weights[k];
-            for (let q = 0; q < 16; q++) B[b + q] += S[e + q] * w;
+            const e = joints[k] * 16, w = Math.fround(weights[k]);
+            for (let c = 0; c < 4; c++) for (let q = 0; q < 3; q++) B[b + c * 4 + q] = madd(w, S[e + c * 4 + q], B[b + c * 4 + q]);
           }
+          B[b + 15] = 1;
           this.blendAt[u] = this.updates;
         }
         for (let q = 0; q < 16; q++) M[o + q] = B[b + q];
       }
       if (d.node === 0) continue;
-      mulAt(M, o, M, o, d.node === 1 ? d.nodeConst! : tmpC, 0);
+      // (MTXConcat(mtxp, right))
+      concatGL(M, o, M, o, d.node === 1 ? d.nodeConst! : tmpC, 0);
     }
     for (let m = d.filled; m < d.nMats; m++) d.mats.copyWithin(m * 16, 0, 16);
   }

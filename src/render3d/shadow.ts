@@ -30,8 +30,9 @@ export function pickShadowLight<T extends Light>(lights: T[]): T | null {
 }
 
 export interface ShadowCamera {
-  /** world to view, and to the picture's clip space (GL) */
+  /** world to view, the projection (GL), and the two together: world to the picture's clip space */
   view: Mat;
+  proj: Mat;
   viewProj: Mat;
   /** world to the shadow texture's (s, t) (rows 0 and 1; column-major), for
    *  a picture drawn the GL way up */
@@ -72,6 +73,8 @@ export function shadowCamera(pos: number[], interest: number[] | null, bone: num
   const viewProj = new Float32Array(16);
   // (an ortho of top h, bottom -h, left -h, right h, times the view)
   const P = [1 / h, 1 / h, -2 / (far - near), -(far + near) / (far - near)];
+  const proj = new Float32Array(16);
+  proj[0] = P[0]; proj[5] = P[1]; proj[10] = P[2]; proj[14] = P[3]; proj[15] = 1;
   for (let c = 0; c < 4; c++) {
     viewProj[c * 4] = P[0] * view[c * 4];
     viewProj[c * 4 + 1] = P[1] * view[c * 4 + 1];
@@ -87,7 +90,7 @@ export function shadowCamera(pos: number[], interest: number[] | null, bone: num
     tex[c * 4 + 1] = k * view[c * 4 + 1] + (c === 3 ? 0.5 : 0);
   }
   tex[15] = 1;
-  return { view, viewProj, tex };
+  return { view, proj, viewProj, tex };
 }
 
 /** the shadow's gray as the copy keeps it: the copy takes the red channel's

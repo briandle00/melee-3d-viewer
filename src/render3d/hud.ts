@@ -50,7 +50,7 @@ const PLATE_TEXT = { dx: 0.8, top: -0.525 };
 interface RenderTarget { tex: unknown }
 interface Renderer {
   drawSkeleton(sk: Skeleton, pass: "opa" | "xlu"): void;
-  overlay(viewProj: Mat, view: Mat, target?: unknown, clear?: [number, number, number, number] | null, mirrored?: boolean): void;
+  overlay(proj: Mat, view: Mat, target?: unknown, clear?: [number, number, number, number] | null, mirrored?: boolean): void;
   endOverlay(): void;
   target(w: number, h: number): RenderTarget;
   bindImage(image: Image, tex: unknown): void;
@@ -400,10 +400,9 @@ export class Hud {
   private timer: HudModel | null;
   private proj = new Float32Array(16);
   private view = new Float32Array(16);
-  private vp = new Float32Array(16);
-  private flatVP = new Float32Array(16);
+  private flatProj = new Float32Array(16);
   private flatView = ident(new Float32Array(16));
-  private picVP = new Float32Array(16);
+  private picProj = new Float32Array(16);
   /** what the checks read: the last frame drawn */
   last: { percents: { player: number; percent: number; hidden: boolean }[]; timer: string | null; tags: number[];
           magnified: number[]; arrows: number[]; stocks: number[][] } = { percents: [], timer: null, tags: [], magnified: [], arrows: [], stocks: [] };
@@ -513,7 +512,9 @@ export class Hud {
        aspect = this.kit.cam.aspect, tracked: TrackedBursts | null = null) {
     const gameFrame = f + FIRST_FRAME;
     // the picture's width over the game's
-    const k = (this.k = aspect / this.kit.cam.aspect);
+    // (a picture of the game's own shape takes the game's cameras as they are: within a part in a hundred, 1)
+    const k0 = aspect / this.kit.cam.aspect;
+    const k = (this.k = Math.abs(k0 - 1) < 0.01 ? 1 : k0);
     const out: Hud["last"] = { percents: [], timer: null, tags: [], magnified: [], arrows: [], stocks: [] };
     const slots = hudSlotsMode();
     for (const p of this.players) p.place = p.places[slots];
@@ -539,9 +540,8 @@ export class Hud {
       }
     }
     // --- the tags over the fighters: a flat 640 x 480 camera, pixel units
-    ortho(this.flatVP, 320 - 320 * k, 320 + 320 * k, -480, 0, 0.1, 32768);
+    ortho(this.flatProj, 320 - 320 * k, 320 + 320 * k, -480, 0, 0.1, 32768);
     lookAt(this.flatView, [0, 0, 300], [0, 0, 0]);
-    mul(this.flatVP, this.flatVP, this.flatView);
     let tagsBegun = false;
     for (const p of this.players) {
       if (!p.tag || !p.life.tag[f]) continue;
@@ -554,7 +554,7 @@ export class Hud {
       m.begin();
       for (let d = 0; d < 3; d++) m.mat(1, 0, p.tagFrame, 1, d);
       m.finish(sx, -sy, 0, 10);
-      if (!tagsBegun) { r.overlay(this.flatVP, this.flatView); tagsBegun = true; }
+      if (!tagsBegun) { r.overlay(this.flatProj, this.flatView); tagsBegun = true; }
       r.drawSkeleton(m.sk, "opa");
       r.drawSkeleton(m.sk, "xlu");
       // the nametag over its arrow, in its dark box: centered, the capitals'
@@ -572,8 +572,7 @@ export class Hud {
     // (its own height of view, the picture's shape: never stretched)
     perspective(this.proj, (c.fovy * Math.PI) / 180, c.aspect * k, c.near, c.far);
     lookAt(this.view, c.eye, [0, 0, 0]);
-    mul(this.vp, this.proj, this.view);
-    r.overlay(this.vp, this.view);
+    r.overlay(this.proj, this.view);
     // the picture's pixels a HUD unit (the camera's view of its z = 0 plane)
     const hudPpu = r.pictureHeight / (2 * Math.abs(c.eye[2]) * Math.tan((c.fovy * Math.PI) / 360));
     for (const { p, sx, sy } of magnified) this.drawLupe(r, p, sx, sy);
@@ -792,11 +791,10 @@ export class Hud {
     const [bx, by, bz] = a.bone!;
     const half = 6.4 * a.zoom;
     // (drawn upside down: the texture's first row is the picture's top)
-    ortho(this.picVP, -half, half, half, -half, 0.1, 32768);
+    ortho(this.picProj, -half, half, half, -half, 0.1, 32768);
     const view = lookAt(new Float32Array(16), [bx, by, bz + 300], [bx, by, bz]);
-    mul(this.picVP, this.picVP, view);
     const bg = this.background(a.st.xPosition, a.st.yPosition);
-    r.overlay(this.picVP, view, pic, [bg[0], bg[1], bg[2], 1], true);
+    r.overlay(this.picProj, view, pic, [bg[0], bg[1], bg[2], 1], true);
     a.draw();
     r.endOverlay();
   }
