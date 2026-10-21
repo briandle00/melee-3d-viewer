@@ -1,0 +1,1165 @@
+From 9f1a8884357f9cc69adeb1c11a35eeeaffca67f2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 08:53:31 +0000
+Subject: [PATCH 5/8] Stadium transformations: off unless a caller explicitly
+ turns them on
+
+With the setting at its default, production output changed on the 15
+unfrozen-flag Pokemon Stadium games (Slippi 3.14-3.16). Fix everything
+that ran with the setting off:
+
+- admission.stadium_transformations no longer infers the setting from
+  the stage and frozen flag. It returns True only for requested=True on
+  an unfrozen Stadium. The base "unfrozen-stadium" admission rule is back
+  for every caller that does not ask for transformations.
+- validate_replay and prepare_replay_benchmark read the setting only from
+  a suite entry's "stadium_transformations": true or the
+  --stadium-transformations flag. Default native calls, results, stage
+  names and benchmark cache keys (CACHE_VERSION 6) are the base's. Cases
+  that ask run in a one-shot runner, and the benchmark skips them unless
+  asked.
+- The extra transforming Stadium GameData preload runs only for GameData
+  loaded with MSL_GAME_DATA_STADIUM_TRANSFORMATIONS:
+  - the stream runner sets it from its config's bit;
+  - the server runner and msl_core_game_data_create set it only from
+    MSL_STADIUM_TRANSFORMATIONS=1;
+  - otherwise the preload sequence and the sealed GameData are the
+    base's, and a transforming config on that GameData is refused.
+- grpstadium keeps the source proc for the controller and returns early
+  in 801D4548 unless the bit is set, as the base does.
+- native.c reads a replay's Stadium events only when the setting is on.
+- msltrace1.js takes the setting only from an explicit
+  stadiumTransformations, never from isFrozenStadium.
+- GrPs1-4.dat are still extracted but no longer required for a valid
+  data directory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ API.md                                        |   2 +-
+ agent_docs/validation/replay_admission.json   |   8 +
+ melee_sim/config.py                           |   3 +
+ melee_sim/env_batch.py                        |   6 +-
+ replays/suites/stadium_transformations.json   |  18 +-
+ src/melee/gr/grpstadium.c                     |  25 +--
+ src/runtime/batch.c                           |   3 +-
+ src/runtime/main.c                            |  22 ++-
+ src/runtime/scalar.c                          |  58 ++++--
+ src/runtime/scalar.h                          |  24 +++
+ src/runtime/wire.h                            |  11 +-
+ .../stadium_transformations_smoke.c           |  15 +-
+ tests/test_stadium_transformation_gating.py   | 184 ++++++++++++++++--
+ tools/data/raw.py                             |   5 +-
+ tools/validation/admission.py                 |  34 +++-
+ tools/validation/native.c                     |  13 +-
+ tools/validation/prepare_replay_benchmark.py  |  27 ++-
+ tools/validation/suite_io.py                  |  10 +
+ tools/validation/validate_replay.py           |  35 +++-
+ tools/viewer/live/viewer_adapter.js           |   3 +
+ tools/viewer/msltrace1.js                     |   7 +-
+ .../viewer/slippi-viewer/src/common/types.ts  |   3 +
+ 22 files changed, 428 insertions(+), 88 deletions(-)
+
+diff --git a/API.md b/API.md
+index 60d7e81d..57ec526a 100644
+--- a/API.md
++++ b/API.md
+@@ -56,7 +56,7 @@ stocks and UCF enabled. Callers only override fields they need:
+ | `viewpoint_player` | `uint8_t` | active player index | player placed in observation slot zero |
+ | `ucf_cardinals` | `uint8_t` | `0` or `1` | enable the UCF 1.0 cardinal patch |
+ | `players[4]` | `MslPlayerConfig[4]` | active entries `< num_players` | per-player configuration |
+-| `stadium_transformations` | `uint8_t` | `0` (default) or `1` | enable Pokémon Stadium transformations |
++| `stadium_transformations` | `uint8_t` | `0` (default) or `1` | enable Pokémon Stadium transformations (Pokémon Stadium only; the process must load its game data with `MSL_STADIUM_TRANSFORMATIONS=1` set, or match creation fails; off, game data and output are unchanged) |
+ 
+ `MslPlayerConfig` uses explicit, unpacked fields. Team and controller port accept their `*_AUTO`
+ constant; facing accepts `MSL_FACING_LEFT`, `MSL_FACING_RIGHT`, or `MSL_FACING_AUTO`.
+diff --git a/agent_docs/validation/replay_admission.json b/agent_docs/validation/replay_admission.json
+index 8aa481cb..5a2238e5 100644
+--- a/agent_docs/validation/replay_admission.json
++++ b/agent_docs/validation/replay_admission.json
+@@ -43,6 +43,14 @@
+         "tools/validation/native.c::build_match_config"
+       ]
+     },
++    "unfrozen-stadium": {
++      "description": "Require the recorded frozen toggle or the reviewed legacy 0x801d4578 transformation bypass, unless the caller explicitly runs the replay with Stadium transformations (a suite entry's \"stadium_transformations\": true). A false old toggle alone does not establish unfrozen play and never turns transformations on.",
++      "sources": [
++        "refs/slippi-ssbm-asm/Online/Core/Hacks/Stadium/IngameCheckIfFrozen.asm",
++        "https://github.com/project-slippi/slippi-ssbm-asm/blob/ccb59238b750cdf4cac701832753be119489f7e6/Online/Core/PreventFileAlarms/FreezeStadium.asm",
++        "https://github.com/project-slippi/slippi-ssbm-asm/blob/d95aec7434b7e11011f4735e697e6f531022a184/Recording/SendGameInfo.asm"
++      ]
++    },
+     "incomplete-history": {
+       "description": "Require normal game-start seed -123, contiguous final frame history and a recorded Game End. Missing metadata.lastFrame is not itself missing gameplay history. No cropped or savestate-injected fixture admission.",
+       "sources": [
+diff --git a/melee_sim/config.py b/melee_sim/config.py
+index e1dee7df..6152fdaa 100644
+--- a/melee_sim/config.py
++++ b/melee_sim/config.py
+@@ -71,4 +71,7 @@ class MatchConfig:
+     friendly_fire: bool = False
+     viewpoint_player: int = 0
+     ucf_cardinals_1_0_enabled: bool = True
++    # Pokemon Stadium transforms (stage 3 only). Off by default; turning it on
++    # also needs GameData loaded with MSL_STADIUM_TRANSFORMATIONS=1 in the
++    # environment before the env is created (API.md).
+     stadium_transformations: bool = False
+diff --git a/melee_sim/env_batch.py b/melee_sim/env_batch.py
+index abce91ce..630427c6 100644
+--- a/melee_sim/env_batch.py
++++ b/melee_sim/env_batch.py
+@@ -460,11 +460,7 @@ def _resolve_data_dir(data_dir: str | os.PathLike[str] | None) -> Path:
+     value = data_dir if data_dir is not None else os.environ.get("MSL_DATA_DIR", "data")
+     path = Path(value).expanduser().resolve()
+     raw = _raw_data_dir(path)
+-    from tools.data.raw import STADIUM_ARCHIVES
+-
+-    if not (raw / "manifest.json").is_file() or any(
+-        not (raw / name).is_file() for name in STADIUM_ARCHIVES
+-    ):
++    if not (raw / "manifest.json").is_file():
+         raise FileNotFoundError(
+             f"melee_sim data directory is incomplete: {path}\n"
+             "Run `python -m melee_sim.extract_data --iso /path/to/SSBM.iso`."
+diff --git a/replays/suites/stadium_transformations.json b/replays/suites/stadium_transformations.json
+index 44c7988b..12468cb8 100644
+--- a/replays/suites/stadium_transformations.json
++++ b/replays/suites/stadium_transformations.json
+@@ -13,7 +13,8 @@
+       "characters": {
+         "1": "Fox",
+         "2": "Peach"
+-      }
++      },
++      "stadium_transformations": true
+     },
+     {
+       "replay": "replays/validation/stadium_transformations/auto-fox-2025-10_Game_20251018T045526.slpz",
+@@ -25,7 +26,8 @@
+       "characters": {
+         "1": "Dr. Mario",
+         "2": "Fox"
+-      }
++      },
++      "stadium_transformations": true
+     },
+     {
+       "replay": "replays/validation/stadium_transformations/gm-fox-2025-12_Game_20251201T224155.slpz",
+@@ -37,7 +39,8 @@
+       "characters": {
+         "1": "Mario",
+         "2": "Fox"
+-      }
++      },
++      "stadium_transformations": true
+     },
+     {
+       "replay": "replays/validation/stadium_transformations/gm-fox-2026-03_Game_20260327T132708.slpz",
+@@ -49,7 +52,8 @@
+       "characters": {
+         "1": "Mario",
+         "2": "Fox"
+-      }
++      },
++      "stadium_transformations": true
+     },
+     {
+       "replay": "replays/validation/stadium_transformations/gm-fox-2026-04_Game_20260421T205457.slpz",
+@@ -61,7 +65,8 @@
+       "characters": {
+         "1": "Mario",
+         "2": "Fox"
+-      }
++      },
++      "stadium_transformations": true
+     },
+     {
+       "replay": "replays/validation/stadium_transformations/gm-sheik-2026-03_Game_20260318T233300.slpz",
+@@ -73,7 +78,8 @@
+       "characters": {
+         "1": "Dr. Mario",
+         "2": "Sheik"
+-      }
++      },
++      "stadium_transformations": true
+     }
+   ]
+ }
+diff --git a/src/melee/gr/grpstadium.c b/src/melee/gr/grpstadium.c
+index ed918ac6..51233dfe 100644
+--- a/src/melee/gr/grpstadium.c
++++ b/src/melee/gr/grpstadium.c
+@@ -214,14 +214,6 @@ bool grStadium_801D10F0(void)
+  * Creates a specific sub-type of Ground_GObj for Pokemon Stadium
+  * (e.g. id=1 for the jumbotron display)
+  */
+-#ifdef MSL_CORE_HOSTED
+-static void msl_stadium_frozen_update(Ground_GObj* gobj)
+-{
+-    lb_800115F4();
+-    Ground_801C2FE0(gobj);
+-}
+-#endif
+-
+ Ground_GObj* grStadium_801D10F8(StadiumGrType id)
+ {
+     Ground_GObj* gobj;
+@@ -244,14 +236,7 @@ Ground_GObj* grStadium_801D10F8(StadiumGrType id)
+             cb->callback0(gobj);
+         }
+         if (cb->callback2 != NULL) {
+-#ifdef MSL_CORE_HOSTED
+-            if (id == 2 && !msl_core_config_stadium_transformations(&msl_core_active_match()->config)) {
+-                HSD_GObj_SetupProc(gobj, msl_stadium_frozen_update, 4);
+-            } else
+-#endif
+-            {
+-                HSD_GObj_SetupProc(gobj, cb->callback2, 4);
+-            }
++            HSD_GObj_SetupProc(gobj, cb->callback2, 4);
+         }
+     } else {
+         OSReport("%s:%d: couldn t get gobj(id=%d)\n", __FILE__, 0x120, id);
+@@ -2228,6 +2213,14 @@ void grStadium_801D4548(Ground_GObj* gobj)
+     Ground* temp_r3_9;
+     Ground* temp_r6;
+ 
++#ifdef MSL_CORE_HOSTED
++    // External/Frozen PS/Core/FreezePokemon.asm replaces the transformation
++    // decision at retail 0x801D45FC with a branch to 0x801D4FD8: frozen
++    // unless the match config explicitly turns transformations on.
++    if (!msl_core_config_stadium_transformations(&msl_core_active_match()->config)) {
++        return;
++    }
++#endif
+     temp_r31 = GET_GROUND(gobj);
+     temp_f31 = Ground_801C0498();
+     if (gm_8018841C() != 0) {
+diff --git a/src/runtime/batch.c b/src/runtime/batch.c
+index 240ee2a2..e07f0374 100644
+--- a/src/runtime/batch.c
++++ b/src/runtime/batch.c
+@@ -123,7 +123,8 @@ MslCoreResult msl_core_game_data_create(
+     if (game_data == NULL) {
+         return MSL_CORE_OUT_OF_MEMORY;
+     }
+-    if (msl_core_game_data_init(game_data, data_root) != 0) {
++    if (msl_core_game_data_init_options(game_data, data_root,
++                                        msl_core_game_data_env_options()) != 0) {
+         msl_core_game_data_deinit(game_data);
+         free(game_data);
+         return MSL_CORE_INVALID_STATE;
+diff --git a/src/runtime/main.c b/src/runtime/main.c
+index f5fdc9ac..0da50c16 100644
+--- a/src/runtime/main.c
++++ b/src/runtime/main.c
+@@ -75,19 +75,22 @@ static int init_match(MslCoreGameData* game_data, MslCoreMatch* match,
+ {
+     MslCoreMatchConfig config;
+ 
++    unsigned options = 0;
++
+     msl_core_decode_match_config(&config, config_wire);
++    // This process runs one match: its GameData preloads a transforming
++    // Stadium only when that match's config asks for it.
++    if (msl_core_config_stadium_transformations(&config)) {
++        options |= MSL_GAME_DATA_STADIUM_TRANSFORMATIONS;
++    }
+ #if MSL_VISUAL_TRACK_BUILD
+-    if (((config.camera_mode & MSL_VISUAL_TRACK)
+-             ? msl_core_game_data_init_visual(game_data, data_root)
+-             : msl_core_game_data_init(game_data, data_root)) != 0)
+-    {
+-        return -1;
++    if (config.camera_mode & MSL_VISUAL_TRACK) {
++        options |= MSL_GAME_DATA_VISUAL;
+     }
+-#else // !MSL_VISUAL_TRACK_BUILD
+-    if (msl_core_game_data_init(game_data, data_root) != 0) {
++#endif // MSL_VISUAL_TRACK_BUILD
++    if (msl_core_game_data_init_options(game_data, data_root, options) != 0) {
+         return -1;
+     }
+-#endif // MSL_VISUAL_TRACK_BUILD
+     return msl_core_match_init(match, game_data, &config, previous_input);
+ }
+ 
+@@ -169,7 +172,8 @@ static int run_server(const char* data_root)
+         fprintf(stderr, "could not configure Melee core server buffers\n");
+         return 1;
+     }
+-    if (msl_core_game_data_init(&game_data, data_root) != 0 ||
++    if (msl_core_game_data_init_options(&game_data, data_root,
++                                        msl_core_game_data_env_options()) != 0 ||
+         msl_core_match_storage_init(&match) != 0)
+     {
+         return 1;
+diff --git a/src/runtime/scalar.c b/src/runtime/scalar.c
+index 1820acdd..2223878a 100644
+--- a/src/runtime/scalar.c
++++ b/src/runtime/scalar.c
+@@ -679,6 +679,11 @@ static int validate_config(MslCoreMatchConfig* config)
+         fprintf(stderr, "unsupported Slippi patch bits\n");
+         return -1;
+     }
++    if (msl_core_config_stadium_transformations(config) &&
++        config->stage_id != MSL_CORE_STAGE_POKEMON_STADIUM) {
++        fprintf(stderr, "Stadium transformations need Pokemon Stadium\n");
++        return -1;
++    }
+     if (stage_spec(config->stage_id) == NULL) {
+         fprintf(stderr,
+                 "current core supports the six legal stage ids "
+@@ -767,15 +772,18 @@ static int validate_config(MslCoreMatchConfig* config)
+     return 0;
+ }
+ 
+-#if MSL_VISUAL_TRACK_BUILD
+ static int game_data_init(MslCoreGameData* game_data, const char* data_root,
+-                          int visual)
+-#else // !MSL_VISUAL_TRACK_BUILD
+-int msl_core_game_data_init(MslCoreGameData* game_data, const char* data_root)
+-#endif // MSL_VISUAL_TRACK_BUILD
++                          unsigned options)
+ {
+     size_t length;
++#if MSL_VISUAL_TRACK_BUILD
++    int visual = (options & MSL_GAME_DATA_VISUAL) != 0;
++#endif // MSL_VISUAL_TRACK_BUILD
+ 
++    if (options & ~MSL_GAME_DATA_KNOWN) {
++        fprintf(stderr, "unsupported Melee core game-data options\n");
++        return -1;
++    }
+     if (game_data == NULL || data_root == NULL || data_root[0] == '\0') {
+         fprintf(stderr, "Melee core game-data root must not be empty\n");
+         return -1;
+@@ -870,6 +878,8 @@ int msl_core_game_data_init(MslCoreGameData* game_data, const char* data_root)
+         return -1;
+     }
+     memcpy(game_data->root, data_root, length + 1);
++    game_data->stadium_transformations =
++        (options & MSL_GAME_DATA_STADIUM_TRANSFORMATIONS) != 0;
+     game_data->bootstrap_random.value = 1;
+     game_data->bootstrap_random.active = &game_data->bootstrap_random.value;
+     msl_core_bind_game_data(game_data);
+@@ -918,17 +928,31 @@ int msl_core_game_data_init(MslCoreGameData* game_data, const char* data_root)
+     msl_effect_install_match_callbacks();
+     return 0;
+ }
+-#if MSL_VISUAL_TRACK_BUILD
+ 
+ int msl_core_game_data_init(MslCoreGameData* game_data, const char* data_root)
+ {
+     return game_data_init(game_data, data_root, 0);
+ }
+ 
++int msl_core_game_data_init_options(MslCoreGameData* game_data,
++                                    const char* data_root, unsigned options)
++{
++    return game_data_init(game_data, data_root, options);
++}
++
++unsigned msl_core_game_data_env_options(void)
++{
++    const char* value = getenv("MSL_STADIUM_TRANSFORMATIONS");
++    return value != NULL && strcmp(value, "1") == 0
++               ? MSL_GAME_DATA_STADIUM_TRANSFORMATIONS
++               : 0;
++}
++#if MSL_VISUAL_TRACK_BUILD
++
+ int msl_core_game_data_init_visual(MslCoreGameData* game_data,
+                                    const char* data_root)
+ {
+-    return game_data_init(game_data, data_root, 1);
++    return game_data_init(game_data, data_root, MSL_GAME_DATA_VISUAL);
+ }
+ #endif // MSL_VISUAL_TRACK_BUILD
+ 
+@@ -1121,6 +1145,14 @@ static int match_construct(MslCoreMatch* match,
+     if (validate_config(&match->config) != 0) {
+         return -1;
+     }
++#ifdef MSL_CORE_NATIVE
++    if (msl_core_config_stadium_transformations(&match->config) &&
++        !game_data->stadium_transformations) {
++        fprintf(stderr, "Stadium transformations need game data loaded with "
++                        "MSL_GAME_DATA_STADIUM_TRANSFORMATIONS\n");
++        return -1;
++    }
++#endif
+ #if MSL_VISUAL_TRACK_BUILD
+     if (match->config.camera_mode & MSL_VISUAL_TRACK) {
+         if (game_data->effects.visual == NULL) {
+@@ -1837,11 +1869,13 @@ static int preload_supported_game_data(MslCoreGameData* game_data)
+             return -1;
+         }
+     }
+-    // Then once more for a transforming Stadium, after every frozen preload:
+-    // its four forms' archives and actors are reached here, so GameData holds
+-    // them before it seals, while everything the frozen domain preloads (in
+-    // the same order as before) comes first and is unchanged.
+-    if (preload_match_configuration(game_data, MSL_CORE_STAGE_POKEMON_STADIUM,
++    // Then, only for GameData a caller loaded with
++    // MSL_GAME_DATA_STADIUM_TRANSFORMATIONS, once more for a transforming
++    // Stadium: its four forms' archives and actors are reached here, so
++    // GameData holds them before it seals. Without the option the preload
++    // sequence (and so the sealed GameData) is the frozen-only one.
++    if (game_data->stadium_transformations &&
++        preload_match_configuration(game_data, MSL_CORE_STAGE_POKEMON_STADIUM,
+                                     MSL_CORE_CHAR_FOX, MSL_CORE_CHAR_FOX,
+                                     MSL_PATCH_STADIUM_TRANSFORMATIONS) != 0)
+     {
+diff --git a/src/runtime/scalar.h b/src/runtime/scalar.h
+index 52fed073..80dec78f 100644
+--- a/src/runtime/scalar.h
++++ b/src/runtime/scalar.h
+@@ -64,6 +64,9 @@ typedef struct MslCoreGameData {
+ #ifdef MSL_CORE_NATIVE
+     MslNativeDatContext native_dat;
+ #endif
++    // MSL_GAME_DATA_STADIUM_TRANSFORMATIONS was requested at init (last, so
++    // every other member keeps its offset).
++    uint8_t stadium_transformations;
+ } MslCoreGameData;
+ 
+ typedef struct MslCoreMatch {
+@@ -128,6 +131,27 @@ typedef struct MslCoreMatch {
+ } MslCoreMatch;
+ 
+ int msl_core_game_data_init(MslCoreGameData* game_data, const char* data_root);
++enum {
++    // Also preload a transforming Pokemon Stadium (its four forms' archives
++    // and actors), which a match with MSL_PATCH_STADIUM_TRANSFORMATIONS
++    // needs. Off, the GameData is exactly msl_core_game_data_init's.
++    MSL_GAME_DATA_STADIUM_TRANSFORMATIONS = 1u << 0,
++#if MSL_VISUAL_TRACK_BUILD
++    // msl_core_game_data_init_visual's effect data.
++    MSL_GAME_DATA_VISUAL = 1u << 1,
++    MSL_GAME_DATA_KNOWN = MSL_GAME_DATA_STADIUM_TRANSFORMATIONS |
++                          MSL_GAME_DATA_VISUAL,
++#else
++    MSL_GAME_DATA_KNOWN = MSL_GAME_DATA_STADIUM_TRANSFORMATIONS,
++#endif
++};
++int msl_core_game_data_init_options(MslCoreGameData* game_data,
++                                    const char* data_root, unsigned options);
++// For hosts that load GameData before any match config is known (the batch
++// API, the server runner): MSL_GAME_DATA_STADIUM_TRANSFORMATIONS when the
++// environment sets MSL_STADIUM_TRANSFORMATIONS=1 exactly, else 0. Nothing
++// else turns it on.
++unsigned msl_core_game_data_env_options(void);
+ #if MSL_VISUAL_TRACK_BUILD
+ // The same, with the effect data a viewer track's random state needs
+ // (runtime/effects.c); a match with MSL_VISUAL_TRACK requires it.
+diff --git a/src/runtime/wire.h b/src/runtime/wire.h
+index 5158481c..a70456d4 100644
+--- a/src/runtime/wire.h
++++ b/src/runtime/wire.h
+@@ -152,10 +152,13 @@ enum {
+     // External/Frozen All/Core/2.asm: nop the call at 0x8021AAE4.
+     MSL_PATCH_FD_BACKGROUND_FROZEN = 1 << 0,
+     // Pokemon Stadium transforms (the stage's source scheduler and collision
+-    // actors run): the frozen-Stadium code is absent from the capture's list,
+-    // or an API caller asked for it. Clear keeps the frozen stage. Packed in
+-    // this byte as the arithmetic flags reuse theirs, so the config stays 64
+-    // bytes.
++    // actors run). Set only by an explicit caller choice (the API field, a
++    // suite entry's "stadium_transformations": true, --stadium-transformations),
++    // never inferred from a replay's frozen flag, stage or Slippi version;
++    // Pokemon Stadium only, on GameData loaded with
++    // MSL_GAME_DATA_STADIUM_TRANSFORMATIONS (runtime/scalar.h). Clear keeps
++    // the frozen stage. Packed in this byte as the arithmetic flags reuse
++    // theirs, so the config stays 64 bytes.
+     MSL_PATCH_STADIUM_TRANSFORMATIONS = 1 << 1,
+     MSL_PATCH_KNOWN = MSL_PATCH_FD_BACKGROUND_FROZEN |
+                       MSL_PATCH_STADIUM_TRANSFORMATIONS,
+diff --git a/tests/melee_core/stadium_transformations_smoke.c b/tests/melee_core/stadium_transformations_smoke.c
+index ec3693c2..b4ae809f 100644
+--- a/tests/melee_core/stadium_transformations_smoke.c
++++ b/tests/melee_core/stadium_transformations_smoke.c
+@@ -23,6 +23,7 @@ int main(int argc, char** argv)
+     MslCoreStageEvents events = { 0 };
+     MslCoreViewerState views[2];
+     size_t arena_used, frozen_used, allocations, snapshot_size;
++    uint64_t transforming_fingerprint;
+     void* snapshot;
+     unsigned types = 0, phases = 0;
+     int previous = -1, frame, i;
+@@ -35,7 +36,8 @@ int main(int argc, char** argv)
+     config.stock_count = 4;
+     config.slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
+     config.players[0].char_id = config.players[1].char_id = 1;
+-    if (msl_core_game_data_init(&data, argv[1])) return 1;
++    if (msl_core_game_data_init_options(&data, argv[1],
++                                        MSL_GAME_DATA_STADIUM_TRANSFORMATIONS)) return 1;
+     for (i = 0; i < 3; ++i)
+         if (msl_core_match_init(&matches[i], &data, &config, &input)) return 1;
+     arena_used = matches[0].memory.used;
+@@ -90,7 +92,18 @@ int main(int argc, char** argv)
+     printf("Stadium: all transformations, sealed pools, copy/save/restore and resets passed (enabled=%zu frozen=%zu arena bytes)\n", arena_used, frozen_used);
+     free(snapshot);
+     for (i = 0; i < 3; ++i) msl_core_match_destroy(&matches[i]);
++    transforming_fingerprint = data.fingerprint;
+     msl_core_game_data_deinit(&data);
++    // Default GameData: no transforming preload (the sealed data differs) and
++    // a transforming config is refused rather than run on it.
++    if (msl_core_game_data_init(&data, argv[1]) || data.stadium_transformations ||
++        data.fingerprint == transforming_fingerprint) goto fail;
++    if (msl_core_match_init(&matches[0], &data, &config, &input) == 0) goto fail;
++    config.slippi_patches &= (uint8_t) ~MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    if (msl_core_match_init(&matches[0], &data, &config, &input)) goto fail;
++    msl_core_match_destroy(&matches[0]);
++    msl_core_game_data_deinit(&data);
++    printf("Stadium: default GameData has no transforming preload and refuses the setting\n");
+     return 0;
+ fail:
+     fprintf(stderr, "Stadium lifecycle failed at frame %d, types=%x phases=%x\n", frame, types, phases);
+diff --git a/tests/test_stadium_transformation_gating.py b/tests/test_stadium_transformation_gating.py
+index 52735992..7eabfcb5 100644
+--- a/tests/test_stadium_transformation_gating.py
++++ b/tests/test_stadium_transformation_gating.py
+@@ -1,33 +1,195 @@
+-"""Pokemon Stadium transformations stay off unless asked for: the API
+-default, the Slippi patch byte's known bits, and replay-derived configs,
+-which never transform a frozen Stadium (no game data needed)."""
++"""Pokemon Stadium transformations are off unless a caller explicitly turns
++them on: the defaults (C config, API, Python dtype and builders, suites,
++viewer), replay-derived configs and admission never infer them from the
++frozen flag, the stage or the Slippi version, and the GameData preload for
++them runs only when asked for (no game data needed)."""
+ 
+ from __future__ import annotations
+ 
+ import re
++from contextlib import contextmanager
+ from pathlib import Path
++from types import SimpleNamespace
++
++import numpy as np
++import pytest
+ 
+ from melee_sim.config import MatchConfig
+-from tools.validation import admission
++from melee_sim.dtypes import match_config_dtype
++from tools.validation import admission, prepare_replay_benchmark, validate_replay
++from tools.validation.suite_io import load_suite
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ FROZEN_PATCH = bytes.fromhex(
+     "c21d457800000003ffe008903d80801d618c4fd87d8903a64e80042048000000")
++STADIUM_SUITE = "replays/suites/stadium_transformations.json"
++# Every start a replay can carry for Stadium: recorded frozen, the legacy
++# FreezeStadium code, unfrozen (Slippi 3.14-3.16 records False), no flag.
++STADIUM_STARTS = [
++    ({"stage": 3, "is_frozen_ps": True}, {}),
++    ({"stage": 3, "is_frozen_ps": False}, {0xC21D4578: FROZEN_PATCH}),
++    ({"stage": 3, "is_frozen_ps": False}, {}),
++    ({"stage": 3}, {}),
++]
+ 
+ 
+-def test_api_default_is_frozen():
++def test_python_defaults_are_off():
+     assert MatchConfig().stadium_transformations is False
++    row = np.zeros((), dtype=match_config_dtype())
++    assert row["stadium_transformations"] == 0
++
++
++def test_env_batch_writes_the_bit_only_from_the_config():
++    from melee_sim.env_batch import _write_match_config
++
++    row = np.ones((), dtype=match_config_dtype())[()]
++    _write_match_config(row, MatchConfig(stage=3), 0, 2)
++    assert row["stadium_transformations"] == 0
++    _write_match_config(row, MatchConfig(stage=3, stadium_transformations=True), 0, 2)
++    assert row["stadium_transformations"] == 1
+ 
+ 
+-def test_wire_bit_and_known_mask():
++def test_c_defaults_are_off():
+     wire = (ROOT / "src/runtime/wire.h").read_text()
+     assert re.search(r"MSL_PATCH_STADIUM_TRANSFORMATIONS = 1 << 1,", wire)
+     assert re.search(r"MSL_PATCH_KNOWN = MSL_PATCH_FD_BACKGROUND_FROZEN \|\s*MSL_PATCH_STADIUM_TRANSFORMATIONS", wire)
++    api = (ROOT / "src/api.c").read_text()
++    # translate_config zeroes the core config and sets the bit only from the field
++    assert re.search(r"memset\(target, 0, sizeof\(\*target\)\);", api)
++    assert re.search(r"if \(source->stadium_transformations\) \{\s*target->slippi_patches \|= MSL_PATCH_STADIUM_TRANSFORMATIONS;", api)
++    native = (ROOT / "tools/validation/native.c").read_text()
++    assert native.count("int stadium_transformations = 0;") == 2
++    assert re.search(r"if \(replay->stadium_transformations\) \{\s*config->slippi_patches \|= MSL_PATCH_STADIUM_TRANSFORMATIONS;", native)
++    # (and a replay's Stadium events are not even read unless asked for)
++    assert re.search(r"present = replay->stadium_transformations\s*\?", native)
++
++
++def test_game_data_preload_is_explicit_only():
++    scalar = (ROOT / "src/runtime/scalar.c").read_text()
++    calls = re.findall(r"preload_match_configuration\(game_data,[^;]*MSL_PATCH_STADIUM_TRANSFORMATIONS\)", scalar)
++    assert len(calls) == 1
++    assert re.search(r"if \(game_data->stadium_transformations &&\s*preload_match_configuration\(game_data, MSL_CORE_STAGE_POKEMON_STADIUM", scalar)
++    # the default entry points request no options
++    assert re.search(r"int msl_core_game_data_init\(MslCoreGameData\* game_data, const char\* data_root\)\n\{\n    return game_data_init\(game_data, data_root, 0\);", scalar)
++    # the environment opt-in is the exact string "1"
++    assert re.search(r'getenv\("MSL_STADIUM_TRANSFORMATIONS"\);\s*return value != NULL && strcmp\(value, "1"\) == 0', scalar)
++    # and a transforming config on default GameData is refused, not run
++    assert "Stadium transformations need game data loaded with" in scalar
++
++
++def test_frozen_stadium_code_is_the_base_with_the_setting_off():
++    gr = (ROOT / "src/melee/gr/grpstadium.c").read_text()
++    # (every Stadium proc is the source's: 801D4548 is the hosted frozen no-op
++    # unless the config bit is set)
++    assert "msl_stadium_frozen_update" not in gr
++    assert re.search(r"if \(!msl_core_config_stadium_transformations\(&msl_core_active_match\(\)->config\)\) \{\s*return;\s*\}\s*#endif\s*temp_r31 = GET_GROUND\(gobj\);", gr)
++    pose = (ROOT / "src/runtime/fighter_pose.c").read_text()
++    assert re.search(r"if \(!msl_core_config_stadium_transformations\(&msl_core_active_match\(\)->config\)\) \{\s*return;", pose)
+ 
+ 
+-def test_replays_transform_only_unfrozen_stadium():
+-    assert admission.stadium_transformations({"stage": 3}, {}) is True
+-    assert admission.stadium_transformations({"stage": 3, "is_frozen_ps": True}, {}) is False
+-    assert admission.stadium_transformations({"stage": 3}, {0xC21D4578: FROZEN_PATCH}) is False
++@pytest.mark.parametrize(("start", "codes"), STADIUM_STARTS)
++def test_admission_never_infers_transformations(start, codes):
++    assert admission.stadium_transformations(start, codes) is False
+     for stage in (2, 8, 28, 31, 32):
+-        assert admission.stadium_transformations({"stage": stage}, {}) is False
++        assert admission.stadium_transformations({**start, "stage": stage}, codes, requested=True) is False
++
++
++def test_admission_transforms_only_when_asked_for_an_unfrozen_stadium():
++    frozen, legacy, unfrozen, unflagged = STADIUM_STARTS
++    assert admission.stadium_transformations(*frozen, requested=True) is False
++    assert admission.stadium_transformations(*legacy, requested=True) is False
++    assert admission.stadium_transformations(*unfrozen, requested=True) is True
++    assert admission.stadium_transformations(*unflagged, requested=True) is True
++    # (only True itself asks)
++    assert admission.stadium_transformations(*unfrozen, requested=1) is False
++
++
++def test_unfrozen_stadium_is_rejected_unless_asked_for():
++    frozen, legacy, unfrozen, unflagged = STADIUM_STARTS
++    assert not admission.unfrozen_stadium_rejected(*frozen)
++    assert not admission.unfrozen_stadium_rejected(*legacy)
++    assert admission.unfrozen_stadium_rejected(*unfrozen)
++    assert admission.unfrozen_stadium_rejected(*unflagged)
++    assert not admission.unfrozen_stadium_rejected(*unfrozen, stadium_transformations=True)
++    assert "unfrozen-stadium" in (ROOT / "agent_docs/validation/replay_admission.json").read_text()
++
++
++def test_suites_set_it_only_where_written():
++    aggregate = load_suite("replays/suites/melee_core_aggregate.json")
++    explicit = load_suite(STADIUM_SUITE)
++    assert explicit.replays and all(r.stadium_transformations is True for r in explicit.replays)
++    names = {r.replay for r in explicit.replays}
++    for entry in aggregate.replays:
++        assert entry.stadium_transformations is (entry.replay in names)
++
++
++def test_suite_field_must_be_a_literal_bool(tmp_path):
++    suite = tmp_path / "s.json"
++    suite.write_text('{"name": "s", "replays": [{"replay": "x.slpz", "ports": [1, 2], "stage_id": 3, '
++                     '"stadium_transformations": 1}]}')
++    with pytest.raises(ValueError):
++        load_suite(suite)
++    suite.write_text('{"name": "s", "replays": [{"replay": "x.slpz", "ports": [1, 2], "stage_id": 31, '
++                     '"stadium_transformations": true}]}')
++    with pytest.raises(ValueError):
++        load_suite(suite)
++
++
++def _validate_with_fake_native(monkeypatch, tmp_path, start, codes, **kwargs):
++    game = SimpleNamespace(frames=object(), start=start, metadata={})
++    captured: dict[str, object] = {}
++
++    @contextmanager
++    def fake_replay_path(_path: Path):
++        path = tmp_path / "game.slp"
++        path.touch()
++        yield path
++
++    class FakeNative:
++        @staticmethod
++        def validate_replay(_frames, _start, _metadata, **native_kwargs):
++            captured.update(native_kwargs)
++            return {}
++
++    monkeypatch.setattr(validate_replay, "replay_path_for_peppi", fake_replay_path)
++    monkeypatch.setattr(validate_replay, "_read_slippi", lambda _path, _flag: game)
++    monkeypatch.setattr(validate_replay, "gecko_codes", lambda _raw: codes)
++    monkeypatch.setattr(validate_replay, "game_data_dir", lambda: tmp_path)
++    result = validate_replay.validate_one(
++        FakeNative(), tmp_path / "game.slpz", frames=0, start_frame=None, timeout=1.0,
++        backend="native", diagnostic=True, **kwargs)
++    return captured, result
++
++
++@pytest.mark.parametrize(("start", "codes"), STADIUM_STARTS)
++def test_replay_derived_configs_never_set_it(monkeypatch, tmp_path, start, codes):
++    captured, result = _validate_with_fake_native(monkeypatch, tmp_path, start, codes)
++    # (the default call is the base's: no stadium_transformations argument at all)
++    assert "stadium_transformations" not in captured
++    assert "stadium_transformations" not in result
++    assert captured["slippi_patches"] & 2 == 0
++
++
++def test_an_explicit_request_reaches_the_native_config(monkeypatch, tmp_path):
++    captured, result = _validate_with_fake_native(
++        monkeypatch, tmp_path, {"stage": 3, "is_frozen_ps": False}, {}, stadium_transformations=True)
++    assert captured["stadium_transformations"] is True
++    assert result["stadium_transformations"] is True
++
++
++def test_benchmark_cache_keys_are_the_base_unless_asked_for(tmp_path):
++    replay = tmp_path / "game.slpz"
++    replay.write_bytes(b"x")
++    case = validate_replay.ReplayCase(replay, "game.slpz")
++    assert prepare_replay_benchmark.CACHE_VERSION == 6
++    asked = prepare_replay_benchmark._cache_key(
++        validate_replay.ReplayCase(replay, "game.slpz", stadium_transformations=True))
++    assert prepare_replay_benchmark._cache_key(case) != asked
++
++
++def test_viewer_never_infers_it_from_the_frozen_flag():
++    trace = (ROOT / "tools/viewer/msltrace1.js").read_text()
++    assert "isFrozenStadium === false" not in trace
++    assert "settings.stadiumTransformations === true" in trace
++    live = (ROOT / "tools/viewer/live/sim.js").read_text()
++    assert "stadiumTransformations = false," in live
+diff --git a/tools/data/raw.py b/tools/data/raw.py
+index 5af5acb7..0cbe57d5 100644
+--- a/tools/data/raw.py
++++ b/tools/data/raw.py
+@@ -39,6 +39,9 @@ SUPPORTED_CHARACTERS = (
+     "link",
+     "clink",
+ )
++# Pokemon Stadium's four forms: extracted, but needed only by GameData loaded
++# with Stadium transformations explicitly on (MSL_STADIUM_TRANSFORMATIONS=1),
++# so a data directory without them stays valid.
+ STADIUM_ARCHIVES = ("GrPs1.dat", "GrPs2.dat", "GrPs3.dat", "GrPs4.dat")
+ SUPPORTED_STAGES = ("grnla", "grnba", "griz", "grps", "grst", "grop")
+ 
+@@ -122,7 +125,7 @@ def validate_raw_dir(
+             raise DataError(f"malformed game-data file record: {record!r}")
+         indexed[name] = record
+ 
+-    missing = sorted((set(required) | set(STADIUM_ARCHIVES)) - indexed.keys())
++    missing = sorted(set(required) - indexed.keys())
+     if missing:
+         raise DataError("missing required game-data files: " + ", ".join(missing))
+     for name, record in indexed.items():
+diff --git a/tools/validation/admission.py b/tools/validation/admission.py
+index 62b135e9..8f4bee1e 100644
+--- a/tools/validation/admission.py
++++ b/tools/validation/admission.py
+@@ -78,11 +78,24 @@ def stadium_is_frozen(start: dict, codes: dict[int, bytes]) -> bool:
+     return start.get("is_frozen_ps") is True or legacy_frozen
+ 
+ 
+-def stadium_transformations(start: dict, codes: dict[int, bytes]) -> bool:
+-    """Whether a replay's Pokemon Stadium transforms: only on Stadium, and
+-    never when the capture says the stage is frozen (is_frozen_ps or the
+-    legacy FreezeStadium patch). Every other replay runs as before."""
+-    return start.get("stage") == 3 and not stadium_is_frozen(start, codes)
++def stadium_transformations(start: dict, codes: dict[int, bytes], *,
++                            requested: bool = False) -> bool:
++    """Whether to run a replay's Pokemon Stadium with transformations: only
++    when the caller explicitly asks (`requested is True`, e.g. a suite entry's
++    "stadium_transformations": true) and the replay is on Stadium and not
++    recorded frozen. Nothing is inferred from the frozen flag, the stage or
++    the Slippi version: a replay nobody asked for runs frozen, as before."""
++    return (requested is True and start.get("stage") == 3 and
++            not stadium_is_frozen(start, codes))
++
++
++def unfrozen_stadium_rejected(start: dict, codes: dict[int, bytes], *,
++                              stadium_transformations: bool = False) -> bool:
++    """The "unfrozen-stadium" admission rule: a Stadium capture not recorded
++    frozen is admitted only when the caller explicitly runs it with
++    transformations (stadium_transformations=True)."""
++    return (start.get("stage") == 3 and not stadium_is_frozen(start, codes) and
++            stadium_transformations is not True)
+ 
+ 
+ # wire.h MSL_PATCH_*.
+@@ -99,7 +112,8 @@ def slippi_patches(codes: dict[int, bytes]) -> int:
+ 
+ def capture_issues(game, raw: bytes, *, played_on: str | None = None,
+                    fnmsubs_profile: str | None = None,
+-                   jit_arithmetic: str | None = None) -> list[str]:
++                   jit_arithmetic: str | None = None,
++                   stadium_transformations: bool = False) -> list[str]:
+     """Return property violations without running or consulting simulator output."""
+     issues = []
+     identity = hashlib.sha256(raw).hexdigest()
+@@ -124,6 +138,8 @@ def capture_issues(game, raw: bytes, *, played_on: str | None = None,
+         start.get("damage_ratio", 0) <= 0 or start.get("timer") != 480 or
+         start.get("bitfield") not in ([50, 1, 134, 76], [50, 1, 142, 76])):
+         issues.append("unsupported-settings")
++    if unfrozen_stadium_rejected(start, codes, stadium_transformations=stadium_transformations):
++        issues.append("unfrozen-stadium")
+     players = start["players"]
+     if len(players) not in (2, 3, 4) or (len(players) > 2 and not start.get("is_teams")):
+         issues.append("unsupported-settings")
+@@ -214,9 +230,11 @@ def capture_issues(game, raw: bytes, *, played_on: str | None = None,
+ 
+ def require_admissible(game, path: Path, *, played_on: str | None = None,
+                        fnmsubs_profile: str | None = None,
+-                       jit_arithmetic: str | None = None) -> None:
++                       jit_arithmetic: str | None = None,
++                       stadium_transformations: bool = False) -> None:
+     issues = capture_issues(game, path.read_bytes(), played_on=played_on,
+                             fnmsubs_profile=fnmsubs_profile,
+-                            jit_arithmetic=jit_arithmetic)
++                            jit_arithmetic=jit_arithmetic,
++                            stadium_transformations=stadium_transformations)
+     if issues:
+         raise ValueError("ineligible capture: " + ", ".join(issues))
+diff --git a/tools/validation/native.c b/tools/validation/native.c
+index ecb3ebcb..e4336f1b 100644
+--- a/tools/validation/native.c
++++ b/tools/validation/native.c
+@@ -866,7 +866,11 @@ static int load_stage_events(ArrowNode frames, ReplayView* replay, char* error,
+     }
+     replay->dreamland_whispy_list = list.array;
+   }
+-  present = node_child_optional(frames, "stadium_transformation", &list, error, error_size);
++  // Read only when the caller explicitly runs Stadium transformations;
++  // otherwise the replay's events are ignored as before.
++  present = replay->stadium_transformations
++                ? node_child_optional(frames, "stadium_transformation", &list, error, error_size)
++                : 0;
+   if (present < 0) return -1;
+   if (present) {
+     if (list.schema->format == NULL || strcmp(list.schema->format, "+l") != 0 ||
+@@ -1728,7 +1732,7 @@ static int compare_row(const ReplayView* replay, const FrameRows* rows, int64_t
+     const uint8_t* actual_bytes = (const uint8_t*)(const void*)actual + spec->offset;
+     size_t width = field_width((FieldKind)spec->kind);
+     int element;
+-    if (replay->stadium_list == NULL &&
++    if ((!replay->stadium_transformations || replay->stadium_list == NULL) &&
+         (spec->offset == offsetof(MslCoreCompare, stadium_state) ||
+          spec->offset == offsetof(MslCoreCompare, stadium_type))) {
+       continue;
+@@ -2607,6 +2611,11 @@ static PyObject* validate_replay(PyObject* self, PyObject* args, PyObject* kwarg
+     PyErr_SetString(PyExc_ValueError, "visual_track needs a one-shot runner");
+     return NULL;
+   }
++  if (stadium_transformations && runner_stdin >= 0) {
++    // (a one-shot runner loads its GameData for this config: runtime/main.c)
++    PyErr_SetString(PyExc_ValueError, "stadium_transformations needs a one-shot runner");
++    return NULL;
++  }
+   if (timeout <= 0.0 || !isfinite(timeout)) {
+     PyErr_SetString(PyExc_ValueError, "timeout must be positive");
+     return NULL;
+diff --git a/tools/validation/prepare_replay_benchmark.py b/tools/validation/prepare_replay_benchmark.py
+index c035d1a4..b3d95b77 100644
+--- a/tools/validation/prepare_replay_benchmark.py
++++ b/tools/validation/prepare_replay_benchmark.py
+@@ -18,13 +18,14 @@ from tools.validation.validate_replay import (
+     load_suite_cases,
+     ReplayCase,
+ )
+-from tools.validation.admission import gecko_codes, require_admissible, slippi_patches, stadium_transformations
++from tools.validation.admission import gecko_codes, require_admissible, slippi_patches
++from tools.validation.admission import stadium_transformations as admitted_stadium_transformations
+ from tools.validation.slpz import replay_path_for_peppi
+ 
+ 
+ FORMAT_VERSION = 5
+ # Export semantics can change without changing the tape layout.
+-CACHE_VERSION = 7
++CACHE_VERSION = 6
+ DEFAULT_SUITE = ROOT / "replays/suites/melee_core_aggregate.json"
+ DEFAULT_OUTPUT = ROOT / "build/melee_core/benchmark/cases.tsv"
+ 
+@@ -51,6 +52,8 @@ def _cache_key(case: ReplayCase) -> str:
+         identity += "\0fnmsubs=" + case.fnmsubs_profile
+     if case.jit_arithmetic is not None:
+         identity += "\0jit=" + case.jit_arithmetic
++    if case.stadium_transformations:
++        identity += "\0stadium_transformations"
+     return hashlib.sha256(identity.encode()).hexdigest()[:24]
+ 
+ 
+@@ -88,14 +91,21 @@ def prepare(args: argparse.Namespace) -> None:
+     reused = 0
+     skipped_cpu = 0
+     skipped_arithmetic = 0
++    skipped_stadium = 0
+     for case in cases:
++        if case.stadium_transformations and not getattr(args, "stadium_transformations", False):
++            # (explicitly transforming suite entries; their tapes need
++            # --stadium-transformations and a MSL_STADIUM_TRANSFORMATIONS=1 run)
++            skipped_stadium += 1
++            continue
+         # Admission applies even when a tape is cached: a stale export cannot
+         # bypass a changed capture rule or provenance record.
+         with replay_path_for_peppi(case.replay) as peppi_path:
+             game = _read_slippi(str(peppi_path), False)
+             require_admissible(game, peppi_path, played_on=case.played_on,
+                                fnmsubs_profile=case.fnmsubs_profile,
+-                               jit_arithmetic=case.jit_arithmetic)
++                               jit_arithmetic=case.jit_arithmetic,
++                               stadium_transformations=case.stadium_transformations)
+             if any(player["type"] == "Cpu" for player in game.start["players"]):
+                 print(f"skipping CPU recording (controller-only benchmark): {case.display_path}")
+                 skipped_cpu += 1
+@@ -115,7 +125,11 @@ def prepare(args: argparse.Namespace) -> None:
+                         metadata["playedOn"] = case.played_on
+                     frame_count = native.write_benchmark_case(
+                         game.frames, game.start, metadata, str(temporary),
+-                        stadium_transformations=stadium_transformations(game.start, gecko_codes(peppi_path.read_bytes())),
++                        **({"stadium_transformations": True}
++                           if admitted_stadium_transformations(
++                               game.start, gecko_codes(peppi_path.read_bytes()),
++                               requested=case.stadium_transformations)
++                           else {}),
+                         ucf_cardinals_1_0_enabled=case.ucf_cardinals_1_0_enabled,
+                         ucf_shield_sdi_enabled=case.ucf_shield_sdi_enabled,
+                         ucf_sdi_enabled=case.ucf_sdi_enabled,
+@@ -148,6 +162,8 @@ def prepare(args: argparse.Namespace) -> None:
+         f"benchmark cases: selected={len(rows)} skipped_cpu={skipped_cpu} frames={total_frames:,} "
+         f"skipped_arithmetic={skipped_arithmetic} built={built} reused={reused} manifest={output}"
+     )
++    if skipped_stadium:
++        print(f"skipped {skipped_stadium} Stadium-transformations tapes (pass --stadium-transformations)")
+ 
+ 
+ def main() -> None:
+@@ -161,6 +177,9 @@ def main() -> None:
+     parser.add_argument("--force", action="store_true")
+     parser.add_argument("--replay-arithmetic", action="store_true",
+                         help="Include tapes requiring MSL_REPLAY_ARITHMETIC=1.")
++    parser.add_argument("--stadium-transformations", action="store_true",
++                        help="Include suite entries that explicitly run Stadium transformations; "
++                             "run the benchmark with MSL_STADIUM_TRANSFORMATIONS=1.")
+     prepare(parser.parse_args())
+ 
+ 
+diff --git a/tools/validation/suite_io.py b/tools/validation/suite_io.py
+index f273c55b..ac6d8475 100644
+--- a/tools/validation/suite_io.py
++++ b/tools/validation/suite_io.py
+@@ -21,6 +21,10 @@ class SuiteReplay:
+     played_on: str | None = None
+     fnmsubs_profile: str | None = None
+     jit_arithmetic: str | None = None
++    # Run Pokemon Stadium with transformations: only an entry's explicit
++    # "stadium_transformations": true sets it (runtime/wire.h
++    # MSL_PATCH_STADIUM_TRANSFORMATIONS). Never inferred from the replay.
++    stadium_transformations: bool = False
+ 
+ 
+ @dataclass(frozen=True)
+@@ -144,6 +148,11 @@ def _load_suite(path: Path, stack: tuple[Path, ...]) -> ReplaySuite:
+         jit_arithmetic = r.get("jit_arithmetic")
+         if jit_arithmetic not in (None, "fma", "split-fma"):
+             raise ValueError(f"invalid jit_arithmetic for {replay}: {jit_arithmetic!r}")
++        stadium_transformations = r.get("stadium_transformations", False)
++        if stadium_transformations not in (False, True) or not isinstance(stadium_transformations, bool):
++            raise ValueError(f"invalid stadium_transformations for {replay}: {stadium_transformations!r}")
++        if stadium_transformations and r.get("stage_id") != 3:
++            raise ValueError(f"stadium_transformations needs Pokemon Stadium (stage_id 3): {replay}")
+         ports = tuple(int(x) for x in r.get("ports", []))
+         if not ports:
+             raise ValueError(f"Suite replay missing ports: {replay}")
+@@ -181,6 +190,7 @@ def _load_suite(path: Path, stack: tuple[Path, ...]) -> ReplaySuite:
+                 played_on=(str(r["played_on"]) if "played_on" in r else None),
+                 fnmsubs_profile=fnmsubs_profile,
+                 jit_arithmetic=jit_arithmetic,
++                stadium_transformations=stadium_transformations,
+             )
+         )
+     replay_path_counts = Counter(replay.replay for replay in replays)
+diff --git a/tools/validation/validate_replay.py b/tools/validation/validate_replay.py
+index 886b3cf0..95b3618b 100644
+--- a/tools/validation/validate_replay.py
++++ b/tools/validation/validate_replay.py
+@@ -24,7 +24,8 @@ from tools.validation.slpz import (
+     resolve_replay_path,
+     set_native_unorder_events,
+ )
+-from tools.validation.admission import gecko_codes, require_admissible, slippi_patches, stadium_transformations
++from tools.validation.admission import gecko_codes, require_admissible, slippi_patches
++from tools.validation.admission import stadium_transformations as admitted_stadium_transformations
+ from tools.validation.suite_io import ReplaySuite, display_path_under_repo, load_suite
+ 
+ 
+@@ -45,7 +46,7 @@ DEFAULT_OUTPUT_LOCKS = ROOT / "replays/suites/melee_core_output_locks.json"
+ 
+ STAGE_NAMES = {
+     2: "Fountain",
+-    3: "Pokémon Stadium",
++    3: "Frozen Stadium",
+     8: "Yoshi's",
+     28: "Dream Land",
+     31: "Battlefield",
+@@ -68,6 +69,8 @@ class ReplayCase:
+     played_on: str | None = None
+     fnmsubs_profile: str | None = None
+     jit_arithmetic: str | None = None
++    # (suite_io.SuiteReplay.stadium_transformations: explicit only)
++    stadium_transformations: bool = False
+ 
+ 
+ @dataclass(frozen=True)
+@@ -331,6 +334,7 @@ def validate_one(
+     runner: _NativeRunner | None = None,
+     diagnostic: bool = False,
+     visual_track: bool = False,
++    stadium_transformations: bool = False,
+ ) -> dict[str, object]:
+     # Python owns only the replay-loading boundary. The native extension consumes
+     # Peppi's Arrow buffers through the Arrow C Data Interface without NumPy or
+@@ -340,8 +344,11 @@ def validate_one(
+         game = _read_slippi(str(peppi_path), False)
+         if not diagnostic:
+             require_admissible(game, peppi_path, played_on=played_on, fnmsubs_profile=fnmsubs_profile,
+-                               jit_arithmetic=jit_arithmetic)
++                               jit_arithmetic=jit_arithmetic,
++                               stadium_transformations=stadium_transformations)
+         codes = gecko_codes(peppi_path.read_bytes())
++        transformations = admitted_stadium_transformations(
++            game.start, codes, requested=stadium_transformations)
+         metadata = game.metadata
+         if played_on is not None:
+             metadata = dict(metadata)
+@@ -350,7 +357,6 @@ def validate_one(
+             game.frames,
+             game.start,
+             metadata,
+-            stadium_transformations=stadium_transformations(game.start, gecko_codes(peppi_path.read_bytes())),
+             qemu=str(QEMU),
+             sysroot=str(SYSROOT),
+             binary=str(NATIVE_BINARY if backend == "native" else PPC_BINARY),
+@@ -374,7 +380,11 @@ def validate_one(
+             # MSL_VISUAL_TRACK_BUILD=1): the result carries the viewer track's
+             # lines as "visual_track" (tools/validation/visual_state.py).
+             visual_track=visual_track,
++            # (passed only when explicitly on, so a default call is the base's)
++            **({"stadium_transformations": True} if transformations else {}),
+         )
++    if transformations:
++        result["stadium_transformations"] = True
+     result["admitted"] = not diagnostic
+     result["diagnostic"] = diagnostic or signed_zero_equal or frames != 0 or start_frame is not None
+     result["fnmsubs_profile"] = fnmsubs_profile or "metadata"
+@@ -485,6 +495,7 @@ def load_suite_cases(
+                 played_on=entry.played_on,
+                 fnmsubs_profile=entry.fnmsubs_profile,
+                 jit_arithmetic=entry.jit_arithmetic,
++                stadium_transformations=entry.stadium_transformations,
+             )
+         )
+     if not cases:
+@@ -532,7 +543,11 @@ def _validate_case(
+ ) -> ReplayOutcome:
+     started = time.perf_counter()
+     try:
+-        runner = runner_pool.acquire() if runner_pool is not None else None
++        # A Stadium-transformations case runs in its own one-shot runner,
++        # whose GameData is loaded for that config (runtime/main.c); the pooled
++        # runners keep the default GameData every other case shares.
++        runner = (runner_pool.acquire()
++                  if runner_pool is not None and not case.stadium_transformations else None)
+         try:
+             result = validate_one(
+                 native,
+@@ -554,6 +569,7 @@ def _validate_case(
+                 jit_arithmetic=case.jit_arithmetic,
+                 runner=runner,
+                 diagnostic=diagnostic,
++                **({"stadium_transformations": True} if case.stadium_transformations else {}),
+             )
+         except Exception as exc:
+             if runner is not None and runner_pool is not None:
+@@ -629,6 +645,8 @@ def _case_scope(case: ReplayCase) -> str:
+     if case.stage_id is None:
+         return profile
+     stage = STAGE_NAMES.get(case.stage_id, f"stage {case.stage_id}")
++    if case.stadium_transformations:
++        stage = "Pokémon Stadium (transformations)"
+     players = "/".join(case.characters)
+     ports = "/".join(f"P{port}" for port in case.ports)
+     return f"{stage} {players} {ports} {profile}".rstrip()
+@@ -790,6 +808,11 @@ def main() -> int:
+         "--jit-arithmetic", choices=("fma", "split-fma"),
+         help="Recording double-FMA semantics; omission preserves fused arithmetic.",
+     )
++    parser.add_argument(
++        "--stadium-transformations", action="store_true",
++        help="Run the selected unfrozen Pokemon Stadium replays with transformations "
++             "(off by default; never inferred from the replay).",
++    )
+     parser.add_argument("--backend", choices=("ppc", "native", "both"), default="native")
+     parser.add_argument(
+         "--timing", action="store_true", help="Print per-replay runner timing."
+@@ -868,6 +891,8 @@ def main() -> int:
+             cases = [replace(case, fnmsubs_profile=args.fnmsubs_profile) for case in cases]
+         if args.jit_arithmetic is not None:
+             cases = [replace(case, jit_arithmetic=args.jit_arithmetic) for case in cases]
++        if args.stadium_transformations:
++            cases = [replace(case, stadium_transformations=True) for case in cases]
+         if args.write_output_locks and suite is not None and suite.name == "melee_core_aggregate":
+             selected = {entry.replay for entry in suite.replays}
+             output_locks = {key: lock for key, lock in output_locks.items() if key in selected}
+diff --git a/tools/viewer/live/viewer_adapter.js b/tools/viewer/live/viewer_adapter.js
+index 930fa08e..5b19214f 100644
+--- a/tools/viewer/live/viewer_adapter.js
++++ b/tools/viewer/live/viewer_adapter.js
+@@ -131,6 +131,9 @@ export function viewerSettingsFromState(state) {
+     stageId,
+     isPal: false,
+     isFrozenStadium: stageId === 3 && !u8(state, viewerOffsets.stage + viewerStageOffsets.stadiumType),
++    // (the sim writes a Stadium type only for a match whose config turned
++    // transformations on: runtime/viewer.c)
++    stadiumTransformations: stageId === 3 && Boolean(u8(state, viewerOffsets.stage + viewerStageOffsets.stadiumType)),
+     platform: "dolphin",
+     consoleNickname: "melee-sim-light-browser",
+     timerType: "counting down",
+diff --git a/tools/viewer/msltrace1.js b/tools/viewer/msltrace1.js
+index d34a9798..0777960b 100644
+--- a/tools/viewer/msltrace1.js
++++ b/tools/viewer/msltrace1.js
+@@ -192,7 +192,8 @@ function viewerSettings(trace) {
+     isTeams: Boolean(match.isTeams),
+     stageId,
+     isPal: false,
+-    isFrozenStadium: stageId === 3 && !match.stadiumTransformations,
++    isFrozenStadium: stageId === 3 && match.stadiumTransformations !== true,
++    stadiumTransformations: stageId === 3 && match.stadiumTransformations === true,
+     platform: "dolphin",
+     consoleNickname: "melee-sim-light",
+     timerType: "counting down",
+@@ -627,7 +628,9 @@ export function replayDataToMslTrace({
+     throw new Error("No trace frames are available.");
+   }
+   const settings = replayData.settings;
+-  const stadiumTransformations = settings.stageId === 3 && settings.isFrozenStadium === false;
++  // Only the explicit setting (a sim trace's, carried by viewerSettings or the
++  // live viewer): a replay's isFrozenStadium never turns it on.
++  const stadiumTransformations = settings.stageId === 3 && settings.stadiumTransformations === true;
+   const playerSettings = settings.playerSettings || [];
+   const numPlayers = Number(settings.characterUiPlacesCount || playerSettings.length || 2);
+   const firstFrame = replayData.frames[0];
+diff --git a/tools/viewer/slippi-viewer/src/common/types.ts b/tools/viewer/slippi-viewer/src/common/types.ts
+index b823a88c..7676a548 100644
+--- a/tools/viewer/slippi-viewer/src/common/types.ts
++++ b/tools/viewer/slippi-viewer/src/common/types.ts
+@@ -135,6 +135,9 @@ export interface GameSettings {
+   readonly isPal: boolean;
+   /** Only set by Nintendont. Does not affect online matches */
+   readonly isFrozenStadium: boolean;
++  // melee-sim-light only: the sim ran this Pokemon Stadium with
++  // transformations, an explicit setting (never a replay's frozen flag)
++  readonly stadiumTransformations?: boolean;
+   /** Indexed by playerIndex (port - 1). Do not check length */
+   readonly playerSettings: PlayerSettings[];
+   readonly platform: "dolphin" | "console" | "network";
+-- 
+2.43.0
+

@@ -1,0 +1,604 @@
+From 28d3176810c1f5b6188c91427127ccd3cdb8b974 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 11:36:20 +0000
+Subject: [PATCH 8/8] Stadium transformations: their own bit in
+ arithmetic_flags, slippi_patches as in the base
+
+Bit 1 of slippi_patches already means MSL_PATCH_PREVENT_WOBBLING to drivers
+on newer layouts (tools/replay/replay_drive.py writes bits 1 to 6 from the
+replay's codes), so nearly every replay turned transformations on, and bits
+2 to 7 were refused. slippi_patches is the base's again: only bit 0 is read,
+nothing is refused. The setting is MSL_CONFIG_STADIUM_TRANSFORMATIONS, bit 7
+of arithmetic_flags, the one byte whose other bits every driver leaves clear
+(the core has always refused them).
+
+The Stadium checks are one function, msl_core_stadium_config_error, which
+match construction runs. stadium-defaults-smoke (no game data) runs it on
+the replay driver's config (config_from_tape, every slippi_patches value and
+each arithmetic mode), the validation runner's (over the wire) and the
+API's (over noise), on every legal stage, against default GameData. It
+fails on the old bit ("replay_drive: transformations on (stage 2, value
+0x02)") and passes now.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ src/runtime/scalar.c                          |  51 +++--
+ src/runtime/scalar.h                          |   9 +-
+ src/runtime/wire.h                            |  36 ++--
+ tests/melee_core/stadium_defaults_smoke.c     | 188 ++++++++++++------
+ .../stadium_transformations_smoke.c           |   8 +-
+ tests/test_stadium_transformation_gating.py   |  22 +-
+ tools/validation/native.c                     |   2 +-
+ tools/validation/suite_io.py                  |   2 +-
+ tools/viewer/live/sim.js                      |  10 +-
+ 9 files changed, 218 insertions(+), 110 deletions(-)
+
+diff --git a/src/runtime/scalar.c b/src/runtime/scalar.c
+index 77047a96..10b49a66 100644
+--- a/src/runtime/scalar.c
++++ b/src/runtime/scalar.c
+@@ -659,12 +659,29 @@ static void seed_previous_input(Fighter* fp, const MslCoreInputPlayer* input)
+     fp->x221D_b3 = false;
+ }
+ 
++const char* msl_core_stadium_config_error(const MslCoreMatchConfig* config,
++                                          const MslCoreGameData* game_data)
++{
++    if (!msl_core_config_stadium_transformations(config)) {
++        return NULL;
++    }
++    if (config->stage_id != MSL_CORE_STAGE_POKEMON_STADIUM) {
++        return "Stadium transformations need Pokemon Stadium";
++    }
++    if (game_data != NULL && !game_data->stadium_transformations) {
++        return "Stadium transformations need game data loaded with "
++               "MSL_GAME_DATA_STADIUM_TRANSFORMATIONS";
++    }
++    return NULL;
++}
++
+ static int validate_config(MslCoreMatchConfig* config)
+ {
+     int i;
+ 
+     if (config->arithmetic_flags &
+-        ~(MSL_ARITHMETIC_LEGACY_FNMSUBS | MSL_ARITHMETIC_SPLIT_FMA)) {
++        ~(MSL_ARITHMETIC_LEGACY_FNMSUBS | MSL_ARITHMETIC_SPLIT_FMA |
++          MSL_CONFIG_STADIUM_TRANSFORMATIONS)) {
+         fprintf(stderr, "unsupported replay arithmetic mode\n");
+         return -1;
+     }
+@@ -675,14 +692,12 @@ static int validate_config(MslCoreMatchConfig* config)
+     }
+ #endif
+ 
+-    if (config->slippi_patches & ~MSL_PATCH_KNOWN) {
+-        fprintf(stderr, "unsupported Slippi patch bits\n");
+-        return -1;
+-    }
+-    if (msl_core_config_stadium_transformations(config) &&
+-        config->stage_id != MSL_CORE_STAGE_POKEMON_STADIUM) {
+-        fprintf(stderr, "Stadium transformations need Pokemon Stadium\n");
+-        return -1;
++    {
++        const char* stadium = msl_core_stadium_config_error(config, NULL);
++        if (stadium != NULL) {
++            fprintf(stderr, "%s\n", stadium);
++            return -1;
++        }
+     }
+     if (stage_spec(config->stage_id) == NULL) {
+         fprintf(stderr,
+@@ -1138,11 +1153,13 @@ static int match_construct(MslCoreMatch* match,
+         return -1;
+     }
+ #ifdef MSL_CORE_NATIVE
+-    if (msl_core_config_stadium_transformations(&match->config) &&
+-        !game_data->stadium_transformations) {
+-        fprintf(stderr, "Stadium transformations need game data loaded with "
+-                        "MSL_GAME_DATA_STADIUM_TRANSFORMATIONS\n");
+-        return -1;
++    {
++        const char* stadium =
++            msl_core_stadium_config_error(&match->config, game_data);
++        if (stadium != NULL) {
++            fprintf(stderr, "%s\n", stadium);
++            return -1;
++        }
+     }
+ #endif
+ #if MSL_VISUAL_TRACK_BUILD
+@@ -1699,7 +1716,7 @@ static int match_construct(MslCoreMatch* match,
+ static int preload_match_configuration(MslCoreGameData* game_data,
+                                        uint8_t stage_id, uint8_t char_id,
+                                        uint8_t opponent_id,
+-                                       uint8_t slippi_patches)
++                                       uint8_t arithmetic_flags)
+ {
+     MslCoreMatch* match;
+     MslCoreMatchConfig config;
+@@ -1713,7 +1730,7 @@ static int preload_match_configuration(MslCoreGameData* game_data,
+     memset(&config, 0, sizeof(config));
+     memset(&previous_input, 0, sizeof(previous_input));
+     config.stage_id = stage_id;
+-    config.slippi_patches = slippi_patches;
++    config.arithmetic_flags = arithmetic_flags;
+     config.frame_id = -123;
+     config.frame_pre_random_seed = 1;
+     config.initial_random_seed = 1;
+@@ -1869,7 +1886,7 @@ static int preload_supported_game_data(MslCoreGameData* game_data)
+     if (game_data->stadium_transformations &&
+         preload_match_configuration(game_data, MSL_CORE_STAGE_POKEMON_STADIUM,
+                                     MSL_CORE_CHAR_FOX, MSL_CORE_CHAR_FOX,
+-                                    MSL_PATCH_STADIUM_TRANSFORMATIONS) != 0)
++                                    MSL_CONFIG_STADIUM_TRANSFORMATIONS) != 0)
+     {
+         return -1;
+     }
+diff --git a/src/runtime/scalar.h b/src/runtime/scalar.h
+index fcafa6fb..a44ba970 100644
+--- a/src/runtime/scalar.h
++++ b/src/runtime/scalar.h
+@@ -133,7 +133,7 @@ typedef struct MslCoreMatch {
+ int msl_core_game_data_init(MslCoreGameData* game_data, const char* data_root);
+ enum {
+     // Also preload a transforming Pokemon Stadium (its four forms' archives
+-    // and actors), which a match with MSL_PATCH_STADIUM_TRANSFORMATIONS
++    // and actors), which a match with MSL_CONFIG_STADIUM_TRANSFORMATIONS
+     // needs. Off, the GameData is exactly msl_core_game_data_init's.
+     MSL_GAME_DATA_STADIUM_TRANSFORMATIONS = 1u << 0,
+ #if MSL_VISUAL_TRACK_BUILD
+@@ -147,6 +147,13 @@ enum {
+ };
+ int msl_core_game_data_init_options(MslCoreGameData* game_data,
+                                     const char* data_root, unsigned options);
++// Why a match with this config may not run on Stadium transformations'
++// account, or NULL: the bit (MSL_CONFIG_STADIUM_TRANSFORMATIONS) off is always
++// NULL; on, it needs Pokemon Stadium and, when game_data is given, GameData
++// loaded with MSL_GAME_DATA_STADIUM_TRANSFORMATIONS. Match construction
++// refuses a config with this message.
++const char* msl_core_stadium_config_error(const MslCoreMatchConfig* config,
++                                          const MslCoreGameData* game_data);
+ #if MSL_VISUAL_TRACK_BUILD
+ // The same, with the effect data a viewer track's random state needs
+ // (runtime/effects.c); a match with MSL_VISUAL_TRACK requires it.
+diff --git a/src/runtime/wire.h b/src/runtime/wire.h
+index a70456d4..2b584063 100644
+--- a/src/runtime/wire.h
++++ b/src/runtime/wire.h
+@@ -151,25 +151,8 @@ typedef struct MslCoreMatchConfig {
+ enum {
+     // External/Frozen All/Core/2.asm: nop the call at 0x8021AAE4.
+     MSL_PATCH_FD_BACKGROUND_FROZEN = 1 << 0,
+-    // Pokemon Stadium transforms (the stage's source scheduler and collision
+-    // actors run). Set only by an explicit caller choice (the API field, a
+-    // suite entry's "stadium_transformations": true, --stadium-transformations),
+-    // never inferred from a replay's frozen flag, stage or Slippi version;
+-    // Pokemon Stadium only, on GameData loaded with
+-    // MSL_GAME_DATA_STADIUM_TRANSFORMATIONS (runtime/scalar.h). Clear keeps
+-    // the frozen stage. Packed in this byte as the arithmetic flags reuse
+-    // theirs, so the config stays 64 bytes.
+-    MSL_PATCH_STADIUM_TRANSFORMATIONS = 1 << 1,
+-    MSL_PATCH_KNOWN = MSL_PATCH_FD_BACKGROUND_FROZEN |
+-                      MSL_PATCH_STADIUM_TRANSFORMATIONS,
+ };
+ 
+-static inline int msl_core_config_stadium_transformations(
+-    const MslCoreMatchConfig* config)
+-{
+-    return (config->slippi_patches & MSL_PATCH_STADIUM_TRANSFORMATIONS) != 0;
+-}
+-
+ enum {
+     // camera_mode's top bit: keep a viewer track for this match
+     // (runtime/viewer_track.h, agent_docs/VIEWER_TRACK.md). Only a build with
+@@ -181,8 +164,27 @@ enum {
+     MSL_ARITHMETIC_LEGACY_FNMSUBS = 1 << 0,
+     // Round the double product before adding, as Slippi Jit64 can do.
+     MSL_ARITHMETIC_SPLIT_FMA = 1 << 1,
++    // Not arithmetic: Pokemon Stadium transforms (the stage's source
++    // scheduler and collision actors run). It shares this byte because the
++    // config has no free one, and this is the byte whose other bits every
++    // existing driver leaves clear: the core has always refused a config with
++    // any bit here but the two above. (slippi_patches is not one: drivers
++    // following newer layouts put their own MSL_PATCH_* bits there, which
++    // the core ignores.) Set only by an explicit caller choice (a suite
++    // entry's "stadium_transformations": true, --stadium-transformations,
++    // the live viewer's button), never inferred from a replay's frozen flag,
++    // stage or Slippi version; Pokemon Stadium only, on GameData loaded with
++    // MSL_GAME_DATA_STADIUM_TRANSFORMATIONS (runtime/scalar.h). Clear keeps
++    // the frozen stage.
++    MSL_CONFIG_STADIUM_TRANSFORMATIONS = 1 << 7,
+ };
+ 
++static inline int msl_core_config_stadium_transformations(
++    const MslCoreMatchConfig* config)
++{
++    return (config->arithmetic_flags & MSL_CONFIG_STADIUM_TRANSFORMATIONS) != 0;
++}
++
+ // Native validation workers keep immutable GameData alive across jobs. The
+ // frame count gives each job an explicit boundary without closing the stream;
+ // config remains the same little-endian wire consumed by the one-shot runner.
+diff --git a/tests/melee_core/stadium_defaults_smoke.c b/tests/melee_core/stadium_defaults_smoke.c
+index b4204432..52d3e1c6 100644
+--- a/tests/melee_core/stadium_defaults_smoke.c
++++ b/tests/melee_core/stadium_defaults_smoke.c
+@@ -1,57 +1,137 @@
+-// Pokemon Stadium transformations stay off for every config the base's
+-// drivers build, Stadium or not (no game data needed):
++// Pokemon Stadium transformations stay off, and match construction raises
++// none of their errors, for every config a driver builds without asking for
++// them, Stadium or not (no game data needed). Each config goes through
++// msl_core_stadium_config_error, the check match construction runs, against
++// GameData as msl_core_game_data_init leaves it (no transforming preload):
++// - the replay driver's (tools/replay/replay_drive.c config_from_tape): a
++//   zeroed config with the tape's settings, its slippi_patches every value a
++//   tape can hold - drivers on newer layouts put MSL_PATCH_PREVENT_WOBBLING,
++//   _RETAIL_SPAWNS, _POST_FRAME_AT_MAP and the UCF-absent bits (1 to 6)
++//   there - and its arithmetic flags each mode the core runs;
++// - the validation runner's (tools/validation/native.c build_match_config):
++//   the same, its patches from tools/validation/admission.py, sent over the
++//   wire and decoded as runtime/main.c decodes it;
+ // - the public API's MslMatchConfig, set field by field over memory that is
+-//   not zeroed (every byte, the struct's padding too, holds noise first), as
+-//   a caller compiled against the base's api.h may leave it, then translated
+-//   as msl_batch_reset translates it;
+-// - the replay runner's wire config, built as tools/validation/native.c's
+-//   build_match_config builds it from a replay (zeroed, the replay's Slippi
+-//   patches from tools/validation/admission.py, which only ever sets
+-//   MSL_PATCH_FD_BACKGROUND_FROZEN), then decoded as runtime/main.c decodes it.
+-// Only an explicit request (the suite field, --stadium-transformations) sets
+-// MSL_PATCH_STADIUM_TRANSFORMATIONS.
++//   not zeroed (every byte, the struct's padding too, holds noise first) and
++//   translated as msl_batch_reset translates it.
++// Only an explicit request (the suite field, --stadium-transformations, the
++// live viewer's button) sets MSL_CONFIG_STADIUM_TRANSFORMATIONS; the last
++// checks show the check still refuses that bit off Stadium and on default
++// GameData.
+ 
+ #include "runtime/api_config.h"
++#include "runtime/scalar.h"
+ #include "runtime/wire.h"
+ 
+ #include <stdio.h>
+ #include <string.h>
+ 
+-static int fail(const char* what, int stage, int noise)
++static const uint8_t stages[] = { 2, 3, 8, 28, 31, 32 };
++static const uint8_t arithmetic[] = { 0, MSL_ARITHMETIC_LEGACY_FNMSUBS, MSL_ARITHMETIC_SPLIT_FMA,
++                                      MSL_ARITHMETIC_LEGACY_FNMSUBS | MSL_ARITHMETIC_SPLIT_FMA };
++
++static int fail(const char* path, const char* why, int stage, int value)
+ {
+-    fprintf(stderr, "Stadium defaults: %s (stage %d, noise 0x%02x)\n", what, stage, noise);
++    fprintf(stderr, "Stadium defaults: %s: %s (stage %d, value 0x%02x)\n", path, why, stage, value);
+     return 1;
+ }
+ 
++// The core config a recorded tape gives, as replay_drive.c's config_from_tape
++// fills it (the fields this core has).
++static void replay_drive_config(MslCoreMatchConfig* config, uint8_t stage, uint8_t patches,
++                                uint8_t arithmetic_flags)
++{
++    int player;
++    memset(config, 0, sizeof(*config));
++    config->stage_id = stage;
++    config->frame_id = -124;
++    config->frame_pre_random_seed = 0x12345678;
++    config->initial_random_seed = 0x9ABCDEF0;
++    config->match_damage_ratio = 1.0F;
++    config->num_players = 2;
++    config->stock_count = 4;
++    config->arithmetic_flags = arithmetic_flags;
++    config->brawl_offscreen_damage = 1;
++    config->freeze_dead_up_fall_physics = 1;
++    config->whispy_dead_fighter_fix = 1;
++    config->ucf_cardinals_1_0_enabled = 1;
++    config->ucf_shield_sdi_enabled = 1;
++    config->ucf_sdi_enabled = 1;
++    config->ucf_shield_drop_extended_enabled = 1;
++    config->ucf_shield_drop_084_enabled = 1;
++    config->stage_event_streams = 3;
++    config->slippi_patches = patches;
++    for (player = 0; player < 2; ++player) {
++        config->players[player].char_id = 1;
++        config->players[player].team_id = (uint8_t) player;
++        config->players[player].facing_and_port = (uint8_t) ((player + 1) << 1);
++        config->players[player].handicap = 9;
++    }
++}
++
+ int main(void)
+ {
+-    static const int stages[] = { MSL_STAGE_FINAL_DESTINATION, MSL_STAGE_FOUNTAIN_OF_DREAMS,
+-                                  MSL_STAGE_POKEMON_STADIUM };
+-    static const int noises[] = { 0x00, 0x01, 0x02, 0x03, 0x7F, 0xA5, 0xFF };
+-    size_t s, n;
++    static const int noises[] = { 0x00, 0x01, 0x02, 0x03, 0x7F, 0x80, 0xA5, 0xFF };
++    MslCoreGameData default_data;
++    MslCoreGameData transforming_data;
++    MslCoreMatchConfig config;
++    size_t s, a, n;
+     int patches;
++    const char* error;
+ 
+-    for (s = 0; s < sizeof(stages) / sizeof(stages[0]); ++s) {
++    // (what this check reads of GameData: msl_core_game_data_init leaves the
++    // option off, msl_core_game_data_init_options with it on)
++    memset(&default_data, 0, sizeof(default_data));
++    memset(&transforming_data, 0, sizeof(transforming_data));
++    transforming_data.stadium_transformations = 1;
++
++    for (s = 0; s < sizeof(stages); ++s) {
++        // the replay driver: every Slippi patch byte a tape can carry
++        for (a = 0; a < sizeof(arithmetic); ++a) {
++            for (patches = 0; patches <= 0xFF; ++patches) {
++                replay_drive_config(&config, stages[s], (uint8_t) patches, arithmetic[a]);
++                if (msl_core_config_stadium_transformations(&config)) {
++                    return fail("replay_drive", "transformations on", stages[s], patches);
++                }
++                error = msl_core_stadium_config_error(&config, &default_data);
++                if (error != NULL) {
++                    return fail("replay_drive", error, stages[s], patches);
++                }
++            }
++        }
++        // the validation runner, over the wire
++        for (patches = 0; patches <= MSL_PATCH_FD_BACKGROUND_FROZEN; ++patches) {
++            MslCoreMatchConfig decoded;
++            uint8_t wire[sizeof(MslCoreMatchConfig)];
++            replay_drive_config(&config, stages[s], (uint8_t) patches, MSL_ARITHMETIC_LEGACY_FNMSUBS);
++            memcpy(wire, &config, sizeof(wire));
++            memset(&decoded, 0xFF, sizeof(decoded));
++            msl_core_decode_match_config(&decoded, wire);
++            error = msl_core_stadium_config_error(&decoded, &default_data);
++            if (msl_core_config_stadium_transformations(&decoded) || error != NULL) {
++                return fail("validation runner", error ? error : "transformations on", stages[s],
++                            patches);
++            }
++        }
++        // the public API, over noise
+         for (n = 0; n < sizeof(noises) / sizeof(noises[0]); ++n) {
+-            MslMatchConfig config;
++            MslMatchConfig api;
+             MslMatchConfig defaults = msl_match_config_default();
+-            MslCoreMatchConfig core;
+             uint32_t player;
+-            // (the fields the base's api.h has, one by one, over noise)
++            memset(&api, noises[n], sizeof(api));
+             memset(&config, noises[n], sizeof(config));
+-            memset(&core, noises[n], sizeof(core));
+-            config.stage = (uint32_t) stages[s];
+-            config.random_seed = 1;
+-            config.max_frame = -1;
+-            config.damage_ratio = 1.0F;
+-            config.num_players = 2;
+-            config.is_teams = 0;
+-            config.friendly_fire = 0;
+-            config.stocks = 4;
+-            config.viewpoint_player = 0;
+-            config.ucf_cardinals = 1;
++            api.stage = stages[s];
++            api.random_seed = 1;
++            api.max_frame = -1;
++            api.damage_ratio = 1.0F;
++            api.num_players = 2;
++            api.is_teams = 0;
++            api.friendly_fire = 0;
++            api.stocks = 4;
++            api.viewpoint_player = 0;
++            api.ucf_cardinals = 1;
+             for (player = 0; player < MSL_MAX_PLAYERS; ++player) {
+-                MslPlayerConfig* p = &config.players[player];
++                MslPlayerConfig* p = &api.players[player];
+                 p->character = defaults.players[player].character;
+                 p->team = MSL_TEAM_AUTO;
+                 p->facing = MSL_FACING_AUTO;
+@@ -60,35 +140,31 @@ int main(void)
+                 p->handicap = 9;
+                 p->start_percent = 0;
+             }
+-            if (msl_api_translate_config(&config, &core) != 0) {
+-                return fail("the API refused a base config", stages[s], noises[n]);
++            if (msl_api_translate_config(&api, &config) != 0) {
++                return fail("API", "a base config refused", stages[s], noises[n]);
+             }
+-            if (msl_core_config_stadium_transformations(&core)) {
+-                return fail("the API turned transformations on", stages[s], noises[n]);
++            error = msl_core_stadium_config_error(&config, &default_data);
++            if (msl_core_config_stadium_transformations(&config) || error != NULL) {
++                return fail("API", error ? error : "transformations on", stages[s], noises[n]);
+             }
+-            // (and the API's own default)
+-            defaults.stage = (uint32_t) stages[s];
+-            if (msl_api_translate_config(&defaults, &core) != 0 ||
+-                msl_core_config_stadium_transformations(&core)) {
+-                return fail("msl_match_config_default", stages[s], noises[n]);
++            defaults.stage = stages[s];
++            if (msl_api_translate_config(&defaults, &config) != 0 ||
++                msl_core_stadium_config_error(&config, &default_data) != NULL) {
++                return fail("API", "msl_match_config_default", stages[s], noises[n]);
+             }
+         }
+-        for (patches = 0; patches <= MSL_PATCH_FD_BACKGROUND_FROZEN; ++patches) {
+-            MslCoreMatchConfig built;
+-            MslCoreMatchConfig decoded;
+-            uint8_t wire[sizeof(MslCoreMatchConfig)];
+-            memset(&built, 0, sizeof(built));
+-            built.stage_id = (uint8_t) stages[s];
+-            built.num_players = 2;
+-            built.slippi_patches = (uint8_t) patches;
+-            memcpy(wire, &built, sizeof(wire));
+-            memset(&decoded, 0xFF, sizeof(decoded));
+-            msl_core_decode_match_config(&decoded, wire);
+-            if (msl_core_config_stadium_transformations(&decoded)) {
+-                return fail("the runner's config turned transformations on", stages[s], patches);
++        // an explicit request: run on Stadium with the transforming GameData only
++        replay_drive_config(&config, stages[s], 0x7F, MSL_ARITHMETIC_LEGACY_FNMSUBS);
++        config.arithmetic_flags |= MSL_CONFIG_STADIUM_TRANSFORMATIONS;
++        if (stages[s] == 3) {
++            if (msl_core_stadium_config_error(&config, &transforming_data) != NULL ||
++                msl_core_stadium_config_error(&config, &default_data) == NULL) {
++                return fail("explicit", "Stadium request not checked", stages[s], 0x7F);
+             }
++        } else if (msl_core_stadium_config_error(&config, &transforming_data) == NULL) {
++            return fail("explicit", "request off Stadium not refused", stages[s], 0x7F);
+         }
+     }
+-    printf("Stadium defaults: transformations stay off for the base's API and replay configs\n");
++    printf("Stadium defaults: no driver's config turns transformations on or raises their errors\n");
+     return 0;
+ }
+diff --git a/tests/melee_core/stadium_transformations_smoke.c b/tests/melee_core/stadium_transformations_smoke.c
+index b4ae809f..d826d73d 100644
+--- a/tests/melee_core/stadium_transformations_smoke.c
++++ b/tests/melee_core/stadium_transformations_smoke.c
+@@ -34,7 +34,7 @@ int main(int argc, char** argv)
+     config.match_damage_ratio = 1;
+     config.num_players = 2;
+     config.stock_count = 4;
+-    config.slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    config.arithmetic_flags |= MSL_CONFIG_STADIUM_TRANSFORMATIONS;
+     config.players[0].char_id = config.players[1].char_id = 1;
+     if (msl_core_game_data_init_options(&data, argv[1],
+                                         MSL_GAME_DATA_STADIUM_TRANSFORMATIONS)) return 1;
+@@ -79,14 +79,14 @@ int main(int argc, char** argv)
+     }
+     if (types != ((1U << 3) | (1U << 4) | (1U << 5) | (1U << 6) | (1U << 9)) ||
+         phases != 0x7F) goto fail;
+-    config.slippi_patches &= (uint8_t) ~MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    config.arithmetic_flags &= (uint8_t) ~MSL_CONFIG_STADIUM_TRANSFORMATIONS;
+     if (msl_core_match_reset(&matches[0], &data, &config, &input)) goto fail;
+     for (frame = 0; frame < 8000; ++frame)
+         if (msl_core_match_step(&matches[0], &input, matches[0].random_seed, &events)) goto fail;
+     if (controller(&matches[0])->u.stadium.xDE != 5 ||
+         controller(&matches[0])->u.stadium.xDC != 0) goto fail;
+     frozen_used = matches[0].memory.used;
+-    config.slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    config.arithmetic_flags |= MSL_CONFIG_STADIUM_TRANSFORMATIONS;
+     if (msl_core_match_reset(&matches[0], &data, &config, &input) ||
+         matches[0].memory.used != arena_used) goto fail;
+     printf("Stadium: all transformations, sealed pools, copy/save/restore and resets passed (enabled=%zu frozen=%zu arena bytes)\n", arena_used, frozen_used);
+@@ -99,7 +99,7 @@ int main(int argc, char** argv)
+     if (msl_core_game_data_init(&data, argv[1]) || data.stadium_transformations ||
+         data.fingerprint == transforming_fingerprint) goto fail;
+     if (msl_core_match_init(&matches[0], &data, &config, &input) == 0) goto fail;
+-    config.slippi_patches &= (uint8_t) ~MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    config.arithmetic_flags &= (uint8_t) ~MSL_CONFIG_STADIUM_TRANSFORMATIONS;
+     if (msl_core_match_init(&matches[0], &data, &config, &input)) goto fail;
+     msl_core_match_destroy(&matches[0]);
+     msl_core_game_data_deinit(&data);
+diff --git a/tests/test_stadium_transformation_gating.py b/tests/test_stadium_transformation_gating.py
+index 2c3ea384..e58b07ba 100644
+--- a/tests/test_stadium_transformation_gating.py
++++ b/tests/test_stadium_transformation_gating.py
+@@ -52,28 +52,35 @@ def test_the_public_api_and_python_dtype_are_the_base():
+         assert "getenv(\"MSL_STADIUM_TRANSFORMATIONS\")" not in (ROOT / path).read_text()
+ 
+ 
+-@pytest.mark.parametrize("patches_codes", [{}, {0xC21D4578: FROZEN_PATCH}])
+-def test_admission_patches_never_carry_the_bit(patches_codes):
+-    assert admission.slippi_patches(patches_codes) & 2 == 0
++def test_slippi_patches_mean_what_they_meant_in_the_base():
++    # (drivers on newer layouts set MSL_PATCH_* bits 1 to 6 there; the core
++    # neither reads them as the setting nor refuses them)
++    wire = (ROOT / "src/runtime/wire.h").read_text()
++    assert re.search(r"enum \{\n    // External/Frozen All/Core/2.asm: nop the call at 0x8021AAE4.\n"
++                     r"    MSL_PATCH_FD_BACKGROUND_FROZEN = 1 << 0,\n\};", wire)
++    assert "MSL_PATCH_KNOWN" not in wire
++    scalar = (ROOT / "src/runtime/scalar.c").read_text()
++    assert "unsupported Slippi patch bits" not in scalar
+ 
+ 
+ def test_c_defaults_are_off():
+     wire = (ROOT / "src/runtime/wire.h").read_text()
+-    assert re.search(r"MSL_PATCH_STADIUM_TRANSFORMATIONS = 1 << 1,", wire)
+-    assert re.search(r"MSL_PATCH_KNOWN = MSL_PATCH_FD_BACKGROUND_FROZEN \|\s*MSL_PATCH_STADIUM_TRANSFORMATIONS", wire)
++    # the setting is bit 7 of the byte the core always refused other bits in
++    assert re.search(r"MSL_CONFIG_STADIUM_TRANSFORMATIONS = 1 << 7,", wire)
++    assert "return (config->arithmetic_flags & MSL_CONFIG_STADIUM_TRANSFORMATIONS) != 0;" in wire
+     api = (ROOT / "src/api.c").read_text()
+     # the API's translation zeroes the core config and never sets the bit
+     assert re.search(r"memset\(target, 0, sizeof\(\*target\)\);", api)
+     native = (ROOT / "tools/validation/native.c").read_text()
+     assert native.count("int stadium_transformations = 0;") == 2
+-    assert re.search(r"if \(replay->stadium_transformations\) \{\s*config->slippi_patches \|= MSL_PATCH_STADIUM_TRANSFORMATIONS;", native)
++    assert re.search(r"if \(replay->stadium_transformations\) \{\s*config->arithmetic_flags \|= MSL_CONFIG_STADIUM_TRANSFORMATIONS;", native)
+     # (and a replay's Stadium events are not even read unless asked for)
+     assert re.search(r"present = replay->stadium_transformations\s*\?", native)
+ 
+ 
+ def test_game_data_preload_is_explicit_only():
+     scalar = (ROOT / "src/runtime/scalar.c").read_text()
+-    calls = re.findall(r"preload_match_configuration\(game_data,[^;]*MSL_PATCH_STADIUM_TRANSFORMATIONS\)", scalar)
++    calls = re.findall(r"preload_match_configuration\(game_data,[^;]*MSL_CONFIG_STADIUM_TRANSFORMATIONS\)", scalar)
+     assert len(calls) == 1
+     assert re.search(r"if \(game_data->stadium_transformations &&\s*preload_match_configuration\(game_data, MSL_CORE_STAGE_POKEMON_STADIUM", scalar)
+     # the default entry points request no options
+@@ -175,7 +182,6 @@ def test_replay_derived_configs_never_set_it(monkeypatch, tmp_path, start, codes
+     # (the default call is the base's: no stadium_transformations argument at all)
+     assert "stadium_transformations" not in captured
+     assert "stadium_transformations" not in result
+-    assert captured["slippi_patches"] & 2 == 0
+ 
+ 
+ def test_an_explicit_request_reaches_the_native_config(monkeypatch, tmp_path):
+diff --git a/tools/validation/native.c b/tools/validation/native.c
+index e4336f1b..53385937 100644
+--- a/tools/validation/native.c
++++ b/tools/validation/native.c
+@@ -1152,7 +1152,7 @@ static int build_match_config(const ReplayView* replay, const FrameRows* rows,
+   config->freeze_dead_up_fall_physics = replay->freeze_dead_up_fall_physics;
+   config->slippi_patches = replay->slippi_patches;
+   if (replay->stadium_transformations) {
+-    config->slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    config->arithmetic_flags |= MSL_CONFIG_STADIUM_TRANSFORMATIONS;
+   }
+   config->whispy_dead_fighter_fix = replay->whispy_dead_fighter_fix;
+   config->ucf_cardinals_1_0_enabled = (uint8_t)ucf_cardinals_1_0_enabled;
+diff --git a/tools/validation/suite_io.py b/tools/validation/suite_io.py
+index ac6d8475..a8c1645b 100644
+--- a/tools/validation/suite_io.py
++++ b/tools/validation/suite_io.py
+@@ -23,7 +23,7 @@ class SuiteReplay:
+     jit_arithmetic: str | None = None
+     # Run Pokemon Stadium with transformations: only an entry's explicit
+     # "stadium_transformations": true sets it (runtime/wire.h
+-    # MSL_PATCH_STADIUM_TRANSFORMATIONS). Never inferred from the replay.
++    # MSL_CONFIG_STADIUM_TRANSFORMATIONS). Never inferred from the replay.
+     stadium_transformations: bool = False
+ 
+ 
+diff --git a/tools/viewer/live/sim.js b/tools/viewer/live/sim.js
+index 64435301..e0cdc790 100644
+--- a/tools/viewer/live/sim.js
++++ b/tools/viewer/live/sim.js
+@@ -14,8 +14,8 @@ import {
+ } from "./schema.js";
+ 
+ const OK = 0;
+-// runtime/wire.h: Pokemon Stadium transforms (a bit of MslCoreMatchConfig.slippi_patches)
+-const MSL_PATCH_STADIUM_TRANSFORMATIONS = 1 << 1;
++// runtime/wire.h: Pokemon Stadium transforms (a bit of MslCoreMatchConfig.arithmetic_flags)
++const MSL_CONFIG_STADIUM_TRANSFORMATIONS = 1 << 7;
+ 
+ function clampInt(value, lo, hi) {
+   return Math.max(lo, Math.min(hi, Math.round(value)));
+@@ -139,9 +139,9 @@ export class MslWasmSim {
+     this.io.setFloat32(base + matchConfigOffsets.damageRatio, 1.0, true);
+     this.io.setUint8(base + matchConfigOffsets.numPlayers, 2);
+     this.io.setUint8(base + matchConfigOffsets.stockCount, stocks);
+-    this.io.setUint8(base + matchConfigOffsets.arithmeticFlags, 1);
+-    // (the setting is a bit of the Slippi patch byte: runtime/wire.h MSL_PATCH_STADIUM_TRANSFORMATIONS)
+-    this.io.setUint8(base + matchConfigOffsets.slippiPatches, stadiumTransformations ? MSL_PATCH_STADIUM_TRANSFORMATIONS : 0);
++    // (the setting is a bit of the arithmetic byte: runtime/wire.h MSL_CONFIG_STADIUM_TRANSFORMATIONS)
++    this.io.setUint8(base + matchConfigOffsets.arithmeticFlags,
++                     1 | (stadiumTransformations ? MSL_CONFIG_STADIUM_TRANSFORMATIONS : 0));
+     this.io.setUint8(base + matchConfigOffsets.brawlOffscreenDamage, 1);
+     this.io.setUint8(base + matchConfigOffsets.freezeDeadUpFallPhysics, 1);
+     this.io.setUint8(base + matchConfigOffsets.whispyDeadFighterFix, 1);
+-- 
+2.43.0
+

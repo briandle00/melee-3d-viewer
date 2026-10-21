@@ -1,0 +1,35 @@
+From dcff4925bb09250f90f62985a3d675bf739aebee Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 08:53:41 +0000
+Subject: [PATCH 6/8] Restore the base unfrozen-stadium admission test, plus
+ the explicit request
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ tests/test_replay_admission.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/tests/test_replay_admission.py b/tests/test_replay_admission.py
+index 83b38bbc..eacdf9b9 100644
+--- a/tests/test_replay_admission.py
++++ b/tests/test_replay_admission.py
+@@ -79,11 +79,13 @@ def test_zero_transform_lcancel_is_still_uninitialized(properties_only):
+ def test_legacy_stadium_patch_establishes_frozen_play(properties_only, monkeypatch):
+     game, raw = read_game("replays/validation/peach/ScaryFrankPorcupine.slpz")
+     assert game.start["stage"] == 3 and game.start["is_frozen_ps"] is False
+-    assert admission.stadium_is_frozen(game.start, admission.gecko_codes(raw))
++    assert "unfrozen-stadium" not in admission.capture_issues(game, raw)
+     codes = admission.gecko_codes(raw)
+     del codes[0xC21D4578]
+     monkeypatch.setattr(admission, "gecko_codes", lambda _raw: codes)
+-    assert not admission.stadium_is_frozen(game.start, admission.gecko_codes(raw))
++    assert "unfrozen-stadium" in admission.capture_issues(game, raw)
++    # (admitted only when the caller explicitly runs it with transformations)
++    assert "unfrozen-stadium" not in admission.capture_issues(game, raw, stadium_transformations=True)
+ 
+ 
+ def test_unreviewed_offscreen_body_is_rejected(properties_only, monkeypatch):
+-- 
+2.43.0
+

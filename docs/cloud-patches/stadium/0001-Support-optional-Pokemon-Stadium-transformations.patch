@@ -1,0 +1,1601 @@
+From 80fcb6a291ec534ece25910c18a1fc939a7790a3 Mon Sep 17 00:00:00 2001
+From: Kyle Havlovitz <kylehav@gmail.com>
+Date: Mon, 28 Sep 2026 18:46:17 -0700
+Subject: [PATCH 1/8] Support optional Pokemon Stadium transformations
+
+Run the source-owned transformation scheduler and collision actors when the
+match config enables stadium_transformations; preserve frozen defaults.
+Extract and share the four transformation archives, prewarm actor pools and
+reserve dynamic collision islands before sealing each enabled match.
+
+Correct the source transition timer and slope-IK pose cache invalidation
+exposed by rock-form recordings. Export live collision geometry for viewers.
+Add six replay fixtures covering all four forms, compare recorded stage phases
+and types, and exercise mode-changing resets, copy/save/restore and allocation
+bounds across 80,000 frames.
+
+Validation: native and release gates pass 518 replays / 4,771,887 frames;
+146 CI-selected Python tests pass. Fresh extraction is deterministic. The
+existing scalar last-stock smoke assertion also fails on untouched fcc46464;
+the remaining native smoke executables pass separately.
+
+Five alternating release benchmark pairs against fcc46464 show no measurable
+frozen-path regression: median 123,370 -> 123,840 FPS at batch 256 and
+120,306 -> 120,759 at 512, with identical output digests. Default per-env
+storage is unchanged; enabled Fox matches add 2,112 arena bytes and shared
+immutable arenas add 1,238,048 bytes per process. Measurements are retained
+in agent_docs/performance/BASELINE.md.
+
+(cherry picked from upstream commit b1192b5fbd02a400f6aa91c019de07b0fd10b2cc onto visual-only/04-shake)
+
+Combined with this branch: the setting is packed as #45 packs the arithmetic
+flags, in an existing config byte (slippi_patches bit 1,
+MSL_PATCH_STADIUM_TRANSFORMATIONS, read through
+msl_core_config_stadium_transformations), so MslCoreMatchConfig stays 64 bytes
+and the benchmark tape stays version 5 (export cache version 7); the public
+MslMatchConfig keeps upstream's stadium_transformations byte. The transition's
+jumbotron step (grStadium_801D4548 case 2) calls grStadium_801D2528 hosted, as
+#60's display schedule does elsewhere. Suite counts are this branch's plus the
+six Stadium fixtures. The viewer schema exports slippiPatches.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ AGENTS.md                                     |  2 +-
+ API.md                                        |  1 +
+ Makefile                                      |  4 +-
+ agent_docs/performance/BASELINE.md            | 33 +++++++
+ agent_docs/validation/replay_admission.json   |  8 --
+ melee_sim/config.py                           |  1 +
+ melee_sim/dtypes.py                           |  3 +-
+ melee_sim/env_batch.py                        |  7 +-
+ replays/suites/melee_core_aggregate.json      |  3 +-
+ replays/suites/melee_core_output_locks.json   | 54 ++++++++++
+ replays/suites/stadium_transformations.json   | 79 +++++++++++++++
+ .../HummingDismalCat.slpz                     |  3 +
+ ...auto-fox-2025-10_Game_20251018T045526.slpz |  3 +
+ .../gm-fox-2025-12_Game_20251201T224155.slpz  |  3 +
+ .../gm-fox-2026-03_Game_20260327T132708.slpz  |  3 +
+ .../gm-fox-2026-04_Game_20260421T205457.slpz  |  3 +
+ ...gm-sheik-2026-03_Game_20260318T233300.slpz |  3 +
+ src/api.c                                     |  6 +-
+ src/api.h                                     |  1 +
+ src/melee/ft/ft_0899.c                        | 15 +++
+ src/melee/gr/granime.c                        |  2 +
+ src/melee/gr/grpstadium.c                     | 47 ++++++---
+ src/melee/mp/mpisland.c                       | 14 +++
+ src/melee/mp/mpisland.h                       |  2 +
+ src/runtime/batch.c                           |  3 +-
+ src/runtime/fighter_pose.c                    | 11 ++-
+ src/runtime/fighter_pose.h                    |  3 +
+ src/runtime/scalar.c                          | 42 +++++++-
+ src/runtime/viewer.c                          | 46 +++++++++
+ src/runtime/wire.h                            | 27 ++++-
+ .../stadium_transformations_smoke.c           | 98 +++++++++++++++++++
+ tests/test_aggregate_suite_coverage.py        |  5 +-
+ tests/test_data.py                            |  5 +-
+ tests/test_melee_core_validation_runner.py    |  4 +-
+ tests/test_replay_admission.py                |  4 +-
+ tests/test_stage_replay_suite_metadata.py     | 12 ++-
+ tests/test_vector_pool.py                     |  3 +-
+ tools/data/extract.py                         |  2 +
+ tools/data/raw.py                             |  3 +-
+ tools/validation/admission.py                 |  2 -
+ tools/validation/native.c                     | 51 +++++++++-
+ tools/validation/prepare_replay_benchmark.py  |  6 +-
+ tools/validation/validate_replay.py           |  6 +-
+ tools/viewer/live/schema.generated.js         | 12 ++-
+ tools/viewer/schema.c                         |  5 +
+ 45 files changed, 589 insertions(+), 61 deletions(-)
+ create mode 100644 replays/suites/stadium_transformations.json
+ create mode 100644 replays/validation/stadium_transformations/HummingDismalCat.slpz
+ create mode 100644 replays/validation/stadium_transformations/auto-fox-2025-10_Game_20251018T045526.slpz
+ create mode 100644 replays/validation/stadium_transformations/gm-fox-2025-12_Game_20251201T224155.slpz
+ create mode 100644 replays/validation/stadium_transformations/gm-fox-2026-03_Game_20260327T132708.slpz
+ create mode 100644 replays/validation/stadium_transformations/gm-fox-2026-04_Game_20260421T205457.slpz
+ create mode 100644 replays/validation/stadium_transformations/gm-sheik-2026-03_Game_20260318T233300.slpz
+ create mode 100644 tests/melee_core/stadium_transformations_smoke.c
+
+diff --git a/AGENTS.md b/AGENTS.md
+index ddc6d63a..dde9e1df 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -7,7 +7,7 @@ Fox, Falco, Marth, Sheik, Zelda, Captain Falcon, Jigglypuff, Peach, Luigi, Mario
+ Samus, the Ice Climbers (Popo with the CPU-mimic Nana follower), Pikachu, Donkey Kong, and
+ Ganondorf, Yoshi, Bowser, Ness, Link, Young Link, Mewtwo, Mr. Game & Watch, Roy, Pichu, and Kirby. RL 1.0 covers
+ singles, three-player teams, and doubles on Final Destination, Battlefield, Fountain of
+-Dreams, frozen Pokemon Stadium, Yoshi's Story, and Dream Land N64. UCF is enabled by default.
++Dreams, Pokemon Stadium (frozen by default), Yoshi's Story, and Dream Land N64. UCF is enabled by default.
+ 
+ Correctness comes from gameplay-relevant source completion: port the relevant decomp call graphs,
+ persistent state, tables, callback ownership, and scheduler order. Organize implementation by
+diff --git a/API.md b/API.md
+index db32e1a2..60d7e81d 100644
+--- a/API.md
++++ b/API.md
+@@ -56,6 +56,7 @@ stocks and UCF enabled. Callers only override fields they need:
+ | `viewpoint_player` | `uint8_t` | active player index | player placed in observation slot zero |
+ | `ucf_cardinals` | `uint8_t` | `0` or `1` | enable the UCF 1.0 cardinal patch |
+ | `players[4]` | `MslPlayerConfig[4]` | active entries `< num_players` | per-player configuration |
++| `stadium_transformations` | `uint8_t` | `0` (default) or `1` | enable Pokémon Stadium transformations |
+ 
+ `MslPlayerConfig` uses explicit, unpacked fields. Team and controller port accept their `*_AUTO`
+ constant; facing accepts `MSL_FACING_LEFT`, `MSL_FACING_RIGHT`, or `MSL_FACING_AUTO`.
+diff --git a/Makefile b/Makefile
+index 740e0adf..c7746520 100644
+--- a/Makefile
++++ b/Makefile
+@@ -805,6 +805,7 @@ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/gamewatch-moves-smoke,$(NATIVE_O
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/roy-moves-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/roy_moves_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/pichu-moves-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/pichu_moves_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/kirby-moves-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/kirby_moves_smoke.o))
++$(eval $(call link_native_smoke,$(NATIVE_BUILD)/stadium-transformations-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/stadium_transformations_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/cpu-replay-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/cpu_replay_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/fnmsubs-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/fnmsubs_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/pool-chaos-soak,$(NATIVE_OBJ_DIR)/tests/melee_core/pool_chaos_soak.o))
+@@ -848,7 +849,7 @@ ifeq ($(UNAME_S)/$(HOST_TARGET_ARCH),Linux/x86_64)
+ thread-smoke: $(NATIVE_SHARED_WRITE_AUDIT)
+ endif
+ 
+-native-smoke: thread-smoke fnmsubs-smoke mewtwo-smoke gamewatch-smoke roy-smoke pichu-smoke kirby-smoke data-check $(NATIVE_BUILD)/cpu-replay-smoke $(NATIVE_DATA_SMOKE) $(NATIVE_MAP_SMOKE) $(NATIVE_MODEL_SMOKE) $(NATIVE_SCHEDULER_SMOKE) $(NATIVE_SCALAR_API_SMOKE) $(NATIVE_CONTEXT_SMOKE) $(NATIVE_BATCH_API_SMOKE) $(NATIVE_PUBLIC_API_SMOKE) $(NATIVE_GAMEPLAY_PARTS_SMOKE) $(NATIVE_ARTICLE_POOL_SMOKE) $(NATIVE_STAGE_LIFECYCLE_SMOKE) $(NATIVE_RUNTIME_CENSUS)
++native-smoke: thread-smoke $(NATIVE_BUILD)/stadium-transformations-smoke fnmsubs-smoke mewtwo-smoke gamewatch-smoke roy-smoke pichu-smoke kirby-smoke data-check $(NATIVE_BUILD)/cpu-replay-smoke $(NATIVE_DATA_SMOKE) $(NATIVE_MAP_SMOKE) $(NATIVE_MODEL_SMOKE) $(NATIVE_SCHEDULER_SMOKE) $(NATIVE_SCALAR_API_SMOKE) $(NATIVE_CONTEXT_SMOKE) $(NATIVE_BATCH_API_SMOKE) $(NATIVE_PUBLIC_API_SMOKE) $(NATIVE_GAMEPLAY_PARTS_SMOKE) $(NATIVE_ARTICLE_POOL_SMOKE) $(NATIVE_STAGE_LIFECYCLE_SMOKE) $(NATIVE_RUNTIME_CENSUS)
+ 	@$(TIMEOUT) 5s "$(NATIVE_DATA_SMOKE)" "$(DATA)"
+ 	@$(TIMEOUT) 5s "$(NATIVE_MODEL_SMOKE)" "$(DATA)"
+ 	@$(TIMEOUT) 5s "$(NATIVE_MAP_SMOKE)" "$(DATA)"
+@@ -861,6 +862,7 @@ native-smoke: thread-smoke fnmsubs-smoke mewtwo-smoke gamewatch-smoke roy-smoke
+ 	@$(TIMEOUT) 5s "$(NATIVE_PUBLIC_API_SMOKE)" "$(DATA)"
+ 	@$(TIMEOUT) 5s "$(NATIVE_GAMEPLAY_PARTS_SMOKE)" "$(DATA)"
+ 	@$(TIMEOUT) 5s "$(NATIVE_STAGE_LIFECYCLE_SMOKE)" "$(DATA)"
++	@$(TIMEOUT) 10s "$(NATIVE_BUILD)/stadium-transformations-smoke" "$(DATA)"
+ 	@$(TIMEOUT) 10s "$(NATIVE_ARTICLE_POOL_SMOKE)" "$(DATA)" >/dev/null
+ 	@$(TIMEOUT) 5s "$(NATIVE_RUNTIME_CENSUS)" "$(DATA)" >/dev/null
+ 
+diff --git a/agent_docs/performance/BASELINE.md b/agent_docs/performance/BASELINE.md
+index 9589c5e1..68ad2008 100644
+--- a/agent_docs/performance/BASELINE.md
++++ b/agent_docs/performance/BASELINE.md
+@@ -431,3 +431,36 @@ Popo misses 1% at frame2369, with 731 mismatching frames. The test runs the full
+ capture diagnostically; missing raw C-stick inputs and render-dependent damage
+ still exclude it from strict admission. The aggregate remains 524 replay locks /
+ 4,844,177 frames, all passing.
++
++## Stadium transformations: disabled-path comparison
++
++Measured on the same host on 2026-09-27 against `fcc46464`, using its unchanged
++508-replay workload, strict native-release builds, CPU 0, 262,144 timed
++match-frames, eight warmup ticks and 128 history frames. Five alternating pairs
++per batch size; transformations disabled in both builds.
++
++| Resident matches | Base FPS | With Stadium support | Difference |
++|---|---:|---:|---:|
++| 256 | 123,370 | 123,840 | +0.38% |
++| 512 | 120,306 | 120,759 | +0.38% |
++
++No measurable slowdown; the small increase is within run variation. All paired
++digests agree: `f99a65631fc39659` (256), `f43713e454594fe1` (512).
++
++The match remains 63,848 bytes, the public config 52 bytes, and observation plus
++terminal storage 1,224 bytes per history frame. Frozen arena and pool bounds are
++unchanged across the runtime census. Enabled Fox dittos use 2,112 additional
++arena bytes (965,060 versus 962,948). The four immutable transformation archives
++add 1,238,048 bytes to shared GameData/native-DAT arenas per process.
++
++The frozen controller is selected during construction; no transformation flag
++check is added to its frame callback. The slope-IK pose-cache correction also
++applies to frozen matches, so this is a measured cost claim, not a claim of
++identical instruction counts.
++
++Native and release validation pass 518 replays / 4,771,887 frames, including
++50,187 frames covering all four transformations and recorded stage events.
++The Stadium lifecycle smoke covers 80,000 frames, all phases, copy/save/restore,
++mode-changing resets and sealed allocation pools. Raw measurements are under
++`reports/triage/stadium_transformations_20260927/` (`perf.json`, `perf-*.log`,
++`census-*.log`, `final-gate.log`, `release-gate.log`, `lifecycle-final.log`).
+diff --git a/agent_docs/validation/replay_admission.json b/agent_docs/validation/replay_admission.json
+index b57b78d8..8aa481cb 100644
+--- a/agent_docs/validation/replay_admission.json
++++ b/agent_docs/validation/replay_admission.json
+@@ -43,14 +43,6 @@
+         "tools/validation/native.c::build_match_config"
+       ]
+     },
+-    "unfrozen-stadium": {
+-      "description": "Require the recorded frozen toggle or the reviewed legacy 0x801d4578 transformation bypass. A false old toggle alone does not establish unfrozen play.",
+-      "sources": [
+-        "refs/slippi-ssbm-asm/Online/Core/Hacks/Stadium/IngameCheckIfFrozen.asm",
+-        "https://github.com/project-slippi/slippi-ssbm-asm/blob/ccb59238b750cdf4cac701832753be119489f7e6/Online/Core/PreventFileAlarms/FreezeStadium.asm",
+-        "https://github.com/project-slippi/slippi-ssbm-asm/blob/d95aec7434b7e11011f4735e697e6f531022a184/Recording/SendGameInfo.asm"
+-      ]
+-    },
+     "incomplete-history": {
+       "description": "Require normal game-start seed -123, contiguous final frame history and a recorded Game End. Missing metadata.lastFrame is not itself missing gameplay history. No cropped or savestate-injected fixture admission.",
+       "sources": [
+diff --git a/melee_sim/config.py b/melee_sim/config.py
+index cdf6a315..e1dee7df 100644
+--- a/melee_sim/config.py
++++ b/melee_sim/config.py
+@@ -71,3 +71,4 @@ class MatchConfig:
+     friendly_fire: bool = False
+     viewpoint_player: int = 0
+     ucf_cardinals_1_0_enabled: bool = True
++    stadium_transformations: bool = False
+diff --git a/melee_sim/dtypes.py b/melee_sim/dtypes.py
+index 70c56a8e..aeb97a2b 100644
+--- a/melee_sim/dtypes.py
++++ b/melee_sim/dtypes.py
+@@ -119,7 +119,8 @@ def match_config_dtype() -> np.dtype:
+             ("viewpoint_player", "u1"),
+             ("ucf_cardinals", "u1"),
+             ("players", match_player_config_dtype(), (MAX_PLAYERS,)),
+-            ("_pad0", "u1", (2,)),
++            ("stadium_transformations", "u1"),
++            ("_pad0", "u1", (1,)),
+         ],
+         align=False,
+     )
+diff --git a/melee_sim/env_batch.py b/melee_sim/env_batch.py
+index 22814d70..abce91ce 100644
+--- a/melee_sim/env_batch.py
++++ b/melee_sim/env_batch.py
+@@ -460,7 +460,11 @@ def _resolve_data_dir(data_dir: str | os.PathLike[str] | None) -> Path:
+     value = data_dir if data_dir is not None else os.environ.get("MSL_DATA_DIR", "data")
+     path = Path(value).expanduser().resolve()
+     raw = _raw_data_dir(path)
+-    if not (raw / "manifest.json").is_file():
++    from tools.data.raw import STADIUM_ARCHIVES
++
++    if not (raw / "manifest.json").is_file() or any(
++        not (raw / name).is_file() for name in STADIUM_ARCHIVES
++    ):
+         raise FileNotFoundError(
+             f"melee_sim data directory is incomplete: {path}\n"
+             "Run `python -m melee_sim.extract_data --iso /path/to/SSBM.iso`."
+@@ -510,6 +514,7 @@ def _write_match_config(
+     row["stocks"] = int(config.stocks)
+     row["viewpoint_player"] = int(config.viewpoint_player)
+     row["ucf_cardinals"] = bool(config.ucf_cardinals_1_0_enabled)
++    row["stadium_transformations"] = bool(config.stadium_transformations)
+     for index, player in enumerate(players):
+         team = -1 if player.team_id is None else int(player.team_id)
+         facing = 0 if player.facing is None else (1 if player.facing else -1)
+diff --git a/replays/suites/melee_core_aggregate.json b/replays/suites/melee_core_aggregate.json
+index 970f8370..1ba8ea23 100644
+--- a/replays/suites/melee_core_aggregate.json
++++ b/replays/suites/melee_core_aggregate.json
+@@ -26,6 +26,7 @@
+     "legacy_arithmetic.json",
+     "roy.json",
+     "pichu.json",
+-    "kirby.json"
++    "kirby.json",
++    "stadium_transformations.json"
+   ]
+ }
+diff --git a/replays/suites/melee_core_output_locks.json b/replays/suites/melee_core_output_locks.json
+index 8d45f1f3..711c23af 100644
+--- a/replays/suites/melee_core_output_locks.json
++++ b/replays/suites/melee_core_output_locks.json
+@@ -4372,6 +4372,60 @@
+         }
+       }
+     },
++    {
++      "replay": "replays/validation/stadium_transformations/HummingDismalCat.slpz",
++      "expected": {
++        "native": {
++          "frames": 6803,
++          "actual_output_fingerprint": "8b0f454c7e9fc324"
++        }
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/auto-fox-2025-10_Game_20251018T045526.slpz",
++      "expected": {
++        "native": {
++          "frames": 8181,
++          "actual_output_fingerprint": "967049e1a44cd48c"
++        }
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/gm-fox-2025-12_Game_20251201T224155.slpz",
++      "expected": {
++        "native": {
++          "frames": 6372,
++          "actual_output_fingerprint": "8b33bf6a33559c09"
++        }
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/gm-fox-2026-03_Game_20260327T132708.slpz",
++      "expected": {
++        "native": {
++          "frames": 7369,
++          "actual_output_fingerprint": "1e4b72bd4e9b87d5"
++        }
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/gm-fox-2026-04_Game_20260421T205457.slpz",
++      "expected": {
++        "native": {
++          "frames": 7224,
++          "actual_output_fingerprint": "9746ad1894451f7b"
++        }
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/gm-sheik-2026-03_Game_20260318T233300.slpz",
++      "expected": {
++        "native": {
++          "frames": 14238,
++          "actual_output_fingerprint": "60516b5c0c4e467c"
++        }
++      }
++    },
+     {
+       "replay": "replays/validation/yoshi/2025-11_Game_20251121T135559.slpz",
+       "expected": {
+diff --git a/replays/suites/stadium_transformations.json b/replays/suites/stadium_transformations.json
+new file mode 100644
+index 00000000..44c7988b
+--- /dev/null
++++ b/replays/suites/stadium_transformations.json
+@@ -0,0 +1,79 @@
++{
++  "name": "stadium_transformations",
++  "ucf_enabled": true,
++  "ucf_cardinals_1_0_enabled": true,
++  "replays": [
++    {
++      "replay": "replays/validation/stadium_transformations/HummingDismalCat.slpz",
++      "ports": [
++        1,
++        2
++      ],
++      "stage_id": 3,
++      "characters": {
++        "1": "Fox",
++        "2": "Peach"
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/auto-fox-2025-10_Game_20251018T045526.slpz",
++      "ports": [
++        1,
++        2
++      ],
++      "stage_id": 3,
++      "characters": {
++        "1": "Dr. Mario",
++        "2": "Fox"
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/gm-fox-2025-12_Game_20251201T224155.slpz",
++      "ports": [
++        1,
++        2
++      ],
++      "stage_id": 3,
++      "characters": {
++        "1": "Mario",
++        "2": "Fox"
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/gm-fox-2026-03_Game_20260327T132708.slpz",
++      "ports": [
++        1,
++        2
++      ],
++      "stage_id": 3,
++      "characters": {
++        "1": "Mario",
++        "2": "Fox"
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/gm-fox-2026-04_Game_20260421T205457.slpz",
++      "ports": [
++        1,
++        2
++      ],
++      "stage_id": 3,
++      "characters": {
++        "1": "Mario",
++        "2": "Fox"
++      }
++    },
++    {
++      "replay": "replays/validation/stadium_transformations/gm-sheik-2026-03_Game_20260318T233300.slpz",
++      "ports": [
++        1,
++        2
++      ],
++      "stage_id": 3,
++      "characters": {
++        "1": "Dr. Mario",
++        "2": "Sheik"
++      }
++    }
++  ]
++}
+diff --git a/replays/validation/stadium_transformations/HummingDismalCat.slpz b/replays/validation/stadium_transformations/HummingDismalCat.slpz
+new file mode 100644
+index 00000000..b834e32b
+--- /dev/null
++++ b/replays/validation/stadium_transformations/HummingDismalCat.slpz
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:6e20cce4892a5276f240a26d435b2f38d28a71d9431ccdcecdb99e21074d864b
++size 275547
+diff --git a/replays/validation/stadium_transformations/auto-fox-2025-10_Game_20251018T045526.slpz b/replays/validation/stadium_transformations/auto-fox-2025-10_Game_20251018T045526.slpz
+new file mode 100644
+index 00000000..8f3a386a
+--- /dev/null
++++ b/replays/validation/stadium_transformations/auto-fox-2025-10_Game_20251018T045526.slpz
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:da2f59d7ed6c3acdc1bd3da60ae979dbddcd78e3cc831c6606d796a91d8ceca3
++size 290360
+diff --git a/replays/validation/stadium_transformations/gm-fox-2025-12_Game_20251201T224155.slpz b/replays/validation/stadium_transformations/gm-fox-2025-12_Game_20251201T224155.slpz
+new file mode 100644
+index 00000000..696381c2
+--- /dev/null
++++ b/replays/validation/stadium_transformations/gm-fox-2025-12_Game_20251201T224155.slpz
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:260761e59b074f6d56a7b1ffe03c19716ae05bcaa0333dbd4d5add83068e8bbc
++size 226610
+diff --git a/replays/validation/stadium_transformations/gm-fox-2026-03_Game_20260327T132708.slpz b/replays/validation/stadium_transformations/gm-fox-2026-03_Game_20260327T132708.slpz
+new file mode 100644
+index 00000000..00585c14
+--- /dev/null
++++ b/replays/validation/stadium_transformations/gm-fox-2026-03_Game_20260327T132708.slpz
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:64f2477b7b78460af9e5dc098f6a9f0492ad08d98b2a085c25c6e27d29f5c378
++size 287829
+diff --git a/replays/validation/stadium_transformations/gm-fox-2026-04_Game_20260421T205457.slpz b/replays/validation/stadium_transformations/gm-fox-2026-04_Game_20260421T205457.slpz
+new file mode 100644
+index 00000000..3280dcc8
+--- /dev/null
++++ b/replays/validation/stadium_transformations/gm-fox-2026-04_Game_20260421T205457.slpz
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:a99313683aa73d068484eceddb355ce5a26a8e1a0d796e55e579745edf54fa33
++size 287781
+diff --git a/replays/validation/stadium_transformations/gm-sheik-2026-03_Game_20260318T233300.slpz b/replays/validation/stadium_transformations/gm-sheik-2026-03_Game_20260318T233300.slpz
+new file mode 100644
+index 00000000..be14f2e8
+--- /dev/null
++++ b/replays/validation/stadium_transformations/gm-sheik-2026-03_Game_20260318T233300.slpz
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:8c52e6f8beb411c1246201d87a89c5be9e9f98fd58ec2544b03f6d61da2f9fa8
++size 479589
+diff --git a/src/api.c b/src/api.c
+index cb704d0b..2b611e86 100644
+--- a/src/api.c
++++ b/src/api.c
+@@ -89,13 +89,17 @@ static int translate_config(const MslMatchConfig* source, MslCoreMatchConfig* ta
+   if (source == NULL || target == NULL || !supported_stage(source->stage) ||
+       (source->num_players < 2 || source->num_players > 4) || !isfinite(source->damage_ratio) ||
+       source->damage_ratio <= 0.0F || source->stocks == 0 ||
+-      source->viewpoint_player >= source->num_players || source->is_teams > 1 ||
++      source->viewpoint_player >= source->num_players || source->stadium_transformations > 1 ||
++      source->is_teams > 1 ||
+       source->friendly_fire > 1 || source->ucf_cardinals > 1) {
+     return -1;
+   }
+ 
+   memset(target, 0, sizeof(*target));
+   target->stage_id = source->stage;
++  if (source->stadium_transformations) {
++    target->slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
++  }
+   target->frame_id = -124;
+   target->frame_pre_random_seed = source->random_seed;
+   target->initial_random_seed = source->random_seed;
+diff --git a/src/api.h b/src/api.h
+index 13899de3..df29266e 100644
+--- a/src/api.h
++++ b/src/api.h
+@@ -125,6 +125,7 @@ typedef struct MslMatchConfig {
+   uint8_t viewpoint_player;
+   uint8_t ucf_cardinals;
+   MslPlayerConfig players[MSL_MAX_PLAYERS];
++  uint8_t stadium_transformations;
+ } MslMatchConfig;
+ 
+ typedef struct MslInputPlayer {
+diff --git a/src/melee/ft/ft_0899.c b/src/melee/ft/ft_0899.c
+index 1e9acfad..bcc72212 100644
+--- a/src/melee/ft/ft_0899.c
++++ b/src/melee/ft/ft_0899.c
+@@ -1,4 +1,7 @@
+ #include "ft_0899.h"
++#ifdef MSL_CORE_NATIVE
++#include "runtime/fighter_pose.h"
++#endif
+ 
+ #include "math.h"
+ 
+@@ -133,6 +136,13 @@ void ft_80089B08(Fighter_GObj* gobj)
+                 ik.jobj0->rotate = rot_save0;
+                 ik.jobj1->rotate = rot_save1;
+                 ik.jobj2->rotate = rot_save2;
++#ifdef MSL_CORE_NATIVE
++                // Keep the IK matrices until the next source root-position
++                // write, which rebuilds them from the restored rotations.
++                msl_fighter_pose_srt_restored(ik.jobj0);
++                msl_fighter_pose_srt_restored(ik.jobj1);
++                msl_fighter_pose_srt_restored(ik.jobj2);
++#endif
+             }
+             if (fp->x221C_u16_y & 1) {
+                 ik.jobj0 =
+@@ -168,6 +178,11 @@ void ft_80089B08(Fighter_GObj* gobj)
+                 ik.jobj0->rotate = rot_save3;
+                 ik.jobj1->rotate = rot_save4;
+                 ik.jobj2->rotate = rot_save5;
++#ifdef MSL_CORE_NATIVE
++                msl_fighter_pose_srt_restored(ik.jobj0);
++                msl_fighter_pose_srt_restored(ik.jobj1);
++                msl_fighter_pose_srt_restored(ik.jobj2);
++#endif
+             }
+         }
+         if (fp->x221C_u16_y & 4) {
+diff --git a/src/melee/gr/granime.c b/src/melee/gr/granime.c
+index 98079049..feb26da0 100644
+--- a/src/melee/gr/granime.c
++++ b/src/melee/gr/granime.c
+@@ -98,6 +98,7 @@ void grAnime_801C65B0(UnkArchiveStruct* arg0)
+     if (arg0 == NULL) {
+         return;
+     }
++#ifndef MSL_CORE_NATIVE
+     if ((uintptr_t) arg0->unk0 != -1U) {
+         if (arg0->unk8 == 0) {
+             lbArchive_80016EFC(arg0->unk0);
+@@ -105,6 +106,7 @@ void grAnime_801C65B0(UnkArchiveStruct* arg0)
+             lbHeap_80015CA8(0, arg0->unk0);
+         }
+     }
++#endif
+     memzero(arg0, sizeof(*arg0));
+ }
+ 
+diff --git a/src/melee/gr/grpstadium.c b/src/melee/gr/grpstadium.c
+index 0e3f44d5..ed918ac6 100644
+--- a/src/melee/gr/grpstadium.c
++++ b/src/melee/gr/grpstadium.c
+@@ -39,6 +39,7 @@
+ #include <melee/pl/player.h>
+ #ifdef MSL_CORE_HOSTED
+ #include <runtime/context.h>
++#include <runtime/scalar.h>
+ #include <runtime/source_state.h>
+ #include <runtime/viewer_track.h>
+ #endif
+@@ -213,6 +214,14 @@ bool grStadium_801D10F0(void)
+  * Creates a specific sub-type of Ground_GObj for Pokemon Stadium
+  * (e.g. id=1 for the jumbotron display)
+  */
++#ifdef MSL_CORE_HOSTED
++static void msl_stadium_frozen_update(Ground_GObj* gobj)
++{
++    lb_800115F4();
++    Ground_801C2FE0(gobj);
++}
++#endif
++
+ Ground_GObj* grStadium_801D10F8(StadiumGrType id)
+ {
+     Ground_GObj* gobj;
+@@ -235,7 +244,14 @@ Ground_GObj* grStadium_801D10F8(StadiumGrType id)
+             cb->callback0(gobj);
+         }
+         if (cb->callback2 != NULL) {
+-            HSD_GObj_SetupProc(gobj, cb->callback2, 4);
++#ifdef MSL_CORE_HOSTED
++            if (id == 2 && !msl_core_config_stadium_transformations(&msl_core_active_match()->config)) {
++                HSD_GObj_SetupProc(gobj, msl_stadium_frozen_update, 4);
++            } else
++#endif
++            {
++                HSD_GObj_SetupProc(gobj, cb->callback2, 4);
++            }
+         }
+     } else {
+         OSReport("%s:%d: couldn t get gobj(id=%d)\n", __FILE__, 0x120, id);
+@@ -339,11 +355,7 @@ void grStadium_801D13E0(Ground_GObj* gobj)
+         gr->u.stadium.xCC = HSD_MemAlloc(0x50000);
+     }
+ #else
+-    // Frozen Stadium's hosted owner disables the transformation loader in
+-    // grStadium_801D1518. Its 320 KiB DVD scratch buffer is therefore never
+-    // read by gameplay and must not be replicated in every environment.
+-    // refs/melee/src/melee/gr/grpstadium.c::{grStadium_801D1518,
+-    //   grStadium_801D2344}
++    // Hosted transformations read immutable preloaded archives, not DVD scratch.
+ #endif
+     gr->u.stadium.xC4_b1 = false;
+     gr->u.stadium.xD0 = NULL;
+@@ -2054,8 +2066,10 @@ bool grStadium_801D42B8(void)
+     if (gp->u.stadium.xC4_b1) {
+         return false;
+     }
++#ifndef MSL_CORE_HOSTED
+     gp->u.stadium.xD0 =
+         grDatFiles_801C6478(gp->u.stadium.xCC, gp->u.stadium.xC8);
++#endif
+     return true;
+ }
+ #pragma pop
+@@ -2159,12 +2173,6 @@ void grStadium_801D435C(Ground_GObj* arg0)
+ 
+ void grStadium_801D4548(Ground_GObj* gobj)
+ {
+-#ifdef MSL_CORE_HOSTED
+-    // External/Frozen PS/Core/FreezePokemon.asm replaces the transformation
+-    // decision at retail 0x801D45FC with a branch to 0x801D4FD8.
+-    (void) gobj;
+-    return;
+-#else
+     s32 sp6C;
+     s32 sp68;
+     s32 sp64;
+@@ -2277,8 +2285,15 @@ void grStadium_801D4548(Ground_GObj* gobj)
+             gp = GET_GROUND(map_gobj);
+             HSD_ASSERT(0x99B, gp);
+             gp->u.stadium.xC4_b1 = true;
++#ifdef MSL_CORE_HOSTED
++            // Online/Core/Hacks/Stadium/{StadiumFileLoad,GrPsxIsValid}.asm
++            grDatFiles_801C6038(datfiles[var_r29], 1, 0);
++            gp->u.stadium.xD0 = grDatFiles_801C6330(var_r4);
++            gp->u.stadium.xC4_b1 = false;
++#else
+             lbFile_80016580(datfiles[var_r29], (u32) gp->u.stadium.xCC,
+                             (void*) &gp->u.stadium.xC8, fn_801D4220, NULL);
++#endif
+             temp_r31->u.stadium.xDC = 1;
+             return;
+         }
+@@ -2290,7 +2305,10 @@ void grStadium_801D4548(Ground_GObj* gobj)
+         }
+         break;
+     case 2:
+-        temp_r31->u.display.xD8 = NULL;
++        temp_r31->u.stadium.xD8 = 0;
++        // (the jumbotron's schedule shows the coming form: grStadium_801D2528
++        // runs hosted, its image and text work excluded, as the display
++        // schedule's other callers do)
+         temp_r3_6 = Ground_801C2BA4(1);
+         if (temp_r3_6 != NULL) {
+             temp_r0_2 = temp_r31->u.stadium.xDE;
+@@ -2314,7 +2332,7 @@ void grStadium_801D4548(Ground_GObj* gobj)
+         temp_r31->u.stadium.xDC = 3;
+         return;
+     case 3:
+-        if (++temp_r31->u.stadium.xD8 > yaku->x10) {
++        if (temp_r31->u.stadium.xD8++ > yaku->x10) {
+             temp_r6 = GET_GROUND(temp_r31->u.stadium.xE4);
+             temp_r6->u.stadium.xC4_b1 = true;
+             temp_r31->u.stadium.xDC = 4;
+@@ -2407,7 +2425,6 @@ void grStadium_801D4548(Ground_GObj* gobj)
+         temp_r31->u.stadium.xDC = 0;
+         break;
+     }
+-#endif
+ }
+ 
+ /**
+diff --git a/src/melee/mp/mpisland.c b/src/melee/mp/mpisland.c
+index 526fe164..e29d143e 100644
+--- a/src/melee/mp/mpisland.c
++++ b/src/melee/mp/mpisland.c
+@@ -21,6 +21,20 @@ static mp_UnkStruct0* alloc_island(void)
+ #endif
+ }
+ 
++#ifdef MSL_CORE_NATIVE
++void msl_mp_island_reserve_dynamic(void)
++{
++    int i;
++    // A rotated collision line can become an independent floor or ceiling.
++    // 8005B004 recycles these nodes through x20 as classifications change.
++    for (i = 0; i < mpLib_8004D164()->dynamic_count; ++i) {
++        mp_UnkStruct0* island = alloc_island();
++        island->next = mpIsland_80458E88.x20;
++        mpIsland_80458E88.x20 = island;
++    }
++}
++#endif
++
+ /* 3B73E8 */ mpIsland_Palette mpIsland_TerrainPalette = { {
+     { mp_Terrain_Rock, { 0x80, 0x60, 0x60, 0xFF } },
+     { mp_Terrain_Grass, { 0x40, 0xFF, 0x40, 0xFF } },
+diff --git a/src/melee/mp/mpisland.h b/src/melee/mp/mpisland.h
+index 4cdb4cf1..7775aa06 100644
+--- a/src/melee/mp/mpisland.h
++++ b/src/melee/mp/mpisland.h
+@@ -22,6 +22,8 @@
+                                     bool arg6);
+ /* 05B334 */ void mpIsland_8005B334(int arg0, int arg1, int arg2, bool arg3);
+ 
++void msl_mp_island_reserve_dynamic(void);
++
+ extern mpIsland_Palette mpIsland_TerrainPalette;
+ struct mpIsland_80458E88_t;
+ #ifdef MSL_CORE_HOSTED
+diff --git a/src/runtime/batch.c b/src/runtime/batch.c
+index e323e59e..240ee2a2 100644
+--- a/src/runtime/batch.c
++++ b/src/runtime/batch.c
+@@ -84,7 +84,8 @@ static int valid_config(const MslCoreMatchConfig* config)
+     if (config == NULL || !supported_stage(config->stage_id) ||
+         (config->num_players < 2 || config->num_players > 4) ||
+         !isfinite(config->match_damage_ratio) ||
+-        config->match_damage_ratio < 0.0F)
++        config->match_damage_ratio < 0.0F ||
++        (config->slippi_patches & ~MSL_PATCH_KNOWN) != 0)
+     {
+         return 0;
+     }
+diff --git a/src/runtime/fighter_pose.c b/src/runtime/fighter_pose.c
+index 106f970d..472d9a56 100644
+--- a/src/runtime/fighter_pose.c
++++ b/src/runtime/fighter_pose.c
+@@ -305,6 +305,13 @@ bool msl_fighter_pose_set_mtx_dirty(HSD_JObj* root)
+     return true;
+ }
+ 
++void msl_fighter_pose_srt_restored(HSD_JObj* joint)
++{
++    MslFighterPoseJoint* node = pose_joint(joint);
++    HSD_ASSERT(149, node != NULL);
++    node->flags |= MSL_FIGHTER_POSE_SRT_RESTORED;
++}
++
+ void msl_fighter_pose_set_root_position(HSD_JObj* root, const Vec3* position)
+ {
+     MslFighterPoseJoint* root_node = pose_joint(root);
+@@ -338,8 +345,10 @@ void msl_fighter_pose_set_root_position(HSD_JObj* root, const Vec3* position)
+             continue;
+         }
+         if (joint->robj != NULL || (joint->flags & JOBJ_JOINT) != 0 ||
+-            (joint->flags & JOBJ_MTX_INDEP_SRT))
++            (joint->flags & JOBJ_MTX_INDEP_SRT) ||
++            ((node - 1)->flags & MSL_FIGHTER_POSE_SRT_RESTORED))
+         {
++            (node - 1)->flags &= ~MSL_FIGHTER_POSE_SRT_RESTORED;
+             HSD_JObjSetMtxDirty(joint);
+             continue;
+         }
+diff --git a/src/runtime/fighter_pose.h b/src/runtime/fighter_pose.h
+index a353429d..eb7bd084 100644
+--- a/src/runtime/fighter_pose.h
++++ b/src/runtime/fighter_pose.h
+@@ -82,6 +82,9 @@ typedef struct MslFighterPoseJoint {
+     uint16_t last_table_frame : 11;
+ } MslFighterPoseJoint;
+ 
++#define MSL_FIGHTER_POSE_SRT_RESTORED (UINT32_C(1) << 31)
++void msl_fighter_pose_srt_restored(HSD_JObj* joint);
++
+ #define MSL_FIGHTER_POSE_TABLE_FRAME_NONE 0x7FFu
+ #ifdef MSL_CORE_WASM
+ #define MSL_FIGHTER_POSE_PART_NONE UINT8_MAX
+diff --git a/src/runtime/scalar.c b/src/runtime/scalar.c
+index c02d4413..dc60b05b 100644
+--- a/src/runtime/scalar.c
++++ b/src/runtime/scalar.c
+@@ -14,6 +14,8 @@
+ #include "ft/ftdevice.h"
+ #include "ft/ftlib.h"
+ #include "gr/grdatfiles.h"
++#include "gr/granime.h"
++#include "gr/grpstadium.h"
+ #include "gr/grizumi.h"
+ #include "gr/ground.h"
+ #include "gr/grpstadium.h"
+@@ -26,6 +28,7 @@
+ #include "lb/lbarchive.h"
+ #include "lb/lbspdisplay.h"
+ #include "mp/mpcoll.h"
++#include "mp/mpisland.h"
+ #include "mp/mplib.h"
+ #include "mp/types.h"
+ #include "pl/player.h"
+@@ -441,7 +444,9 @@ static void configure_headless_ground_schedule(
+         if ((spec->runtime_animation_mask & map_bit) == 0) {
+             msl_ground_use_headless_epoch_proc(gp->gobj);
+         }
+-        if ((spec->static_stage_proc_mask & map_bit) != 0) {
++        if ((spec->static_stage_proc_mask & map_bit) != 0 &&
++            !(spec->external_id == MSL_CORE_STAGE_POKEMON_STADIUM &&
++              msl_core_config_stadium_transformations(&match->config))) {
+             msl_ground_remove_priority4_procs(gp->gobj);
+         } else {
+             msl_ground_remove_null_post_proc(gp->gobj);
+@@ -670,6 +675,10 @@ static int validate_config(MslCoreMatchConfig* config)
+     }
+ #endif
+ 
++    if (config->slippi_patches & ~MSL_PATCH_KNOWN) {
++        fprintf(stderr, "unsupported Slippi patch bits\n");
++        return -1;
++    }
+     if (stage_spec(config->stage_id) == NULL) {
+         fprintf(stderr,
+                 "current core supports the six legal stage ids "
+@@ -1305,6 +1314,28 @@ static int match_construct(MslCoreMatch* match,
+     Ground_801C1E94();
+     spec->source->OnInit();
+     spec->source->OnLoad();
++#ifdef MSL_CORE_NATIVE
++    if (spec->external_id == MSL_CORE_STAGE_POKEMON_STADIUM &&
++        msl_core_config_stadium_transformations(&match->config)) {
++        static const int map_ids[] = { 3, 4, 9, 6 };
++        static const char* archives[] = {
++            "GrPs1.dat", "GrPs2.dat", "GrPs3.dat", "GrPs4.dat"
++        };
++        int transformation;
++        // Reach every actor's archive and allocation classes before sealing;
++        // gameplay reuses the released objects when the source spawns it.
++        msl_mp_island_reserve_dynamic();
++        for (transformation = 0; transformation < 4; ++transformation) {
++            HSD_GObj* actor;
++            UnkArchiveStruct* archive;
++            grDatFiles_801C6038((void*) archives[transformation], 1, 0);
++            archive = grDatFiles_801C6330(map_ids[transformation]);
++            actor = grStadium_801D10F8(map_ids[transformation]);
++            Ground_801C4A08(actor);
++            grAnime_801C65B0(archive);
++        }
++    }
++#endif
+     configure_headless_ground_schedule(match, spec);
+     // refs/melee/src/melee/gm/gm_16AE.c::fn_8016DCC0 and fn_8016E730.
+     // Player_InitAllPlayers initializes each slot's statistics state.
+@@ -1657,6 +1688,9 @@ static int preload_match_configuration(MslCoreGameData* game_data,
+     memset(&config, 0, sizeof(config));
+     memset(&previous_input, 0, sizeof(previous_input));
+     config.stage_id = stage_id;
++    if (stage_id == MSL_CORE_STAGE_POKEMON_STADIUM) {
++        config.slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    }
+     config.frame_id = -123;
+     config.frame_pre_random_seed = 1;
+     config.initial_random_seed = 1;
+@@ -2190,6 +2224,12 @@ static void write_compare(const MslCoreMatch* match, uint32_t frame_seed,
+                       match->config.stage_id);
+     out[offsetof(MslCoreCompare, num_players)] = match->config.num_players;
+     out[offsetof(MslCoreCompare, is_teams)] = match->config.is_teams ? 1 : 0;
++    if (match->config.stage_id == MSL_CORE_STAGE_POKEMON_STADIUM &&
++        msl_core_config_stadium_transformations(&match->config)) {
++        const Ground* controller = Ground_801C2BA4(2)->user_data;
++        out[offsetof(MslCoreCompare, stadium_state)] = controller->u.stadium.xDC;
++        out[offsetof(MslCoreCompare, stadium_type)] = controller->u.stadium.xDE;
++    }
+     // MslCoreCompare represents all four controller slots. Slots without a
+     // source Fighter GObj use the validation contract's inactive/dead value.
+     for (i = match->config.num_players; i < MSL_CORE_MAX_PLAYERS; ++i) {
+diff --git a/src/runtime/viewer.c b/src/runtime/viewer.c
+index c92e2723..1447f0ab 100644
+--- a/src/runtime/viewer.c
++++ b/src/runtime/viewer.c
+@@ -5,6 +5,9 @@
+ #include "ft/fighter.h"
+ #include "ft/types.h"
+ #include "gr/types.h"
++#include "gr/ground.h"
++#include "mp/mplib.h"
++#include "mp/types.h"
+ #include "lb/types.h"
+ #include "runtime/context.h"
+ #include "runtime/observation.h"
+@@ -297,6 +300,49 @@ static void write_stage(const MslCoreMatch* match, uint8_t* out)
+                     1;
+             }
+         }
++    } else if (match->config.stage_id == MSL_STAGE_POKEMON_STADIUM &&
++               msl_core_config_stadium_transformations(&match->config)) {
++        const Ground* controller = Ground_801C2BA4(2)->user_data;
++        const MapCollData* map = mpLib_8004D164();
++        const CollLine* lines = mpGetGroundCollLine();
++        const CollVtx* vertices = mpGetGroundCollVtx();
++        const CollJoint* joints = mpGetGroundCollJoint();
++        uint8_t active[MSL_VIEWER_COLLISION_LINES] = { 0 };
++        unsigned count = 0;
++        out[offsetof(MslCoreViewerStage, stadium_state)] = controller->u.stadium.xDC;
++        out[offsetof(MslCoreViewerStage, stadium_type)] = controller->u.stadium.xDE;
++        HSD_ASSERT(312, map->line_count <= MSL_VIEWER_COLLISION_LINES);
++        // mpCheckFloor and the wall/ceiling queries visit active joint ranges.
++        // Shared vertices and leftover dynamic line flags do not imply membership.
++        for (i = 0; i < map->joint_count; ++i) {
++            const MapJoint* joint = joints[i].inner;
++            const int starts[] = { joint->floor_start, joint->ceiling_start,
++                joint->right_wall_start, joint->left_wall_start, joint->dynamic_start };
++            const int counts[] = { joint->floor_count, joint->ceiling_count,
++                joint->right_wall_count, joint->left_wall_count, joint->dynamic_count };
++            int range, line;
++            if (!(joints[i].flags & CollJoint_Enabled)) continue;
++            for (range = 0; range < 5; ++range)
++                for (line = 0; line < counts[range]; ++line)
++                    active[starts[range] + line] = 1;
++        }
++        for (i = 0; i < map->line_count; ++i) {
++            uint8_t* destination;
++            const CollVtx* a;
++            const CollVtx* b;
++            if (!active[i] ||
++                !mpLib_80054ED8(i) || (lines[i].flags & LINE_FLAG_EMPTY)) continue;
++            HSD_ASSERT(312, count < MSL_VIEWER_COLLISION_LINES);
++            destination = out + offsetof(MslCoreViewerStage, collision_lines) +
++                          count++ * 4 * sizeof(float);
++            a = &vertices[lines[i].x0->v0_idx];
++            b = &vertices[lines[i].x0->v1_idx];
++            put_f32(destination, 0, a->pos.x);
++            put_f32(destination, 4, a->pos.y);
++            put_f32(destination, 8, b->pos.x);
++            put_f32(destination, 12, b->pos.y);
++        }
++        put_u16(out, offsetof(MslCoreViewerStage, collision_line_count), count);
+     } else if (match->config.stage_id == MSL_CORE_STAGE_YOSHIS_STORY) {
+         float x;
+         float y;
+diff --git a/src/runtime/wire.h b/src/runtime/wire.h
+index 434b05e5..5158481c 100644
+--- a/src/runtime/wire.h
++++ b/src/runtime/wire.h
+@@ -151,8 +151,22 @@ typedef struct MslCoreMatchConfig {
+ enum {
+     // External/Frozen All/Core/2.asm: nop the call at 0x8021AAE4.
+     MSL_PATCH_FD_BACKGROUND_FROZEN = 1 << 0,
++    // Pokemon Stadium transforms (the stage's source scheduler and collision
++    // actors run): the frozen-Stadium code is absent from the capture's list,
++    // or an API caller asked for it. Clear keeps the frozen stage. Packed in
++    // this byte as the arithmetic flags reuse theirs, so the config stays 64
++    // bytes.
++    MSL_PATCH_STADIUM_TRANSFORMATIONS = 1 << 1,
++    MSL_PATCH_KNOWN = MSL_PATCH_FD_BACKGROUND_FROZEN |
++                      MSL_PATCH_STADIUM_TRANSFORMATIONS,
+ };
+ 
++static inline int msl_core_config_stadium_transformations(
++    const MslCoreMatchConfig* config)
++{
++    return (config->slippi_patches & MSL_PATCH_STADIUM_TRANSFORMATIONS) != 0;
++}
++
+ enum {
+     // camera_mode's top bit: keep a viewer track for this match
+     // (runtime/viewer_track.h, agent_docs/VIEWER_TRACK.md). Only a build with
+@@ -183,7 +197,8 @@ typedef struct MslCoreCompare {
+     uint32_t stage_id;
+     uint8_t num_players;
+     uint8_t is_teams;
+-    uint8_t _pad0[2];
++    uint8_t stadium_state;
++    uint8_t stadium_type;
+     uint8_t team_id[MSL_CORE_MAX_PLAYERS];
+     uint8_t char_id[MSL_CORE_MAX_PLAYERS];
+     float pos_x[MSL_CORE_MAX_PLAYERS];
+@@ -324,6 +339,8 @@ typedef struct MslCoreViewerPlayer {
+     MslCoreViewerHitbox hitboxes[MSL_CORE_MAX_HITBOXES];
+ } MslCoreViewerPlayer;
+ 
++enum { MSL_VIEWER_COLLISION_LINES = 256 };
++
+ typedef struct MslCoreViewerStage {
+     // Source actor order is 0=right and 1=left, matching Slippi's FoD event
+     // protocol and the existing viewer adapter.
+@@ -333,6 +350,10 @@ typedef struct MslCoreViewerStage {
+     uint8_t _pad0;
+     float randall_x;
+     float randall_y;
++    uint8_t stadium_state;
++    uint8_t stadium_type;
++    uint16_t collision_line_count;
++    float collision_lines[MSL_VIEWER_COLLISION_LINES][4];
+ } MslCoreViewerStage;
+ 
+ typedef struct MslCoreViewerCamera {
+@@ -392,11 +413,11 @@ _Static_assert(sizeof(MslCoreViewerHitbox) == 24,
+                "MslCoreViewerHitbox wire size");
+ _Static_assert(sizeof(MslCoreViewerPlayer) == 192,
+                "MslCoreViewerPlayer wire size");
+-_Static_assert(sizeof(MslCoreViewerStage) == 20,
++_Static_assert(sizeof(MslCoreViewerStage) == 4120,
+                "MslCoreViewerStage wire size");
+ _Static_assert(sizeof(MslCoreViewerCamera) == 28,
+                "MslCoreViewerCamera wire size");
+-_Static_assert(sizeof(MslCoreViewerState) == 2332,
++_Static_assert(sizeof(MslCoreViewerState) == 6432,
+                "MslCoreViewerState wire size");
+ 
+ static inline uint16_t msl_core_get_le16(const void* ptr)
+diff --git a/tests/melee_core/stadium_transformations_smoke.c b/tests/melee_core/stadium_transformations_smoke.c
+new file mode 100644
+index 00000000..ec3693c2
+--- /dev/null
++++ b/tests/melee_core/stadium_transformations_smoke.c
+@@ -0,0 +1,98 @@
++#include "runtime/context.h"
++#include "runtime/savestate.h"
++#include "runtime/scalar.h"
++#include "runtime/viewer.h"
++#include "gr/ground.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static Ground* controller(MslCoreMatch* match)
++{
++    msl_core_bind_match(match);
++    return Ground_801C2BA4(2)->user_data;
++}
++
++int main(int argc, char** argv)
++{
++    MslCoreGameData data;
++    MslCoreMatch matches[3];
++    MslCoreMatchConfig config = { 0 };
++    MslCoreInput input = { 0 };
++    MslCoreStageEvents events = { 0 };
++    MslCoreViewerState views[2];
++    size_t arena_used, frozen_used, allocations, snapshot_size;
++    void* snapshot;
++    unsigned types = 0, phases = 0;
++    int previous = -1, frame, i;
++    if (argc != 2) return 2;
++    config.stage_id = MSL_STAGE_POKEMON_STADIUM;
++    config.frame_id = -123;
++    config.initial_random_seed = config.frame_pre_random_seed = 1;
++    config.match_damage_ratio = 1;
++    config.num_players = 2;
++    config.stock_count = 4;
++    config.slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    config.players[0].char_id = config.players[1].char_id = 1;
++    if (msl_core_game_data_init(&data, argv[1])) return 1;
++    for (i = 0; i < 3; ++i)
++        if (msl_core_match_init(&matches[i], &data, &config, &input)) return 1;
++    arena_used = matches[0].memory.used;
++    allocations = matches[0].memory.allocation_count;
++    snapshot_size = msl_core_match_save_size(&matches[0]);
++    snapshot = malloc(snapshot_size);
++    if (!snapshot) return 1;
++    for (frame = 0; frame < 80000; ++frame) {
++        Ground* ground = controller(&matches[0]);
++        int phase = ground->u.stadium.xDC;
++        uint32_t frame_seed = matches[0].random_seed;
++        phases |= 1U << phase;
++        types |= 1U << ground->u.stadium.xDE;
++        if (phase != previous) {
++            if (msl_core_match_copy(&matches[1], &matches[0]) ||
++                msl_core_match_save(&matches[0], snapshot, snapshot_size, NULL) ||
++                msl_core_match_restore(&matches[2], snapshot, snapshot_size)) goto fail;
++            previous = phase;
++        }
++        for (i = 0; i < 3; ++i) {
++            if (msl_core_match_step(&matches[i], &input, frame_seed, &events) ||
++                matches[i].memory.used != arena_used ||
++                matches[i].memory.allocation_count != allocations) goto fail;
++        }
++        for (i = 1; i < 3; ++i) {
++            Ground* reference = controller(&matches[0]);
++            Ground* other = controller(&matches[i]);
++            if (reference->u.stadium.xDC != other->u.stadium.xDC ||
++                reference->u.stadium.xDE != other->u.stadium.xDE ||
++                reference->u.stadium.xD8 != other->u.stadium.xD8 ||
++                matches[0].random_seed != matches[i].random_seed) goto fail;
++            if (frame % 31 == 0) {
++                msl_core_match_write_viewer(&matches[0], &views[0]);
++                msl_core_match_write_viewer(&matches[i], &views[1]);
++                if (memcmp(views, views + 1, sizeof(views[0])) ||
++                    !views[0].stage.collision_line_count) goto fail;
++            }
++        }
++    }
++    if (types != ((1U << 3) | (1U << 4) | (1U << 5) | (1U << 6) | (1U << 9)) ||
++        phases != 0x7F) goto fail;
++    config.slippi_patches &= (uint8_t) ~MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    if (msl_core_match_reset(&matches[0], &data, &config, &input)) goto fail;
++    for (frame = 0; frame < 8000; ++frame)
++        if (msl_core_match_step(&matches[0], &input, matches[0].random_seed, &events)) goto fail;
++    if (controller(&matches[0])->u.stadium.xDE != 5 ||
++        controller(&matches[0])->u.stadium.xDC != 0) goto fail;
++    frozen_used = matches[0].memory.used;
++    config.slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
++    if (msl_core_match_reset(&matches[0], &data, &config, &input) ||
++        matches[0].memory.used != arena_used) goto fail;
++    printf("Stadium: all transformations, sealed pools, copy/save/restore and resets passed (enabled=%zu frozen=%zu arena bytes)\n", arena_used, frozen_used);
++    free(snapshot);
++    for (i = 0; i < 3; ++i) msl_core_match_destroy(&matches[i]);
++    msl_core_game_data_deinit(&data);
++    return 0;
++fail:
++    fprintf(stderr, "Stadium lifecycle failed at frame %d, types=%x phases=%x\n", frame, types, phases);
++    return 1;
++}
+diff --git a/tests/test_aggregate_suite_coverage.py b/tests/test_aggregate_suite_coverage.py
+index 1fe002de..1a87815d 100644
+--- a/tests/test_aggregate_suite_coverage.py
++++ b/tests/test_aggregate_suite_coverage.py
+@@ -23,7 +23,7 @@ def test_aggregate_replay_paths_are_unique() -> None:
+ 
+ @pytest.mark.parametrize(
+     "component_suite",
+-    ("aggregate_recent", "puff", "peach", "doubles_recent", "luigi", "marios", "samus", "pikachu", "icies", "dk", "ganon", "yoshi", "bowser", "ness", "links", "mewtwo_targeted", "gamewatch", "cpu_inputs", "legacy_arithmetic", "roy", "pichu", "kirby"),
++    ("aggregate_recent", "puff", "peach", "doubles_recent", "luigi", "marios", "samus", "pikachu", "icies", "dk", "ganon", "yoshi", "bowser", "ness", "links", "mewtwo_targeted", "gamewatch", "cpu_inputs", "legacy_arithmetic", "roy", "pichu", "kirby", "stadium_transformations"),
+ )
+ def test_melee_core_aggregate_contains_every_active_replay(
+     component_suite: str,
+@@ -41,7 +41,7 @@ def test_melee_core_aggregate_is_unique_and_composed_from_focused_manifests() ->
+     paths = [entry.replay for entry in aggregate.replays]
+     manifests = suite_manifest_paths("replays/suites/melee_core_aggregate.json")
+ 
+-    assert len(paths) == 524
++    assert len(paths) == 530
+     assert len(paths) == len(set(paths))
+     assert {path.name for path in manifests} == {
+         "melee_core_aggregate.json",
+@@ -67,4 +67,5 @@ def test_melee_core_aggregate_is_unique_and_composed_from_focused_manifests() ->
+         "roy.json",
+         "pichu.json",
+         "kirby.json",
++        "stadium_transformations.json",
+     }
+diff --git a/tests/test_data.py b/tests/test_data.py
+index 2e6efe1b..ee20173e 100644
+--- a/tests/test_data.py
++++ b/tests/test_data.py
+@@ -15,12 +15,13 @@ def test_repository_iso_contains_complete_supported_profile() -> None:
+     with iso.open("rb") as source:
+         profile = _profile(_disc_files(source))
+         dol = _main_dol(source)
+-    assert len(profile) == 298
++    assert len(profile) == 302
+     assert {"PlMt.dat", "PlMtAJ.dat"} <= profile.keys()
+     assert {"PlGw.dat", "PlGwAJ.dat", "PlGwNr.dat"} <= profile.keys()
+     assert {"PlFe.dat", "PlFeAJ.dat", "EfFeData.dat"} <= profile.keys()
+     assert {"PlPc.dat", "PlPcAJ.dat", "PlPcNr.dat"} <= profile.keys()
+     assert {"PlKb.dat", "PlKbAJ.dat", "PlKbCpFx.dat", "PlKbNrCpDk.dat", "EfKbData.dat", "EfKbFx.dat"} <= profile.keys()
++    assert {"GrPs1.dat", "GrPs2.dat", "GrPs3.dat", "GrPs4.dat"} <= profile.keys()
+     assert dol.path == "sys/main.dol"
+     assert dol.size > 0
+ 
+@@ -33,4 +34,4 @@ def test_configured_raw_data_profile_is_valid() -> None:
+         manifest = validate_raw_dir(path, verify_hashes=False)
+     except DataError as exc:
+         pytest.fail(str(exc))
+-    assert len(manifest["files"]) == 299
++    assert len(manifest["files"]) == 303
+diff --git a/tests/test_melee_core_validation_runner.py b/tests/test_melee_core_validation_runner.py
+index eda1ccb3..593592f0 100644
+--- a/tests/test_melee_core_validation_runner.py
++++ b/tests/test_melee_core_validation_runner.py
+@@ -91,7 +91,7 @@ def test_melee_core_aggregate_filters_pending_characters_without_losing_inventor
+     )
+ 
+     assert suite.name == "melee_core_aggregate"
+-    assert len(suite.replays) == 524
++    assert len(suite.replays) == 530
+     assert len(cases) == 79
+     assert all("Peach" not in case.characters for case in cases)
+ 
+@@ -100,7 +100,7 @@ def test_suite_replay_execution_metadata_reaches_native_validator(
+     monkeypatch, tmp_path: Path
+ ) -> None:
+     original_metadata = {"source": "legacy-capture"}
+-    game = SimpleNamespace(frames=object(), start={}, metadata=original_metadata)
++    game = SimpleNamespace(frames=object(), start={"stage": 32}, metadata=original_metadata)
+     captured: dict[str, object] = {}
+ 
+     @contextmanager
+diff --git a/tests/test_replay_admission.py b/tests/test_replay_admission.py
+index fff1568e..83b38bbc 100644
+--- a/tests/test_replay_admission.py
++++ b/tests/test_replay_admission.py
+@@ -79,11 +79,11 @@ def test_zero_transform_lcancel_is_still_uninitialized(properties_only):
+ def test_legacy_stadium_patch_establishes_frozen_play(properties_only, monkeypatch):
+     game, raw = read_game("replays/validation/peach/ScaryFrankPorcupine.slpz")
+     assert game.start["stage"] == 3 and game.start["is_frozen_ps"] is False
+-    assert "unfrozen-stadium" not in admission.capture_issues(game, raw)
++    assert admission.stadium_is_frozen(game.start, admission.gecko_codes(raw))
+     codes = admission.gecko_codes(raw)
+     del codes[0xC21D4578]
+     monkeypatch.setattr(admission, "gecko_codes", lambda _raw: codes)
+-    assert "unfrozen-stadium" in admission.capture_issues(game, raw)
++    assert not admission.stadium_is_frozen(game.start, admission.gecko_codes(raw))
+ 
+ 
+ def test_unreviewed_offscreen_body_is_rejected(properties_only, monkeypatch):
+diff --git a/tests/test_stage_replay_suite_metadata.py b/tests/test_stage_replay_suite_metadata.py
+index 1f9a32c5..71a942b7 100644
+--- a/tests/test_stage_replay_suite_metadata.py
++++ b/tests/test_stage_replay_suite_metadata.py
+@@ -7,12 +7,20 @@ from tools.validation.slpz import replay_path_for_peppi
+ from tools.validation.suite_io import load_suite
+ 
+ 
+-def test_stadium_suites_are_frozen() -> None:
++def test_stadium_suite_covers_frozen_and_all_transformations() -> None:
+     suite = load_suite("replays/suites/melee_core_aggregate.json")
+     stadium = [entry for entry in suite.replays if entry.stage_id == 3]
+     assert stadium
++    types = set()
++    frozen = 0
+     for entry in stadium:
+         with replay_path_for_peppi(Path(entry.replay)) as path:
+             game = _read_slippi(str(path), False)
+             assert game.start["stage"] == 3
+-            assert stadium_is_frozen(game.start, gecko_codes(path.read_bytes()))
++            if stadium_is_frozen(game.start, gecko_codes(path.read_bytes())):
++                frozen += 1
++            else:
++                for row in game.frames.field("stadium_transformation").to_pylist():
++                    types.update(event["type"] for event in row)
++    assert frozen
++    assert types == {3, 4, 5, 6, 9}
+diff --git a/tests/test_vector_pool.py b/tests/test_vector_pool.py
+index 34c93ca6..d49b6c5d 100644
+--- a/tests/test_vector_pool.py
++++ b/tests/test_vector_pool.py
+@@ -23,7 +23,8 @@ class VectorPoolTest(unittest.TestCase):
+         digest = hashlib.sha256()
+         with msl.EnvBatch(batch_size=2, length=128, num_players=4, action_format='raw') as env:
+             # Explicit directions keep the captured workload independent of AUTO.
+-            env.match_config_view[:] = fixture['config']
++            # The new Stadium flag occupies zeroed padding in this recorded ABI.
++            env.match_config_view[:] = fixture['config'].view(env.match_config_view.dtype)
+             env.reset_all()
+             for frame, action in enumerate(fixture['inputs']):
+                 env.current_action_frame[:] = action
+diff --git a/tools/data/extract.py b/tools/data/extract.py
+index 9eddd611..eeadc878 100644
+--- a/tools/data/extract.py
++++ b/tools/data/extract.py
+@@ -13,6 +13,7 @@ from .raw import (
+     MANIFEST_VERSION,
+     SUPPORTED_CHARACTERS,
+     SUPPORTED_STAGES,
++    STADIUM_ARCHIVES,
+     data_root,
+     sha256_file,
+     validate_raw_dir,
+@@ -98,6 +99,7 @@ REQUIRED_FILES = {
+     "GrNBa.dat",
+     "GrIz.dat",
+     "GrPs.dat",
++    *STADIUM_ARCHIVES,
+     "GrSt.dat",
+     "GrOp.dat",
+ }
+diff --git a/tools/data/raw.py b/tools/data/raw.py
+index 6ed12777..5af5acb7 100644
+--- a/tools/data/raw.py
++++ b/tools/data/raw.py
+@@ -39,6 +39,7 @@ SUPPORTED_CHARACTERS = (
+     "link",
+     "clink",
+ )
++STADIUM_ARCHIVES = ("GrPs1.dat", "GrPs2.dat", "GrPs3.dat", "GrPs4.dat")
+ SUPPORTED_STAGES = ("grnla", "grnba", "griz", "grps", "grst", "grop")
+ 
+ 
+@@ -121,7 +122,7 @@ def validate_raw_dir(
+             raise DataError(f"malformed game-data file record: {record!r}")
+         indexed[name] = record
+ 
+-    missing = sorted(set(required) - indexed.keys())
++    missing = sorted((set(required) | set(STADIUM_ARCHIVES)) - indexed.keys())
+     if missing:
+         raise DataError("missing required game-data files: " + ", ".join(missing))
+     for name, record in indexed.items():
+diff --git a/tools/validation/admission.py b/tools/validation/admission.py
+index 36bc36ce..31c5c48c 100644
+--- a/tools/validation/admission.py
++++ b/tools/validation/admission.py
+@@ -117,8 +117,6 @@ def capture_issues(game, raw: bytes, *, played_on: str | None = None,
+         start.get("damage_ratio", 0) <= 0 or start.get("timer") != 480 or
+         start.get("bitfield") not in ([50, 1, 134, 76], [50, 1, 142, 76])):
+         issues.append("unsupported-settings")
+-    if start.get("stage") == 3 and not stadium_is_frozen(start, codes):
+-        issues.append("unfrozen-stadium")
+     players = start["players"]
+     if len(players) not in (2, 3, 4) or (len(players) > 2 and not start.get("is_teams")):
+         issues.append("unsupported-settings")
+diff --git a/tools/validation/native.c b/tools/validation/native.c
+index b6ca2af0..ecb3ebcb 100644
+--- a/tools/validation/native.c
++++ b/tools/validation/native.c
+@@ -138,6 +138,9 @@ typedef struct ReplayView {
+   Primitive fod_platform_height;
+   const struct ArrowArray* dreamland_whispy_list;
+   Primitive dreamland_whispy_direction;
++  const struct ArrowArray* stadium_list;
++  Primitive stadium_state;
++  Primitive stadium_type;
+   ReplayPlayer players[MSL_CORE_MAX_PLAYERS];
+   // Peppi emits a parallel ports.P{n}.follower child for Ice Climbers
+   // players. Only its post lanes participate in comparison: Nana takes no
+@@ -164,6 +167,7 @@ typedef struct ReplayView {
+   // provenance, like the fnmsubs profile).
+   uint8_t jit_arithmetic;
+   uint8_t whispy_dead_fighter_fix;
++  uint8_t stadium_transformations;
+   float damage_ratio;
+ } ReplayView;
+ 
+@@ -862,6 +866,20 @@ static int load_stage_events(ArrowNode frames, ReplayView* replay, char* error,
+     }
+     replay->dreamland_whispy_list = list.array;
+   }
++  present = node_child_optional(frames, "stadium_transformation", &list, error, error_size);
++  if (present < 0) return -1;
++  if (present) {
++    if (list.schema->format == NULL || strcmp(list.schema->format, "+l") != 0 ||
++        list.array->n_buffers < 2 || list.array->buffers[1] == NULL ||
++        list.schema->n_children != 1 || list.array->n_children != 1 ||
++        node_child(list, "stadium_transformation", &values, error, error_size) != 0 ||
++        primitive_child(values, "event", "S", &replay->stadium_state, error, error_size) != 0 ||
++        primitive_child(values, "type", "S", &replay->stadium_type, error, error_size) != 0) {
++      snprintf(error, error_size, "unsupported Arrow Stadium transformation list");
++      return -1;
++    }
++    replay->stadium_list = list.array;
++  }
+   return 0;
+ }
+ 
+@@ -1129,6 +1147,9 @@ static int build_match_config(const ReplayView* replay, const FrameRows* rows,
+   config->brawl_offscreen_damage = replay->brawl_offscreen_damage;
+   config->freeze_dead_up_fall_physics = replay->freeze_dead_up_fall_physics;
+   config->slippi_patches = replay->slippi_patches;
++  if (replay->stadium_transformations) {
++    config->slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
++  }
+   config->whispy_dead_fighter_fix = replay->whispy_dead_fighter_fix;
+   config->ucf_cardinals_1_0_enabled = (uint8_t)ucf_cardinals_1_0_enabled;
+   config->ucf_shield_sdi_enabled = (uint8_t)ucf_shield_sdi_enabled;
+@@ -1245,6 +1266,15 @@ static void build_expected(const ReplayView* replay, const FrameRows* rows, int6
+   expected->stage_id = replay->stage_id;
+   expected->num_players = (uint8_t)replay->num_players;
+   expected->is_teams = replay->is_teams;
++  if (replay->stadium_transformations && replay->stadium_list != NULL) {
++    int64_t end = list_range_start(replay->stadium_list, raw) +
++                  list_count(replay->stadium_list, raw);
++    expected->stadium_type = 5;
++    if (end > 0) {
++      expected->stadium_state = get_u16(&replay->stadium_state, end - 1);
++      expected->stadium_type = get_u16(&replay->stadium_type, end - 1);
++    }
++  }
+   for (player = replay->num_players; player < MSL_CORE_MAX_PLAYERS; ++player) {
+     expected->is_dead[player] = 1;
+   }
+@@ -1400,6 +1430,8 @@ static const FieldSpec compare_fields[] = {
+     SPEC("frame_id", frame_id, 1, FIELD_I32),
+     SPEC("frame_pre_random_seed", frame_pre_random_seed, 1, FIELD_U32),
+     SPEC("stage_id", stage_id, 1, FIELD_U32),
++    SPEC("stadium_state", stadium_state, 1, FIELD_U8),
++    SPEC("stadium_type", stadium_type, 1, FIELD_U8),
+     SPEC("num_players", num_players, 1, FIELD_U8),
+     SPEC("is_teams", is_teams, 1, FIELD_U8),
+     SPEC("team_id", team_id, MSL_CORE_MAX_PLAYERS, FIELD_U8),
+@@ -1696,6 +1728,11 @@ static int compare_row(const ReplayView* replay, const FrameRows* rows, int64_t
+     const uint8_t* actual_bytes = (const uint8_t*)(const void*)actual + spec->offset;
+     size_t width = field_width((FieldKind)spec->kind);
+     int element;
++    if (replay->stadium_list == NULL &&
++        (spec->offset == offsetof(MslCoreCompare, stadium_state) ||
++         spec->offset == offsetof(MslCoreCompare, stadium_type))) {
++      continue;
++    }
+     for (element = 0; element < spec->count; ++element) {
+       int player = -1;
+       if (spec->count == MSL_CORE_MAX_PLAYERS) {
+@@ -2511,6 +2548,7 @@ static PyObject* validate_replay(PyObject* self, PyObject* args, PyObject* kwarg
+       "slippi_patches",
+       "jit_arithmetic",
+       "visual_track",
++      "stadium_transformations",
+       NULL,
+   };
+   PyObject* frames_obj;
+@@ -2537,6 +2575,7 @@ static PyObject* validate_replay(PyObject* self, PyObject* args, PyObject* kwarg
+   int slippi_patches = 0;
+   int jit_arithmetic = 0;
+   int visual_track = 0;
++  int stadium_transformations = 0;
+   struct ArrowSchema* schema;
+   struct ArrowArray* array;
+   ArrowNode frames;
+@@ -2555,13 +2594,13 @@ static PyObject* validate_replay(PyObject* self, PyObject* args, PyObject* kwarg
+   (void)self;
+ 
+   if (!PyArg_ParseTupleAndKeywords(
+-          args, kwargs, "OOOssss|OKdpppppppiiziip:validate_replay", keywords, &frames_obj, &start_obj,
++          args, kwargs, "OOOssss|OKdpppppppiiziipp:validate_replay", keywords, &frames_obj, &start_obj,
+           &metadata_obj, &qemu_path, &sysroot, &binary_path, &data_root, &start_frame_obj,
+           &frames_limit, &timeout, &signed_zero_equal, &direct_native, &ucf_cardinals_1_0_enabled,
+           &ucf_shield_sdi_enabled, &ucf_sdi_enabled, &ucf_shield_drop_extended_enabled,
+           &ucf_shield_drop_084_enabled,
+           &runner_stdin, &runner_stdout, &fnmsubs_profile, &slippi_patches,
+-          &jit_arithmetic, &visual_track)) {
++          &jit_arithmetic, &visual_track, &stadium_transformations)) {
+     return NULL;
+   }
+   if (visual_track && runner_stdin >= 0) {
+@@ -2577,6 +2616,7 @@ static PyObject* validate_replay(PyObject* self, PyObject* args, PyObject* kwarg
+     return NULL;
+   }
+   memset(&replay, 0, sizeof(replay));
++  replay.stadium_transformations = stadium_transformations;
+   memset(&rows, 0, sizeof(rows));
+   memset(&state, 0, sizeof(state));
+   state.signed_zero_equal = (uint8_t)signed_zero_equal;
+@@ -2718,6 +2758,7 @@ static PyObject* write_benchmark_case(PyObject* self, PyObject* args, PyObject*
+       "fnmsubs_profile",
+       "slippi_patches",
+       "jit_arithmetic",
++      "stadium_transformations",
+       NULL,
+   };
+   PyObject* frames_obj;
+@@ -2728,6 +2769,7 @@ static PyObject* write_benchmark_case(PyObject* self, PyObject* args, PyObject*
+   const char* fnmsubs_profile = NULL;
+   int slippi_patches = 0;
+   int jit_arithmetic = 0;
++  int stadium_transformations = 0;
+   int ucf_cardinals_1_0_enabled = 1;
+   int ucf_shield_sdi_enabled = 1;
+   int ucf_sdi_enabled = 1;
+@@ -2746,15 +2788,16 @@ static PyObject* write_benchmark_case(PyObject* self, PyObject* args, PyObject*
+   PyObject* result = NULL;
+   (void)self;
+ 
+-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOs|pppppzii:write_benchmark_case", keywords,
++  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOOs|pppppziip:write_benchmark_case", keywords,
+                                    &frames_obj, &start_obj, &metadata_obj, &output_path,
+                                    &ucf_cardinals_1_0_enabled, &ucf_shield_sdi_enabled,
+                                    &ucf_sdi_enabled, &ucf_shield_drop_extended_enabled,
+                                    &ucf_shield_drop_084_enabled, &fnmsubs_profile, &slippi_patches,
+-                                   &jit_arithmetic)) {
++                                   &jit_arithmetic, &stadium_transformations)) {
+     return NULL;
+   }
+   memset(&replay, 0, sizeof(replay));
++  replay.stadium_transformations = stadium_transformations;
+   memset(&rows, 0, sizeof(rows));
+   if (parse_start(start_obj, &replay) != 0 || parse_metadata(metadata_obj, &replay) != 0) {
+     goto done;
+diff --git a/tools/validation/prepare_replay_benchmark.py b/tools/validation/prepare_replay_benchmark.py
+index 560128e4..20704591 100644
+--- a/tools/validation/prepare_replay_benchmark.py
++++ b/tools/validation/prepare_replay_benchmark.py
+@@ -18,13 +18,13 @@ from tools.validation.validate_replay import (
+     load_suite_cases,
+     ReplayCase,
+ )
+-from tools.validation.admission import gecko_codes, require_admissible, slippi_patches
++from tools.validation.admission import gecko_codes, require_admissible, slippi_patches, stadium_is_frozen
+ from tools.validation.slpz import replay_path_for_peppi
+ 
+ 
+ FORMAT_VERSION = 5
+ # Export semantics can change without changing the tape layout.
+-CACHE_VERSION = 6
++CACHE_VERSION = 7
+ DEFAULT_SUITE = ROOT / "replays/suites/melee_core_aggregate.json"
+ DEFAULT_OUTPUT = ROOT / "build/melee_core/benchmark/cases.tsv"
+ 
+@@ -115,6 +115,8 @@ def prepare(args: argparse.Namespace) -> None:
+                         metadata["playedOn"] = case.played_on
+                     frame_count = native.write_benchmark_case(
+                         game.frames, game.start, metadata, str(temporary),
++                        stadium_transformations=(game.start["stage"] == 3 and not stadium_is_frozen(
++                            game.start, gecko_codes(peppi_path.read_bytes()))),
+                         ucf_cardinals_1_0_enabled=case.ucf_cardinals_1_0_enabled,
+                         ucf_shield_sdi_enabled=case.ucf_shield_sdi_enabled,
+                         ucf_sdi_enabled=case.ucf_sdi_enabled,
+diff --git a/tools/validation/validate_replay.py b/tools/validation/validate_replay.py
+index 8102d875..0e4dc936 100644
+--- a/tools/validation/validate_replay.py
++++ b/tools/validation/validate_replay.py
+@@ -24,7 +24,7 @@ from tools.validation.slpz import (
+     resolve_replay_path,
+     set_native_unorder_events,
+ )
+-from tools.validation.admission import gecko_codes, require_admissible, slippi_patches
++from tools.validation.admission import gecko_codes, require_admissible, slippi_patches, stadium_is_frozen
+ from tools.validation.suite_io import ReplaySuite, display_path_under_repo, load_suite
+ 
+ 
+@@ -45,7 +45,7 @@ DEFAULT_OUTPUT_LOCKS = ROOT / "replays/suites/melee_core_output_locks.json"
+ 
+ STAGE_NAMES = {
+     2: "Fountain",
+-    3: "Frozen Stadium",
++    3: "Pokémon Stadium",
+     8: "Yoshi's",
+     28: "Dream Land",
+     31: "Battlefield",
+@@ -350,6 +350,8 @@ def validate_one(
+             game.frames,
+             game.start,
+             metadata,
++            stadium_transformations=(game.start["stage"] == 3 and not stadium_is_frozen(
++                game.start, gecko_codes(peppi_path.read_bytes()))),
+             qemu=str(QEMU),
+             sysroot=str(SYSROOT),
+             binary=str(NATIVE_BINARY if backend == "native" else PPC_BINARY),
+diff --git a/tools/viewer/live/schema.generated.js b/tools/viewer/live/schema.generated.js
+index b6571bf9..0426722c 100644
+--- a/tools/viewer/live/schema.generated.js
++++ b/tools/viewer/live/schema.generated.js
+@@ -3,7 +3,7 @@ export const MATCH_CONFIG_SIZE = 64;
+ export const MATCH_CONFIG_PLAYER_SIZE = 7;
+ export const INPUT_SIZE = 52;
+ export const INPUT_PLAYER_SIZE = 13;
+-export const VIEWER_STATE_SIZE = 2332;
++export const VIEWER_STATE_SIZE = 6432;
+ export const VIEWER_PLAYER_SIZE = 192;
+ export const VIEWER_HITBOX_SIZE = 24;
+ export const ITEM_SIZE = 48;
+@@ -66,9 +66,9 @@ export const viewerOffsets = Object.freeze({
+   players: 24,
+   items: 792,
+   stage: 1512,
+-  camera: 1532,
+-  followerPresent: 1560,
+-  followers: 1564,
++  camera: 5632,
++  followerPresent: 5660,
++  followers: 5664,
+ });
+ export const viewerPlayerOffsets = Object.freeze({
+   charId: 0,
+@@ -144,6 +144,10 @@ export const viewerStageOffsets = Object.freeze({
+   randallExists: 10,
+   randallX: 12,
+   randallY: 16,
++  stadiumState: 20,
++  stadiumType: 21,
++  collisionLineCount: 22,
++  collisionLines: 24,
+ });
+ export const viewerCameraOffsets = Object.freeze({
+   eyeX: 0,
+diff --git a/tools/viewer/schema.c b/tools/viewer/schema.c
+index b6506483..9288b78b 100644
+--- a/tools/viewer/schema.c
++++ b/tools/viewer/schema.c
+@@ -46,6 +46,7 @@ int main(void)
+           "ucfShieldDrop084Enabled");
+     FIELD(MslCoreMatchConfig, stage_event_streams, "stageEventStreams");
+     FIELD(MslCoreMatchConfig, whispy_dead_fighter_fix, "whispyDeadFighterFix");
++    FIELD(MslCoreMatchConfig, slippi_patches, "slippiPatches");
+     FIELD(MslCoreMatchConfig, players, "players");
+     puts("});");
+ 
+@@ -168,6 +169,10 @@ int main(void)
+     FIELD(MslCoreViewerStage, randall_exists, "randallExists");
+     FIELD(MslCoreViewerStage, randall_x, "randallX");
+     FIELD(MslCoreViewerStage, randall_y, "randallY");
++    FIELD(MslCoreViewerStage, stadium_state, "stadiumState");
++    FIELD(MslCoreViewerStage, stadium_type, "stadiumType");
++    FIELD(MslCoreViewerStage, collision_line_count, "collisionLineCount");
++    FIELD(MslCoreViewerStage, collision_lines, "collisionLines");
+     puts("});");
+ 
+     puts("export const viewerCameraOffsets = Object.freeze({");
+-- 
+2.43.0
+

@@ -616,10 +616,12 @@ export class DrawLog {
     const [PW, PH] = this.target ?? [640, 480];
     // (a camera that turns the picture over has its rows the other way)
     const flip = s.mirrored && this.target !== null;
+    const r1 = (v: number) => Math.round(v * 10) / 10;
     for (const b of batches) {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      // (a lettering batch, the name plates' or Stadium's screen's: each quad's own box and the picture's corner it reads, to set beside the
-      // game's draws one glyph at a time)
+      // (each quad's own box, in the batch's order and the picture's pixels: the game draws each particle, and each
+      // glyph, on its own; a lettering batch - the name plates' or Stadium's screen's - the picture's corner each reads too)
+      const boxes: (number[] | null)[] = [];
       const cells: { box: number[]; uv: number[] }[] | null = b.sprite && (b.sprite.key === "plate-font" || b.sprite.key.startsWith("screen-font")) ? [] : null;
       // (each quad's four corners on the screen, in its vertex order, unrounded: to pair the game's quads one by one;
       // a corner behind the camera null)
@@ -636,13 +638,15 @@ export class DrawLog {
           const ny = (vp[1] * X + vp[5] * Y + vp[9] * Z + vp[13]) / w * 0.5;
           const sy = (flip ? 0.5 + ny : 0.5 - ny) * PH;
           corners.push([sx, sy]);
-          x0 = Math.min(x0, sx); y0 = Math.min(y0, sy); x1 = Math.max(x1, sx); y1 = Math.max(y1, sy);
           qx0 = Math.min(qx0, sx); qy0 = Math.min(qy0, sy); qx1 = Math.max(qx1, sx); qy1 = Math.max(qy1, sy);
         }
         if (cells) {
           const t = (q * 4 + 1) * 17;
           cells.push({ box: [qx0, qy0, qx1, qy1].map((v) => Math.round(v * 100) / 100), uv: [data[t + 3], data[t + 4]] });
         }
+        if (!Number.isFinite(qx0)) { boxes.push(null); continue; }
+        boxes.push([r1(qx0), r1(qy0), r1(qx1), r1(qy1)]);
+        x0 = Math.min(x0, qx0); y0 = Math.min(y0, qy0); x1 = Math.max(x1, qx1); y1 = Math.max(y1, qy1);
       }
       // (the sprite's identity as the game's texture's: its image's bytes in the effect file)
       const src = b.sprite?.src;
@@ -654,7 +658,7 @@ export class DrawLog {
         blend: { on: true, src: "srcalpha", dst: b.additive ? "one" : "invsrcalpha", sub: false, logic: null },
         z: { test: true, func: b.nozcomp ? "always" : "lequal", write: b.zwrite }, near: b.near,
         overlay: s.overlayVP !== null,
-        bbox: Number.isFinite(x0) ? [x0, y0, x1, y1].map((v) => Math.round(v * 10) / 10) : null,
+        bbox: Number.isFinite(x0) ? [x0, y0, x1, y1].map(r1) : null, boxes,
         ...(cells ? { cells } : {}),
         corners: quads,
         ...(this.target ? { target: this.target } : {}),

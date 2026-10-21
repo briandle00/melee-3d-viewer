@@ -532,6 +532,32 @@ static void HSD_MtxInverseConcat(Mtx inv, Mtx src, Mtx dest)
     memcpy(dest, m, sizeof(Mtx));
 }
 
+static void PSVECScale(const float* v, float* out, float k) { out[0] = v[0] * k; out[1] = v[1] * k; out[2] = v[2] * k; }
+static void PSVECSubtract(const float* a, const float* b, float* out) { out[0] = a[0] - b[0]; out[1] = a[1] - b[1]; out[2] = a[2] - b[2]; }
+
+/* baselib/mtx.c HSD_MtxGetScale */
+static void HSD_MtxGetScale(Mtx m, float* out)
+{
+    float v1[3] = { m[0][0], m[1][0], m[2][0] }, v2[3] = { m[0][1], m[1][1], m[2][1] }, v3[3] = { m[0][2], m[1][2], m[2][2] }, v4[3];
+    out[0] = PSVECMag(v1);
+    PSVECNormalize(v1, v1);
+    PSVECScale(v1, v4, PSVECDotProduct(v1, v2));
+    PSVECSubtract(v2, v4, v2);
+    out[1] = PSVECMag(v2);
+    PSVECNormalize(v2, v2);
+    PSVECScale(v2, v4, PSVECDotProduct(v2, v3));
+    PSVECSubtract(v3, v4, v3);
+    PSVECScale(v1, v4, PSVECDotProduct(v1, v3));
+    PSVECSubtract(v3, v4, v3);
+    out[2] = PSVECMag(v3);
+    PSVECNormalize(v3, v3);
+    PSVECCrossProduct(v2, v3, v4);
+    if (PSVECDotProduct(v1, v4) < 0.0) {
+        double scale = -1.0;
+        out[0] *= scale; out[1] *= scale; out[2] *= scale;
+    }
+}
+
 /* ---------------------------------------------------------------- displayfunc.c's billboards */
 
 static float HSD_MtxColMag(Mtx m, int col)
@@ -662,7 +688,7 @@ int main(int argc, char** argv)
         { "lookat", 9, 12 }, { "perspective", 4, 16 }, { "frustum", 6, 16 }, { "ortho", 6, 16 }, { "srt", 13, 12 },
         { "srtquat", 14, 12 }, { "scaledadd", 25, 12 }, { "invconcat", 24, 12 }, { "sqrtf", 1, 1 }, { "sinf", 1, 1 },
         { "cosf", 1, 1 }, { "tanf", 1, 1 }, { "frsqrte", 1, 2 }, { "fres", 1, 1 }, { "view", 7, 12 }, { "mkrot", 3, 12 }, { "texmtx", 12, 12 }, { "billboard", 15, 12 },
-        { "invxpose", 12, 12 },
+        { "invxpose", 12, 12 }, { "getscale", 12, 3 },
     };
     int k = -1;
     for (int i = 0; i < (int) (sizeof F / sizeof F[0]); i++) if (!strcmp(F[i].name, fn)) k = i;
@@ -702,6 +728,7 @@ int main(int argc, char** argv)
         case 27: MakeTextureMtx(C, a, a + 3, a + 6, (int) a[9], (int) a[10], (int) a[11]); memcpy(r, C, 48); break;
         case 28: memcpy(A, a, 48); memset(C, 0, 48); mkBillBoard((int) a[12], (int) a[13], a[14], A, C); memcpy(r, C, 48); break;
         case 29: memcpy(A, a, 48); HSD_MtxInverseTranspose(A, C); memcpy(r, C, 48); break;
+        case 30: memcpy(A, a, 48); HSD_MtxGetScale(A, r); break;
         }
         fwrite(r, 4, F[k].nout, out);
     }

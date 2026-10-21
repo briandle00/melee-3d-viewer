@@ -120,7 +120,7 @@ test("C_MTXLookAt, the camera's viewing matrix, and the projections", { skip }, 
   same("frustum", Array.from({ length: N }, box), (a) => Array.from(G.C_MTXFrustum(new Float32Array(16), a[0], a[1], a[2], a[3], a[4], a[5])));
 });
 
-test("HSD_MtxSRT, HSD_MtxSRTQuat, HSD_MtxScaledAdd, HSD_MtxInverseConcat", { skip }, () => {
+test("HSD_MtxSRT, HSD_MtxSRTQuat, HSD_MtxScaledAdd, HSD_MtxGetScale, HSD_MtxInverseConcat", { skip }, () => {
   const srt = Array.from({ length: N }, () => [...vec(3, 0.2, 3), ...vec(3, -7, 7), ...vec(3, -50, 50), ...vec(3, 0.2, 3),
                                                rnd() < 0.5 ? 1 : 0]);
   same("srt", srt, (a) => Array.from(G.HSD_MtxSRT(new Float32Array(12), a.slice(0, 3), a.slice(3, 6), a.slice(6, 9),
@@ -132,6 +132,7 @@ test("HSD_MtxSRT, HSD_MtxSRTQuat, HSD_MtxScaledAdd, HSD_MtxInverseConcat", { ski
   same("scaledadd", Array.from({ length: N }, () => [...mtx(), ...mtx(), f(0, 1)]),
        (a) => Array.from(G.HSD_MtxScaledAdd(M(a), M(a, 12), new Float32Array(12), a[24])));
   same("invxpose", Array.from({ length: N }, () => mtx()), (a) => Array.from(G.HSD_MtxInverseTranspose(M(a), new Float32Array(12))));
+  same("getscale", Array.from({ length: N }, () => mtx()), (a) => Array.from(G.HSD_MtxGetScale(M(a), [0, 0, 0])));
   same("invconcat", Array.from({ length: N }, () => [...mtx(), ...mtx()]),
        (a) => Array.from(G.HSD_MtxInverseConcat(M(a), M(a, 12), new Float32Array(12))));
 });

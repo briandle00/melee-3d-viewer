@@ -1,0 +1,237 @@
+From 324f0821362fabd3120e34e2f748f858b88b0e93 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 08:01:12 +0000
+Subject: [PATCH 4/8] Stadium transformations: production byte-identical with
+ them off and on frozen Stadium
+
+Checked with game data, this series changed production output on every Pokemon Stadium game of the 92,
+frozen ones included (lock frozenps: anim lines 9798 -> 7932). What ran with the setting off:
+
+- Upstream fcc46464 (match termination timing, completed games frozen, save format v2) is not part of the
+  stadium series any more: it stops stepping once the match is decided and moves the outcome check, for
+  every stage, whatever the setting, so it cannot stay byte-identical. It is dropped, not gated.
+- preload_match_configuration preloaded Pokemon Stadium with transformations forced on, so the frozen
+  domain's GameData preload was a transforming match's. The frozen preloads now run exactly as before (no
+  patch bits), and one transforming Stadium preload follows them all, before GameData seals.
+- ft_80089B08's IK restore (msl_fighter_pose_srt_restored) changed the pose schedule of every fighter on
+  every stage; it now applies only in a match with transformations on.
+- Replay-derived configs (validate_replay, prepare_replay_benchmark) ask one helper,
+  admission.stadium_transformations: Pokemon Stadium only, never when the capture says frozen
+  (is_frozen_ps or the legacy FreezeStadium patch).
+
+Defaults, all off: MslMatchConfig.stadium_transformations 0, melee_sim MatchConfig False, the live viewer's
+stadiumTransformations false, the C config's slippi_patches bit 1 clear. Data-free test:
+tests/test_stadium_transformation_gating.py.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ src/runtime/fighter_pose.c                   | 10 +++++-
+ src/runtime/scalar.c                         | 23 +++++++++-----
+ tests/test_stadium_transformation_gating.py  | 33 ++++++++++++++++++++
+ tools/validation/admission.py                |  7 +++++
+ tools/validation/prepare_replay_benchmark.py |  5 ++-
+ tools/validation/validate_replay.py          |  5 ++-
+ 6 files changed, 69 insertions(+), 14 deletions(-)
+ create mode 100644 tests/test_stadium_transformation_gating.py
+
+diff --git a/src/runtime/fighter_pose.c b/src/runtime/fighter_pose.c
+index 472d9a56..0ea7e7aa 100644
+--- a/src/runtime/fighter_pose.c
++++ b/src/runtime/fighter_pose.c
+@@ -5,6 +5,7 @@
+ #include "platform/native_dat.h"
+ #endif
+ #include "runtime/context.h"
++#include "runtime/scalar.h"
+ 
+ #include <math.h>
+ #include <stdio.h>
+@@ -307,7 +308,14 @@ bool msl_fighter_pose_set_mtx_dirty(HSD_JObj* root)
+ 
+ void msl_fighter_pose_srt_restored(HSD_JObj* joint)
+ {
+-    MslFighterPoseJoint* node = pose_joint(joint);
++    MslFighterPoseJoint* node;
++    // Only a transforming Stadium needs the IK matrices kept past their
++    // restore (its sloped lines reach ft_80089B08's ground IK); every other
++    // match keeps the existing pose schedule byte for byte.
++    if (!msl_core_config_stadium_transformations(&msl_core_active_match()->config)) {
++        return;
++    }
++    node = pose_joint(joint);
+     HSD_ASSERT(149, node != NULL);
+     node->flags |= MSL_FIGHTER_POSE_SRT_RESTORED;
+ }
+diff --git a/src/runtime/scalar.c b/src/runtime/scalar.c
+index dc60b05b..1820acdd 100644
+--- a/src/runtime/scalar.c
++++ b/src/runtime/scalar.c
+@@ -1674,7 +1674,8 @@ static int match_construct(MslCoreMatch* match,
+ #ifdef MSL_CORE_NATIVE
+ static int preload_match_configuration(MslCoreGameData* game_data,
+                                        uint8_t stage_id, uint8_t char_id,
+-                                       uint8_t opponent_id)
++                                       uint8_t opponent_id,
++                                       uint8_t slippi_patches)
+ {
+     MslCoreMatch* match;
+     MslCoreMatchConfig config;
+@@ -1688,9 +1689,7 @@ static int preload_match_configuration(MslCoreGameData* game_data,
+     memset(&config, 0, sizeof(config));
+     memset(&previous_input, 0, sizeof(previous_input));
+     config.stage_id = stage_id;
+-    if (stage_id == MSL_CORE_STAGE_POKEMON_STADIUM) {
+-        config.slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
+-    }
++    config.slippi_patches = slippi_patches;
+     config.frame_id = -123;
+     config.frame_pre_random_seed = 1;
+     config.initial_random_seed = 1;
+@@ -1808,7 +1807,7 @@ static int preload_supported_game_data(MslCoreGameData* game_data)
+     for (i = 0; i < sizeof(characters) / sizeof(characters[0]); ++i) {
+         if (preload_match_configuration(game_data,
+                                         MSL_CORE_STAGE_FINAL_DESTINATION,
+-                                        characters[i], characters[i]) != 0)
++                                        characters[i], characters[i], 0) != 0)
+         {
+             return -1;
+         }
+@@ -1823,7 +1822,7 @@ static int preload_supported_game_data(MslCoreGameData* game_data)
+         if (preload_match_configuration(game_data,
+                                         MSL_CORE_STAGE_FINAL_DESTINATION,
+                                         MSL_CHARACTER_KIRBY,
+-                                        characters[i]) != 0)
++                                        characters[i], 0) != 0)
+         {
+             return -1;
+         }
+@@ -1833,11 +1832,21 @@ static int preload_supported_game_data(MslCoreGameData* game_data)
+             continue;
+         }
+         if (preload_match_configuration(game_data, stage_specs[i].external_id,
+-                                        MSL_CORE_CHAR_FOX, MSL_CORE_CHAR_FOX) != 0)
++                                        MSL_CORE_CHAR_FOX, MSL_CORE_CHAR_FOX, 0) != 0)
+         {
+             return -1;
+         }
+     }
++    // Then once more for a transforming Stadium, after every frozen preload:
++    // its four forms' archives and actors are reached here, so GameData holds
++    // them before it seals, while everything the frozen domain preloads (in
++    // the same order as before) comes first and is unchanged.
++    if (preload_match_configuration(game_data, MSL_CORE_STAGE_POKEMON_STADIUM,
++                                    MSL_CORE_CHAR_FOX, MSL_CORE_CHAR_FOX,
++                                    MSL_PATCH_STADIUM_TRANSFORMATIONS) != 0)
++    {
++        return -1;
++    }
+     // Stage particle creation consumes gameplay RNG; preload its commands.
+     for (i = 0; i < sizeof(stage_specs) / sizeof(stage_specs[0]); ++i) {
+         HSD_Archive* archive = lbArchive_LoadArchive(stage_specs[i].archive);
+diff --git a/tests/test_stadium_transformation_gating.py b/tests/test_stadium_transformation_gating.py
+new file mode 100644
+index 00000000..52735992
+--- /dev/null
++++ b/tests/test_stadium_transformation_gating.py
+@@ -0,0 +1,33 @@
++"""Pokemon Stadium transformations stay off unless asked for: the API
++default, the Slippi patch byte's known bits, and replay-derived configs,
++which never transform a frozen Stadium (no game data needed)."""
++
++from __future__ import annotations
++
++import re
++from pathlib import Path
++
++from melee_sim.config import MatchConfig
++from tools.validation import admission
++
++ROOT = Path(__file__).resolve().parents[1]
++FROZEN_PATCH = bytes.fromhex(
++    "c21d457800000003ffe008903d80801d618c4fd87d8903a64e80042048000000")
++
++
++def test_api_default_is_frozen():
++    assert MatchConfig().stadium_transformations is False
++
++
++def test_wire_bit_and_known_mask():
++    wire = (ROOT / "src/runtime/wire.h").read_text()
++    assert re.search(r"MSL_PATCH_STADIUM_TRANSFORMATIONS = 1 << 1,", wire)
++    assert re.search(r"MSL_PATCH_KNOWN = MSL_PATCH_FD_BACKGROUND_FROZEN \|\s*MSL_PATCH_STADIUM_TRANSFORMATIONS", wire)
++
++
++def test_replays_transform_only_unfrozen_stadium():
++    assert admission.stadium_transformations({"stage": 3}, {}) is True
++    assert admission.stadium_transformations({"stage": 3, "is_frozen_ps": True}, {}) is False
++    assert admission.stadium_transformations({"stage": 3}, {0xC21D4578: FROZEN_PATCH}) is False
++    for stage in (2, 8, 28, 31, 32):
++        assert admission.stadium_transformations({"stage": stage}, {}) is False
+diff --git a/tools/validation/admission.py b/tools/validation/admission.py
+index 31c5c48c..62b135e9 100644
+--- a/tools/validation/admission.py
++++ b/tools/validation/admission.py
+@@ -78,6 +78,13 @@ def stadium_is_frozen(start: dict, codes: dict[int, bytes]) -> bool:
+     return start.get("is_frozen_ps") is True or legacy_frozen
+ 
+ 
++def stadium_transformations(start: dict, codes: dict[int, bytes]) -> bool:
++    """Whether a replay's Pokemon Stadium transforms: only on Stadium, and
++    never when the capture says the stage is frozen (is_frozen_ps or the
++    legacy FreezeStadium patch). Every other replay runs as before."""
++    return start.get("stage") == 3 and not stadium_is_frozen(start, codes)
++
++
+ # wire.h MSL_PATCH_*.
+ PATCH_FD_BACKGROUND_FROZEN = 1 << 0
+ 
+diff --git a/tools/validation/prepare_replay_benchmark.py b/tools/validation/prepare_replay_benchmark.py
+index 20704591..c035d1a4 100644
+--- a/tools/validation/prepare_replay_benchmark.py
++++ b/tools/validation/prepare_replay_benchmark.py
+@@ -18,7 +18,7 @@ from tools.validation.validate_replay import (
+     load_suite_cases,
+     ReplayCase,
+ )
+-from tools.validation.admission import gecko_codes, require_admissible, slippi_patches, stadium_is_frozen
++from tools.validation.admission import gecko_codes, require_admissible, slippi_patches, stadium_transformations
+ from tools.validation.slpz import replay_path_for_peppi
+ 
+ 
+@@ -115,8 +115,7 @@ def prepare(args: argparse.Namespace) -> None:
+                         metadata["playedOn"] = case.played_on
+                     frame_count = native.write_benchmark_case(
+                         game.frames, game.start, metadata, str(temporary),
+-                        stadium_transformations=(game.start["stage"] == 3 and not stadium_is_frozen(
+-                            game.start, gecko_codes(peppi_path.read_bytes()))),
++                        stadium_transformations=stadium_transformations(game.start, gecko_codes(peppi_path.read_bytes())),
+                         ucf_cardinals_1_0_enabled=case.ucf_cardinals_1_0_enabled,
+                         ucf_shield_sdi_enabled=case.ucf_shield_sdi_enabled,
+                         ucf_sdi_enabled=case.ucf_sdi_enabled,
+diff --git a/tools/validation/validate_replay.py b/tools/validation/validate_replay.py
+index 0e4dc936..886b3cf0 100644
+--- a/tools/validation/validate_replay.py
++++ b/tools/validation/validate_replay.py
+@@ -24,7 +24,7 @@ from tools.validation.slpz import (
+     resolve_replay_path,
+     set_native_unorder_events,
+ )
+-from tools.validation.admission import gecko_codes, require_admissible, slippi_patches, stadium_is_frozen
++from tools.validation.admission import gecko_codes, require_admissible, slippi_patches, stadium_transformations
+ from tools.validation.suite_io import ReplaySuite, display_path_under_repo, load_suite
+ 
+ 
+@@ -350,8 +350,7 @@ def validate_one(
+             game.frames,
+             game.start,
+             metadata,
+-            stadium_transformations=(game.start["stage"] == 3 and not stadium_is_frozen(
+-                game.start, gecko_codes(peppi_path.read_bytes()))),
++            stadium_transformations=stadium_transformations(game.start, gecko_codes(peppi_path.read_bytes())),
+             qemu=str(QEMU),
+             sysroot=str(SYSROOT),
+             binary=str(NATIVE_BINARY if backend == "native" else PPC_BINARY),
+-- 
+2.43.0
+

@@ -616,6 +616,38 @@ export function HSD_MtxInverseConcat(inv: Mtx, src: Mtx, out: Mtx): Mtx {
   return out;
 }
 
+/** PSVECScale */
+export function PSVECScale(v: Vec, out: Vec, k: number): Vec {
+  out[0] = f32(v[0] * k); out[1] = f32(v[1] * k); out[2] = f32(v[2] * k);
+  return out;
+}
+
+const gsV1 = [0, 0, 0], gsV2 = [0, 0, 0], gsV3 = [0, 0, 0], gsV4 = [0, 0, 0];
+/** HSD_MtxGetScale: the first column's length, the second's once the first is taken out of it, the third's
+ *  once both are (PSVECMag, PSVECNormalize), all negative when the three turn the other way */
+export function HSD_MtxGetScale(m: Mtx, out: Vec): Vec {
+  const v1 = gsV1, v2 = gsV2, v3 = gsV3, v4 = gsV4;
+  v1[0] = m[0]; v1[1] = m[4]; v1[2] = m[8];
+  out[0] = PSVECMag(v1);
+  PSVECNormalize(v1, v1);
+  v2[0] = m[1]; v2[1] = m[5]; v2[2] = m[9];
+  PSVECScale(v1, v4, PSVECDotProduct(v1, v2));
+  PSVECSubtract(v2, v4, v2);
+  out[1] = PSVECMag(v2);
+  PSVECNormalize(v2, v2);
+  v3[0] = m[2]; v3[1] = m[6]; v3[2] = m[10];
+  PSVECScale(v2, v4, PSVECDotProduct(v2, v3));
+  PSVECSubtract(v3, v4, v3);
+  PSVECScale(v1, v4, PSVECDotProduct(v1, v3));
+  PSVECSubtract(v3, v4, v3);
+  out[2] = PSVECMag(v3);
+  PSVECNormalize(v3, v3);
+  PSVECCrossProduct(v2, v3, v4);
+  // (scale = -1.0, a double: each times it, back to a float - the same as negating)
+  if (PSVECDotProduct(v1, v4) < 0.0) { out[0] = -out[0]; out[1] = -out[1]; out[2] = -out[2]; }
+  return out;
+}
+
 // ---------------------------------------------------------------- billboards (displayfunc.c)
 
 /** HSD_MtxColMag: a column's length (its squares as the entries are read: not fused) */

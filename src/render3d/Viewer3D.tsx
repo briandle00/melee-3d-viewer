@@ -44,7 +44,8 @@ import { GuardFrame, guardTilt } from "./guard";
 import { ENTRY, ENTRY_END, ENTRY_START, entryPose, standScale } from "./entry";
 import { copiesFromReplay, HAT_JOINT, KIRBY, KIRBY_ITEMS, KirbyCopy, KirbyHat, poseSkin, yoshiHatAnim } from "./kirby";
 import { onAngelPlatform, runNumber, shineAt, SHY_GUY } from "~/common/effects";
-import { ActorFrame, FxWorld, type LearnedFx, type LearnedPiece, NO_WORLD, stepThrough } from "./fx/world";
+import { ActorFrame, FxWorld, type FxSnapshot, type LearnedFx, type LearnedPiece, NO_WORLD, stepThrough } from "./fx/world";
+import { Checkpoints, jumpTo, type Kept } from "./fx/checkpoints";
 import { buildParticles } from "./fx/draw";
 import { srtApply } from "./fx/particles";
 import { Before, hitSparks, powershielded } from "./fx/contact";
@@ -1391,8 +1392,10 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
 
   // (Stadium's screen, when the frame has no copy of the frame before to show: drawn a second time, with its own copy on the screen)
   let screenAgain = false;
+  let lastDrawAt = 0;
   const draw = () => {
     screenAgain = false;
+    lastDrawAt = performance.now();
     drawPass();
     if (screenAgain) { screenAgain = false; drawPass(); }
   };
@@ -1654,7 +1657,11 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       if (!fxw.colTables && ek.colAnims) fxw.colTables = ek.colAnims;
       // (a skip or a jump steps the frames between, posing the fighters
       // for each: posed again for this one, to be drawn)
-      if (advance(fxw, data, fs, fno, frameActors)) for (const { f: fi, a } of posed) poseActor(fi, a);
+      // (checkpoints ahead first, in a little of the frame's time - not while the frame is timed - the stage and the
+      // fighters posed for this frame again after)
+      const filled = benchFrame === null && fillChecks(fxw, data, fs, FILL_MS);
+      if (filled && st && stageInWorld(tr)) st.update(fno, stageFrame(data, fno));
+      if (advance(fxw, data, fs, fno, frameActors) || filled) for (const { f: fi, a } of posed) poseActor(fi, a);
       // (the swinging chains are stepped to this frame now: those with them posed again)
       for (const { f: fi, a } of posed) {
         const key = actorKey(a.player, a.nana);
@@ -1758,7 +1765,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     };
     // the fighters' shadows (shadow.ts): each drawn flat into its own picture
     // through its shadow camera, before the stage, which takes them
-    const shadowMaps: { tex: WebGLTexture; mtx: Float32Array; y: number }[] = [];
+    const shadowMaps: { tex: WebGLTexture; mtx: Float32Array; y: number; laid: boolean }[] = [];
     const sl = st && !layersOff.fighters ? st.playerLighting.shadowLight(fno) : null;
     if (st && sl) {
       const scales = playerScales(data.settings.playerSettings);
@@ -1793,7 +1800,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           fi.skeleton.passHidden = null;
         } else r.drawSkeleton(star!.star.skeleton, "opa");
         r.endShadow();
-        shadowMaps.push({ tex: t.tex, mtx: cam.tex, y: a.st.yPosition });
+        // (made for every fighter, laid by none of Nana's materials: ftLib_800872BC keeps a sub fighter's inactive)
+        shadowMaps.push({ tex: t.tex, mtx: cam.tex, y: a.st.yPosition, laid: !a.nana });
       }
     }
     r.setShadows(shadowMaps.reverse());
@@ -1939,6 +1947,52 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const itemPose = (spawnId: number) => trNow?.pose("jp", String(spawnId), fno - 123)?.joints ?? null;
     const trackChains = new Set<number>();
     if (trNow?.has("lm")) for (const it of frame.items ?? []) if (trNow.pose("lm", String(it.spawnId), fno - 123)) trackChains.add(it.spawnId);
+    // The chains whose links the track has ("lm": hookshots, Sheik's chain, the yo-yo, the belay, the grapple
+    // beam), each link at the matrix the item's code gave it, and the grapple's glow. Each link (the end too)
+    // and the beam itself are drawn by HSD_GObj_JObjCallback (it_802A24A0 asks only whether the link is up),
+    // which does not look at which of the main camera's two passes it is in: so the game draws their opaque
+    // parts twice, in Camera_800311EC's first pass under the stage's lights and in its second under the
+    // fighters', and their see-through parts once (Camera_80031328); the items' own it_8026EECC draws in one of
+    // the two only. `note`: the glow's place for the checks, once a frame
+    const drawChains = (pass: "opa" | "xlu", note = false) => {
+      for (const it of frame.items ?? []) {
+        if (!trackChains.has(it.spawnId)) continue;
+        const links = trNow!.pose("lm", String(it.spawnId), fno - 123);
+        const f = articleFighter(data, fs, it, fno);
+        if (links && f) drawTrackChain(r, f, it, links, trackArticles.get(data)?.get(it.typeId), itemLife(data, fno, it), pass);
+      }
+      for (const a of actors) {
+        const c = CHAINS[a.st.internalCharacterId];
+        const costume = data.settings.playerSettings[a.player]?.costumeIndex ?? 0;
+        const f = c ? fs.get(`${a.st.internalCharacterId}:${costume}`) : undefined;
+        if (!c || !f || c.glowAnim === undefined) continue;
+        // (the chain's own item, for its glow: its animations run from when it is made)
+        const own = c.itemType === undefined ? undefined
+          : (frame.items ?? []).find((it) => it.owner === a.player && c.itemType === it.typeId);
+        if (!own) continue;
+        const item = { state: own.state, age: itemLife(data, fno, own) };
+        // its glow, held at the arm the whole time, fired or not (Item_8026AB54
+        // with ThrowN's number, which ftLib_80086630 takes as the fighter's own
+        // part slot, not through the named-part table: Samus's joint 51, her cannon)
+        const on = jointOf(a.player, THROWN_PART);
+        const glow = f.articleAnimated(c.art, null, c.glowAnim), art = f.article(c.art, 0);
+        if (on && glow) {
+          glow.poseUnder(item.age, on, (art?.scale ?? 1) * f.modelScale, false, 0);
+          const w = glow.skeleton.world;
+          if (note) {
+            drawnArticles.push({ type: own.typeId, state: item.state, x: w[12], y: w[13], z: w[14], scale: Math.hypot(w[0], w[1], w[2]),
+                                 shown: Array.from(glow.skeleton.shown), age: item.age });
+          }
+          r.drawSkeletonTrsp(glow.skeleton, TRSP[pass]);
+          r.endPass();
+        }
+      }
+    };
+    // (their first opaque copy, under the stage's lights, then the second, under the fighters')
+    if (st) r.setLighting(stageLit);
+    drawChains("opa");
+    r.setLighting(lighting);
+    drawChains("opa");
     // Fountain of Dreams' pond: what the game draws after the stage - the
     // fighters, the items, the effects - seen from below the floor into the
     // stage's mirror image, before the pond is drawn with it (grizumi.c)
@@ -1968,6 +2022,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       drawFighters("opa", true);
       drawFighters("xlu", true);
       if (!layersOff.items) for (const it of frame.items ?? []) drawArticleTracked(r, data, fs, it, fno, jointOf, partJoint, turnOf, heldShake, itemPose);
+      // (and the chains: grIzumi_801CCEA0's links 4 to 6 in all three passes, once)
+      drawChains("opa");
+      drawChains("xlu");
       drawnArticles = [];
       r.setFog(null);
       if (ek?.bank && fxw && !layersOff.effects) {
@@ -2072,45 +2129,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       r.drawSkeleton(star.skeleton, "xlu");
       r.endPass();
     }
-    // the chains whose links the track has ("lm": hookshots, Sheik's chain, the yo-yo, the belay), each link
-    // at the matrix the item's code gave it
-    for (const it of frame.items ?? []) {
-      if (!trackChains.has(it.spawnId)) continue;
-      const links = trNow!.pose("lm", String(it.spawnId), fno - 123);
-      const f = articleFighter(data, fs, it, fno);
-      if (links && f) drawTrackChain(r, f, it, links, trackArticles.get(data)?.get(it.typeId), itemLife(data, fno, it));
-    }
-    // the hookshots' and grapple beams' chains, where the viewer track has them
-    for (const a of actors) {
-      // (a chain whose links the track has is drawn above; its glow is still drawn here)
-      const tracked = (frame.items ?? []).some((it) => it.owner === a.player && trackChains.has(it.spawnId));
-      const c = CHAINS[a.st.internalCharacterId];
-      const v = trNow?.has("hook") ? trNow.exact("hook", `${a.player}:${a.nana ? 1 : 0}`, fno - 123) : null;
-      const costume = data.settings.playerSettings[a.player]?.costumeIndex ?? 0;
-      const f = c ? fs.get(`${a.st.internalCharacterId}:${costume}`) : undefined;
-      if (!c || !f) continue;
-      // (the chain's own item, for its glow: its animations run from when it is made)
-      const own = c.itemType === undefined ? undefined
-        : (frame.items ?? []).find((it) => it.owner === a.player && c.itemType === it.typeId);
-      const item = own ? { state: own.state, age: itemLife(data, fno, own) } : null;
-      if (!tracked && v && v.length >= 2) drawChain(r, f, a.st.internalCharacterId, v.map(Number), item);
-      // its glow, held at the arm the whole time, fired or not (Item_8026AB54
-      // with ThrowN's number, which ftLib_80086630 takes as the fighter's own
-      // part slot, not through the named-part table: Samus's joint 51, her cannon)
-      if (item && c.glowAnim !== undefined) {
-        const on = jointOf(a.player, THROWN_PART);
-        const glow = f.articleAnimated(c.art, null, c.glowAnim), art = f.article(c.art, 0);
-        if (on && glow) {
-          glow.poseUnder(item.age, on, (art?.scale ?? 1) * f.modelScale, false, 0);
-          const w = glow.skeleton.world;
-          drawnArticles.push({ type: own!.typeId, state: item.state, x: w[12], y: w[13], z: w[14], scale: Math.hypot(w[0], w[1], w[2]),
-                               shown: Array.from(glow.skeleton.shown), age: item.age });
-          r.drawSkeleton(glow.skeleton, "opa");
-          r.drawSkeleton(glow.skeleton, "xlu");
-          r.endPass();
-        }
-      }
-    }
+    // the chains' see-through parts: once, in the see-through pass, under the fighters' lights (drawChains)
+    drawChains("xlu", true);
     let shines = 0;
     // (the game's effects are drawn without fog: HSD_FogSet(NULL))
     r.setFog(null);
@@ -2129,7 +2149,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     prof.mark("articles");
     let models = 0, particles = 0;
     // (square to the camera: its right and up, in world directions)
-    const axes = { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], viewProj };
+    const axes = { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], viewProj, view };
     // the stage's own particles, behind everything else's
     const stagePs = st && scene?.st === st && !layersOff.stage ? scene.particles.particles : [];
     if (stagePs.length) {
@@ -2633,29 +2653,108 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     return out;
   };
 
-  // step the effect world to this frame: one step while playing, a few after
-  // a small skip, rebuilt from a little before after a jump. True when it
-  // posed the fighters for frames before this one (they share their models
-  // with this frame's: posed again before they are drawn)
-  const advance = (w: FxWorld, data: ReplayData, fs: Map<string, Fighter>, f: number, now: ActorFrame[]): boolean => {
-    if (f === w.frame) return false;
-    const jump = !(f - w.frame > 0 && f - w.frame <= 8);
-    if (jump) fxPercent.clear();
+  // Step the effect world to this frame: one step while playing, a few after a small skip; after a jump it is
+  // made exactly as playing to the frame makes it, from the nearest checkpoint (fx/checkpoints.ts) at or before
+  // the frame, stepped on. Checkpoints are kept as playing passes them and, in the time a frame leaves, ahead to
+  // the replay's end. Only while none is within CATCH_UP frames (a far jump soon after opening) is it warmed up
+  // from a little before as before, and made exact on the first frame drawn after one is. True when it posed the
+  // fighters for frames before this one (they share their models with this frame's: posed again before they are
+  // drawn)
+  const CATCH_UP = 1200, FILL_MS = 2, IDLE_FILL_MS = 12;
+  // (with each the hit sparks' record of the fighters' percents, which the world's steps read and keep: fxPercent)
+  type Snap = { snap: FxSnapshot; percent: [string, Before][] };
+  type Checks = { store: Checkpoints<Snap>; key: unknown[]; exact: boolean; ahead?: Kept<Snap> };
+  const saveCheck = (w: FxWorld): Kept<Snap> => {
+    const snap = w.save();
+    return { frame: snap.frame, snap: { snap, percent: [...fxPercent].map(([k, v]) => [k, { ...v }]) }, bytes: snap.bytes };
+  };
+  const loadCheck = (w: FxWorld, c: Snap) => {
+    w.load(c.snap);
+    fxPercent.clear();
+    for (const [k, v] of c.percent) fxPercent.set(k, { ...v });
+  };
+  const checksOf = new WeakMap<FxWorld, Checks>();
+  /** the world's checkpoints, made again when what its steps read changes (files and tables that came late) */
+  const checks = (w: FxWorld): Checks => {
+    const key = [w.colTables, w.ko, w.banks.size];
+    let c = checksOf.get(w);
+    if (!c || c.key.some((k, i) => k !== key[i])) {
+      // (the first: the world as made, before any frame)
+      const now = saveCheck(w);
+      w.reset(0);
+      fxPercent.clear();
+      const first = saveCheck(w);
+      loadCheck(w, now.snap);
+      checksOf.set(w, (c = { store: new Checkpoints(first), key, exact: false }));
+    }
+    return c;
+  };
+  /** one frame of the world, the stage and the fighters as they were on it (the dynamics too, unless ahead) */
+  const fxStepper = (w: FxWorld, data: ReplayData, fs: Map<string, Fighter>, f: number, now: ActorFrame[] | null, dyn: boolean) => {
     // (the stage as it was on each frame stepped, when its generators are the effect world's: they go
     // along its joints. The frame drawn is posed last, as the draw left it)
     const st = stageInWorld(viewerTrack()) ? stage() : null;
-    const pose = (g: number) => {
-      if (!st || (g === f && !posedOther)) return;
-      st.update(g, stageFrame(data, g));
-      posedOther = g !== f;
-    };
     let posedOther = false;
-    const one = (g: number) => {
-      const actors = g === f ? now : actorsAt(data, fs, g);
-      w.step(g, actors);
-      dynStep(g, actors, data);
+    const pose = (g: number) => {
+      if (!st || (g === f && now && !posedOther)) return;
+      st.update(g, stageFrame(data, g));
+      posedOther = g !== f || !now;
     };
-    return stepThrough(w, f, one, pose, st ? { frames: (g) => w.stageFrames(g), start: (g) => w.stageStart(g), step: (g) => w.stepStage(g) } : undefined);
+    const one = (g: number) => {
+      const actors = g === f && now ? now : actorsAt(data, fs, g);
+      w.step(g, actors);
+      if (dyn) dynStep(g, actors, data);
+    };
+    return { st, pose, one };
+  };
+  const advance = (w: FxWorld, data: ReplayData, fs: Map<string, Fighter>, f: number, now: ActorFrame[]): boolean => {
+    const c = checks(w);
+    const small = f - w.frame > 0 && f - w.frame <= 8;
+    const near = c.store.nearest(f);
+    const reach = f - Math.max(near.frame, 0) <= CATCH_UP;
+    if (f === w.frame && (c.exact || !reach)) return false;
+    if (!small || f === w.frame) fxPercent.clear();
+    const { st, pose, one } = fxStepper(w, data, fs, f, now, true);
+    if ((!small || !c.exact) && reach) {
+      // (exactly: from the nearest checkpoint, stepped on)
+      const from = jumpTo(c.store, f, (s) => loadCheck(w, s), (g) => { pose(g); one(g); }, () => saveCheck(w));
+      c.exact = true;
+      return from + 1 < f;
+    }
+    if (!small) {
+      c.exact = false;
+      return stepThrough(w, f, one, pose, st ? { frames: (g) => w.stageFrames(g), start: (g) => w.stageStart(g), step: (g) => w.stepStage(g) } : undefined);
+    }
+    const stepped = stepThrough(w, f, one, pose);
+    if (c.exact) c.store.keep(w.frame, () => saveCheck(w));
+    return stepped;
+  };
+  // (while nothing is drawn - paused, or between seeks - checkpoints are made ahead in longer turns)
+  const idleFill = setInterval(() => {
+    const data = replayStore.replayData;
+    if (!fxw || !data || benchFrame !== null || performance.now() - lastDrawAt < 50) return;
+    fillChecks(fxw, data, ready(), IDLE_FILL_MS);
+  }, 60);
+  onCleanup(() => clearInterval(idleFill));
+  /** checkpoints ahead of the ones playing has made, in `ms` of a frame's spare time: the world as it stands is
+   *  kept, the furthest checkpoint loaded and stepped on (the dynamics left alone), and the world put back */
+  const fillChecks = (w: FxWorld, data: ReplayData, fs: Map<string, Fighter>, ms: number): boolean => {
+    const c = checks(w);
+    const end = data.frames.length - 1;
+    // (where the stepping ahead stopped last time: carried on from, until it reaches the end)
+    const last = c.store.last;
+    const from = c.ahead && c.ahead.frame >= last.frame ? c.ahead : last;
+    if (Math.max(from.frame, 0) >= end) return false;
+    const keep = saveCheck(w);
+    loadCheck(w, from.snap);
+    const { pose, one } = fxStepper(w, data, fs, Number.NaN, null, false);
+    const t0 = performance.now();
+    for (let g = Math.max(from.frame + 1, 0); g <= end && performance.now() - t0 < ms; g++) {
+      pose(g); one(g); c.store.keep(g, () => saveCheck(w));
+    }
+    c.ahead = saveCheck(w);
+    loadCheck(w, keep.snap);
+    return true;
   };
 
   // the fighters' swinging chains (dynamics.ts): stepped with the effects, a
@@ -3091,6 +3190,24 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     },
     /** where the drawing time went since the last ask: milliseconds a frame, by section */
     sections: () => prof.read(),
+    /** checkpoints made ahead to a frame now, at once (the checks', before a jump they measure) */
+    fxFill: (to: number) => {
+      const data = replayStore.replayData;
+      if (!fxw || !data) return null;
+      const c = checks(fxw);
+      for (let i = 0; i < 100000 && (c.ahead?.frame ?? c.store.last.frame) < Math.min(to, data.frames.length - 1); i++) {
+        if (!fillChecks(fxw, data, ready(), 50)) break;
+      }
+      draw();
+      return true;
+    },
+    /** the effect world's checkpoints: how many, to which frame, their spacing and bytes (roughly), and whether
+     *  the world drawn is the exact one */
+    fxChecks: () => {
+      const c = fxw ? checksOf.get(fxw) : undefined;
+      return c ? { count: c.store.snaps.length, last: c.store.last.frame, every: c.store.every, bytes: c.store.bytes, exact: c.exact }
+        : null;
+    },
     /** each frame drawn since the last ask: [when it started (ms), how long it took, the frame] */
     frameLog: () => { const out: number[][] = []; for (let i = 0; i + 2 < frameLog.length; i += 3) out.push([frameLog[i], frameLog[i + 1], frameLog[i + 2]]); frameLog.length = 0; return out; },
     /** the drawing alone, timed: frames from..from+n-1 drawn one after another,
@@ -4207,42 +4324,12 @@ function useTrackArticles(data: ReplayData, tr: ViewerTrack | null) {
   trackArticles.set(data, out);
 }
 
-// The chains the game runs as ropes of links, where the viewer track's
-// "hook" has them each frame they are out: Link's and Young Link's hookshot
-// and Samus's grapple beam (the head, the hook or the claw, first, then the
-// links toward the hand), and Ness's yo-yo (the string from the hand, the
-// ball last). The hookshot's links are two models of its article's special
-// attributes in turn (+0x58, +0x54) and its head a third (+0x5C:
-// itlinkhookshot.c); the grapple's three in turn (+0x64 to +0x6C) and the
-// claw (+0x70: itsamusgrapple.c); the yo-yo's string (+0x50, at the string's
-// size, its attributes +0xC) and the ball (+0x54: itnessyoyo.c). Each link
-// is turned as the game turns them (it_802A6DC8): its z along the chain, back
-// toward the hand, its x level; the head as the link behind it.
-const CHAINS: Record<number, { art: number; links: number[]; head: number; headFirst: boolean; linkSize?: number; itemType?: number;
-                                headAnim?: number; glowAnim?: number }> = {
-  6: { art: 2, links: [0x58, 0x54], head: 0x5c, headFirst: true },
-  20: { art: 2, links: [0x58, 0x54], head: 0x5c, headFirst: true },
-  // (the grapple beam's item's own model is its glow, at the hand until it is
-  // fired and then at the head; it and the claw pulse, their animations at
-  // the special attributes' +0xA4 and +0x98: itsamusgrapple.c)
-  13: { art: 3, links: [0x64, 0x68, 0x6c], head: 0x70, headFirst: true, itemType: 0x60, headAnim: 0x98, glowAnim: 0xa4 },
-  8: { art: 10, links: [0x50], head: 0x54, headFirst: false, linkSize: 0xc },
+// The grapple beam's glow: the beam item's own model, at the hand until it is fired and then at the head, pulsing
+// by its animation at the special attributes' +0xA4 (itsamusgrapple.c), made with the beam. The chains' links
+// themselves are drawn from the track's "lm" (drawTrackChain).
+const CHAINS: Record<number, { art: number; itemType?: number; glowAnim?: number }> = {
+  13: { art: 3, itemType: 0x60, glowAnim: 0xa4 },
 };
-const chainMtx = new Float32Array(16);
-
-function linkMatrix(out: Float32Array, at: [number, number, number], dir: [number, number, number], scale: number) {
-  let [dx, dy, dz] = dir;
-  const len = Math.hypot(dx, dy, dz) || 1;
-  dx /= len; dy /= len; dz /= len;
-  const up: [number, number, number] = dy > 0.9999 ? [-1, 0, 0] : dy < -0.9999 ? [1, 0, 0] : [0, 1, 0];
-  // x = up × dir, y = dir × x
-  let xx = up[1] * dz - up[2] * dy, xy = up[2] * dx - up[0] * dz, xz = up[0] * dy - up[1] * dx;
-  const xl = Math.hypot(xx, xy, xz) || 1;
-  xx /= xl; xy /= xl; xz /= xl;
-  const yx = dy * xz - dz * xy, yy = dz * xx - dx * xz, yz = dx * xy - dy * xx;
-  out.set([xx * scale, xy * scale, xz * scale, 0, yx * scale, yy * scale, yz * scale, 0,
-           dx * scale, dy * scale, dz * scale, 0, at[0], at[1], at[2], 1]);
-}
 
 // A chain's links as the item's code made them (itlinkhookshot.c, itseakchain.c, itnessyoyo.c,
 // itclimbersstring.c): link i of n from the chain's start, each its own model - a link model of the item's
@@ -4266,7 +4353,7 @@ const TRACK_CHAINS: Record<number, { art: number; link: (i: number) => number; e
 const trackLinkMtx = new Float32Array(16);
 
 function drawTrackChain(r: Renderer, f: Fighter, it: ReplayItem, links: TrackPose, said: number | undefined,
-                        age: number) {
+                        age: number, pass: "opa" | "xlu") {
   const c = TRACK_CHAINS[f.internalId];
   if (!c) return;
   const art = said ?? c.art;
@@ -4275,7 +4362,9 @@ function drawTrackChain(r: Renderer, f: Fighter, it: ReplayItem, links: TrackPos
   for (const [k, v] of links.joints) {
     const out = links.out?.get(k) ?? 0;
     const i = n - 1 - k;
-    if (k !== 0 && !out) continue;
+    // (the end is drawn whatever its flag says - all but the grapple's claw, whose x2C_b0 it_802B743C
+    // clears and sets as it does the links')
+    if ((k !== 0 || f.internalId === 13) && !out) continue;
     if (v.some(Number.isNaN)) continue;
     const anim = k === 0 ? c.endAnim : c.linkAnim?.(i);
     const off = k === 0 ? c.end : c.link(i);
@@ -4287,47 +4376,15 @@ function drawTrackChain(r: Renderer, f: Fighter, it: ReplayItem, links: TrackPos
     trackLinkMtx[15] = 1;
     if (anim !== undefined) p.poseMatrix(trackLinkMtx, age);
     else p.poseMatrix(trackLinkMtx);
-    r.drawSkeleton(p.skeleton, "opa");
-    r.drawSkeleton(p.skeleton, "xlu");
+    r.drawSkeletonTrsp(p.skeleton, TRSP[pass]);
   }
   void it;
   r.endPass();
 }
 
-function drawChain(r: Renderer, f: Fighter, char: number, v: number[], item: { state: number; age: number } | null = null) {
-  const c = CHAINS[char];
-  if (!c) return;
-  const pts: [number, number, number][] = [];
-  for (let i = 0; i + 1 < v.length; i += 2) pts.push([v[i], v[i + 1], 0]);
-  if (!pts.length) return;
-  // (from the hand to the head)
-  if (c.headFirst) pts.reverse();
-  const head = pts[pts.length - 1];
-  const scale = f.modelScale;
-  const linkScale = scale * (c.linkSize !== undefined ? f.article(c.art, 0)?.special?.(c.linkSize) || 1 : 1);
-  const draw = (off: number, at: [number, number, number], dir: [number, number, number], s: number) => {
-    const p = f.articleModel(c.art, off);
-    if (!p) return;
-    linkMatrix(chainMtx, at, dir, s);
-    p.poseMatrix(chainMtx);
-    r.drawSkeleton(p.skeleton, "opa");
-    r.drawSkeleton(p.skeleton, "xlu");
-  };
-  for (let k = 0; k + 1 < pts.length; k++) {
-    const prev = k > 0 ? pts[k - 1] : pts[k], next = pts[k + 1];
-    draw(c.links[k % c.links.length], pts[k], [prev[0] - next[0], prev[1] - next[1], prev[2] - next[2]], linkScale);
-  }
-  const back = pts.length > 1 ? pts[pts.length - 2] : [head[0] - 1, head[1], 0];
-  const toBack: [number, number, number] = [back[0] - head[0], back[1] - head[1], back[2] - head[2]];
-  const claw = c.headAnim !== undefined && item ? f.articleAnimated(c.art, c.head, c.headAnim) : null;
-  if (claw) {
-    linkMatrix(chainMtx, head, toBack, scale);
-    claw.poseMatrix(chainMtx, item!.age);
-    r.drawSkeleton(claw.skeleton, "opa");
-    r.drawSkeleton(claw.skeleton, "xlu");
-  } else draw(c.head, head, toBack, scale);
-  r.endPass();
-}
+/** the game's passes a chain's two kinds of draw take: Camera_800311EC's two calls draw its opaque and cut-out
+ *  meshes (HSD_TRSP_OPA, TEXEDGE), Camera_80031328 its see-through ones (XLU) */
+const TRSP = { opa: 1 | 4, xlu: 2 } as const;
 
 /** the way an item last flew, back through its frames while it was the same
  *  item (an arrow stuck where it hit keeps its angle), or null */
@@ -4342,9 +4399,9 @@ function lastFlight(data: ReplayData, frame: number, it: ReplayItem): [number, n
 
 const PLAIN_ARTICLE: (typeof ARTICLES)[number] = { art: 0 };
 // the items whose look is a rope of links their code moves (the hookshots,
-// the grapple beam and the yo-yo: drawn as chains from the track's "hook";
-// Sheik's chain and the Ice Climbers' rope: their links are not in the
-// replay or the track): never drawn plainly as their model
+// the grapple beam, the yo-yo, Sheik's chain, the Ice Climbers' rope: drawn
+// as chains from the track's "lm" where it has them): never drawn plainly as
+// their model
 const ROPES = new Set([62, 63, 96, 97, 102, 113]);
 
 /** an item drawn with its joints as the viewer track has them ("jp", when it does: `poseOf`), else as its
@@ -4624,7 +4681,9 @@ function drawShield(r: Renderer, ek: EffectKit | undefined, a: Actor, data: Repl
     radius = f.modelScale * f.shieldSize * ((1 - least) * (Math.max(0, st.shieldSize) / full) * press + least);
   }
   const port = ek!.shieldColors[a.player] ?? color;
-  pr.pose(age, c[0], c[1], c[2], radius / SHIELD_MODEL_RADIUS, 0, which.loop);
+  // (its tracks as their own flags have them: none of the three models' loops - the game's animation stops at
+  // its end and holds there, the bubble's turning layer at its last turn, however long the shield is held)
+  pr.pose(age, c[0], c[1], c[2], radius / SHIELD_MODEL_RADIUS, 0, false);
   // how far the bubble's picture reaches: its card's own size in the model
   const W = pr.skeleton.world, k = pr.skeleton.n - 1;
   const drawn = Math.hypot(W[k * 16], W[k * 16 + 1], W[k * 16 + 2]);
@@ -4633,9 +4692,14 @@ function drawShield(r: Renderer, ek: EffectKit | undefined, a: Actor, data: Repl
   // (tev0) toward white (konst) by the texture, and its konst alpha is the
   // shield's: 64, up to 255 the harder it is held (ftCommonData 0x2F4)
   const alpha = (64 + Math.trunc(pressed(a.inputs) * 191)) / 255;
-  for (const s of pr.skeleton.states) {
-    const tc = s.tex[which.tex]?.tevColors;
-    if (!tc) continue;
+  // (on the first DObj of the root's first child only - and for GuardSetOff's, 0x419, of it and the next six
+  // joints beside it: efLib_SetTevKonstColor and efLib_Cb_ApplyStoredAlpha take HSD_JObjGetDObj's)
+  const sk = pr.skeleton, colored: number[] = [];
+  for (let j = 1; j < sk.n && colored.length < (which.m === SHIELD_MODEL + 2 ? 7 : 1); j++) if (sk.parent[j] === 0) colored.push(j);
+  for (const j of colored) {
+    const s = pr.firstState(j);
+    const tc = s?.tex[which.tex]?.tevColors;
+    if (!s || !tc) continue;
     s.dirty = true;
     tc[0] = tc[1] = tc[2] = 1; tc[3] = alpha;
     tc[4] = port[0]; tc[5] = port[1]; tc[6] = port[2];

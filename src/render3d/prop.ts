@@ -83,6 +83,12 @@ export class Prop {
     sk.update(this.place);
   }
 
+  /** the material of a joint's first DObj (HSD_JObjGetDObj, what an effect's code colors), or null */
+  firstState(joint: number): Skeleton["states"][number] | null {
+    const d = this.joints[joint]?.dobjs[0];
+    return d ? this.skeleton.states[d.index] ?? null : null;
+  }
+
   /** after the pose, the root's turn about y set to `value` (an effect's callback: HSD_JObjSetRotationY,
    *  which replaces the animated turn; turning the parent matrix instead would add the two) */
   setRootRotationY(value: number) {

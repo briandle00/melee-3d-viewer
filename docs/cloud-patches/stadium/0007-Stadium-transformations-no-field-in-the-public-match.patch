@@ -1,0 +1,573 @@
+From 0ddbfa5cce820cdc1785392a5714426a5bf156a7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 09:24:22 +0000
+Subject: [PATCH 7/8] Stadium transformations: no field in the public match
+ config, no environment switch
+
+The field sat in MslMatchConfig's trailing padding, so a driver built on the
+base's layout, or one that does not zero the struct, turned transformations
+on (or was refused) for every match. The public API, its Python dtype and
+MatchConfig are the base's again, and MSL_STADIUM_TRANSFORMATIONS is gone:
+only a suite entry's "stadium_transformations": true or
+--stadium-transformations turns them on. replay-bench loads GameData with
+the option only for tapes built with it.
+
+stadium-defaults-smoke (no game data) builds configs as the base's drivers
+do, over noise, for non-Stadium and Stadium replays, and checks the setting
+stays off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ API.md                                       |  1 -
+ Makefile                                     |  9 +-
+ melee_sim/config.py                          |  4 -
+ melee_sim/dtypes.py                          |  3 +-
+ melee_sim/env_batch.py                       |  1 -
+ src/api.c                                    | 11 +--
+ src/api.h                                    |  1 -
+ src/runtime/api_config.h                     | 12 +++
+ src/runtime/batch.c                          | 12 ++-
+ src/runtime/batch.h                          |  4 +
+ src/runtime/main.c                           |  3 +-
+ src/runtime/scalar.c                         |  8 --
+ src/runtime/scalar.h                         |  5 --
+ tests/melee_core/replay_bench.c              | 16 +++-
+ tests/melee_core/stadium_defaults_smoke.c    | 94 ++++++++++++++++++++
+ tests/test_stadium_transformation_gating.py  | 48 +++++-----
+ tools/data/raw.py                            |  2 +-
+ tools/validation/prepare_replay_benchmark.py |  6 +-
+ 18 files changed, 178 insertions(+), 62 deletions(-)
+ create mode 100644 src/runtime/api_config.h
+ create mode 100644 tests/melee_core/stadium_defaults_smoke.c
+
+diff --git a/API.md b/API.md
+index 57ec526a..db32e1a2 100644
+--- a/API.md
++++ b/API.md
+@@ -56,7 +56,6 @@ stocks and UCF enabled. Callers only override fields they need:
+ | `viewpoint_player` | `uint8_t` | active player index | player placed in observation slot zero |
+ | `ucf_cardinals` | `uint8_t` | `0` or `1` | enable the UCF 1.0 cardinal patch |
+ | `players[4]` | `MslPlayerConfig[4]` | active entries `< num_players` | per-player configuration |
+-| `stadium_transformations` | `uint8_t` | `0` (default) or `1` | enable Pokémon Stadium transformations (Pokémon Stadium only; the process must load its game data with `MSL_STADIUM_TRANSFORMATIONS=1` set, or match creation fails; off, game data and output are unchanged) |
+ 
+ `MslPlayerConfig` uses explicit, unpacked fields. Team and controller port accept their `*_AUTO`
+ constant; facing accepts `MSL_FACING_LEFT`, `MSL_FACING_RIGHT`, or `MSL_FACING_AUTO`.
+diff --git a/Makefile b/Makefile
+index c7746520..2f709eb6 100644
+--- a/Makefile
++++ b/Makefile
+@@ -215,6 +215,7 @@ NATIVE_SMOKE_SRCS := \
+ 	$(ROOT)/tests/melee_core/kirby_moves_smoke.c \
+ 	$(ROOT)/tests/melee_core/cpu_replay_smoke.c \
+ 	$(ROOT)/tests/melee_core/fnmsubs_smoke.c \
++	$(ROOT)/tests/melee_core/stadium_defaults_smoke.c \
+ 	$(ROOT)/tests/melee_core/batch_api_smoke.c \
+ 	$(ROOT)/tests/melee_core/public_api_smoke.c \
+ 	$(ROOT)/tests/melee_core/context_smoke.c \
+@@ -808,6 +809,7 @@ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/kirby-moves-smoke,$(NATIVE_OBJ_D
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/stadium-transformations-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/stadium_transformations_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/cpu-replay-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/cpu_replay_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/fnmsubs-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/fnmsubs_smoke.o))
++$(eval $(call link_native_smoke,$(NATIVE_BUILD)/stadium-defaults-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/stadium_defaults_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/pool-chaos-soak,$(NATIVE_OBJ_DIR)/tests/melee_core/pool_chaos_soak.o))
+ $(eval $(call link_native_smoke,$(NATIVE_WASM_PARITY),$(NATIVE_OBJ_DIR)/tests/melee_core/wasm_parity.o))
+ $(eval $(call link_native_smoke,$(NATIVE_LIFECYCLE_BENCH),$(NATIVE_OBJ_DIR)/tests/melee_core/lifecycle_bench.o))
+@@ -849,7 +851,7 @@ ifeq ($(UNAME_S)/$(HOST_TARGET_ARCH),Linux/x86_64)
+ thread-smoke: $(NATIVE_SHARED_WRITE_AUDIT)
+ endif
+ 
+-native-smoke: thread-smoke $(NATIVE_BUILD)/stadium-transformations-smoke fnmsubs-smoke mewtwo-smoke gamewatch-smoke roy-smoke pichu-smoke kirby-smoke data-check $(NATIVE_BUILD)/cpu-replay-smoke $(NATIVE_DATA_SMOKE) $(NATIVE_MAP_SMOKE) $(NATIVE_MODEL_SMOKE) $(NATIVE_SCHEDULER_SMOKE) $(NATIVE_SCALAR_API_SMOKE) $(NATIVE_CONTEXT_SMOKE) $(NATIVE_BATCH_API_SMOKE) $(NATIVE_PUBLIC_API_SMOKE) $(NATIVE_GAMEPLAY_PARTS_SMOKE) $(NATIVE_ARTICLE_POOL_SMOKE) $(NATIVE_STAGE_LIFECYCLE_SMOKE) $(NATIVE_RUNTIME_CENSUS)
++native-smoke: thread-smoke stadium-defaults-smoke $(NATIVE_BUILD)/stadium-transformations-smoke fnmsubs-smoke mewtwo-smoke gamewatch-smoke roy-smoke pichu-smoke kirby-smoke data-check $(NATIVE_BUILD)/cpu-replay-smoke $(NATIVE_DATA_SMOKE) $(NATIVE_MAP_SMOKE) $(NATIVE_MODEL_SMOKE) $(NATIVE_SCHEDULER_SMOKE) $(NATIVE_SCALAR_API_SMOKE) $(NATIVE_CONTEXT_SMOKE) $(NATIVE_BATCH_API_SMOKE) $(NATIVE_PUBLIC_API_SMOKE) $(NATIVE_GAMEPLAY_PARTS_SMOKE) $(NATIVE_ARTICLE_POOL_SMOKE) $(NATIVE_STAGE_LIFECYCLE_SMOKE) $(NATIVE_RUNTIME_CENSUS)
+ 	@$(TIMEOUT) 5s "$(NATIVE_DATA_SMOKE)" "$(DATA)"
+ 	@$(TIMEOUT) 5s "$(NATIVE_MODEL_SMOKE)" "$(DATA)"
+ 	@$(TIMEOUT) 5s "$(NATIVE_MAP_SMOKE)" "$(DATA)"
+@@ -986,6 +988,11 @@ gamewatch-smoke: data-check $(NATIVE_BUILD)/gamewatch-moves-smoke
+ fnmsubs-smoke: $(NATIVE_BUILD)/fnmsubs-smoke
+ 	@$(TIMEOUT) 10s "$(NATIVE_BUILD)/fnmsubs-smoke"
+ 
++# (no game data: the base's driver configs keep Stadium transformations off)
++.PHONY: stadium-defaults-smoke
++stadium-defaults-smoke: $(NATIVE_BUILD)/stadium-defaults-smoke
++	@$(TIMEOUT) 10s "$(NATIVE_BUILD)/stadium-defaults-smoke"
++
+ .PHONY: roy-smoke
+ roy-smoke: data-check $(NATIVE_BUILD)/roy-moves-smoke
+ 	@$(TIMEOUT) 10s "$(NATIVE_BUILD)/roy-moves-smoke" "$(DATA)"
+diff --git a/melee_sim/config.py b/melee_sim/config.py
+index 6152fdaa..cdf6a315 100644
+--- a/melee_sim/config.py
++++ b/melee_sim/config.py
+@@ -71,7 +71,3 @@ class MatchConfig:
+     friendly_fire: bool = False
+     viewpoint_player: int = 0
+     ucf_cardinals_1_0_enabled: bool = True
+-    # Pokemon Stadium transforms (stage 3 only). Off by default; turning it on
+-    # also needs GameData loaded with MSL_STADIUM_TRANSFORMATIONS=1 in the
+-    # environment before the env is created (API.md).
+-    stadium_transformations: bool = False
+diff --git a/melee_sim/dtypes.py b/melee_sim/dtypes.py
+index aeb97a2b..70c56a8e 100644
+--- a/melee_sim/dtypes.py
++++ b/melee_sim/dtypes.py
+@@ -119,8 +119,7 @@ def match_config_dtype() -> np.dtype:
+             ("viewpoint_player", "u1"),
+             ("ucf_cardinals", "u1"),
+             ("players", match_player_config_dtype(), (MAX_PLAYERS,)),
+-            ("stadium_transformations", "u1"),
+-            ("_pad0", "u1", (1,)),
++            ("_pad0", "u1", (2,)),
+         ],
+         align=False,
+     )
+diff --git a/melee_sim/env_batch.py b/melee_sim/env_batch.py
+index 630427c6..22814d70 100644
+--- a/melee_sim/env_batch.py
++++ b/melee_sim/env_batch.py
+@@ -510,7 +510,6 @@ def _write_match_config(
+     row["stocks"] = int(config.stocks)
+     row["viewpoint_player"] = int(config.viewpoint_player)
+     row["ucf_cardinals"] = bool(config.ucf_cardinals_1_0_enabled)
+-    row["stadium_transformations"] = bool(config.stadium_transformations)
+     for index, player in enumerate(players):
+         team = -1 if player.team_id is None else int(player.team_id)
+         facing = 0 if player.facing is None else (1 if player.facing else -1)
+diff --git a/src/api.c b/src/api.c
+index 2b611e86..54f364fd 100644
+--- a/src/api.c
++++ b/src/api.c
+@@ -1,4 +1,5 @@
+ #include "api.h"
++#include "runtime/api_config.h"
+ 
+ #include "runtime/batch.h"
+ #include "runtime/scalar.h"
+@@ -82,24 +83,20 @@ static int supported_character(uint8_t character) {
+          character == MSL_CHARACTER_ZELDA || character == MSL_CHARACTER_FALCO;
+ }
+ 
+-static int translate_config(const MslMatchConfig* source, MslCoreMatchConfig* target) {
++int msl_api_translate_config(const MslMatchConfig* source, MslCoreMatchConfig* target) {
+   uint8_t ports[MSL_MAX_PLAYERS];
+   uint32_t player;
+ 
+   if (source == NULL || target == NULL || !supported_stage(source->stage) ||
+       (source->num_players < 2 || source->num_players > 4) || !isfinite(source->damage_ratio) ||
+       source->damage_ratio <= 0.0F || source->stocks == 0 ||
+-      source->viewpoint_player >= source->num_players || source->stadium_transformations > 1 ||
+-      source->is_teams > 1 ||
++      source->viewpoint_player >= source->num_players || source->is_teams > 1 ||
+       source->friendly_fire > 1 || source->ucf_cardinals > 1) {
+     return -1;
+   }
+ 
+   memset(target, 0, sizeof(*target));
+   target->stage_id = source->stage;
+-  if (source->stadium_transformations) {
+-    target->slippi_patches |= MSL_PATCH_STADIUM_TRANSFORMATIONS;
+-  }
+   target->frame_id = -124;
+   target->frame_pre_random_seed = source->random_seed;
+   target->initial_random_seed = source->random_seed;
+@@ -403,7 +400,7 @@ MslResult msl_batch_reset(MslBatch* batch, const MslMatchConfig configs[],
+   }
+   for (env = 0; env < batch->size; ++env) {
+     if ((reset_mask == NULL || reset_mask[env] != 0) &&
+-        translate_config(&configs[env], &batch->configs[env]) != 0) {
++        msl_api_translate_config(&configs[env], &batch->configs[env]) != 0) {
+       return MSL_INVALID_ARGUMENT;
+     }
+   }
+diff --git a/src/api.h b/src/api.h
+index df29266e..13899de3 100644
+--- a/src/api.h
++++ b/src/api.h
+@@ -125,7 +125,6 @@ typedef struct MslMatchConfig {
+   uint8_t viewpoint_player;
+   uint8_t ucf_cardinals;
+   MslPlayerConfig players[MSL_MAX_PLAYERS];
+-  uint8_t stadium_transformations;
+ } MslMatchConfig;
+ 
+ typedef struct MslInputPlayer {
+diff --git a/src/runtime/api_config.h b/src/runtime/api_config.h
+new file mode 100644
+index 00000000..72d12d05
+--- /dev/null
++++ b/src/runtime/api_config.h
+@@ -0,0 +1,12 @@
++#ifndef MSL_RUNTIME_API_CONFIG_H
++#define MSL_RUNTIME_API_CONFIG_H
++
++#include "api.h"
++#include "runtime/wire.h"
++
++// The public match config as msl_batch_reset translates it into the core's
++// (not part of the public API: tests/melee_core/stadium_defaults_smoke.c).
++// 0, or -1 for a config the API refuses.
++int msl_api_translate_config(const MslMatchConfig* source, MslCoreMatchConfig* target);
++
++#endif
+diff --git a/src/runtime/batch.c b/src/runtime/batch.c
+index e07f0374..e4b35323 100644
+--- a/src/runtime/batch.c
++++ b/src/runtime/batch.c
+@@ -84,8 +84,7 @@ static int valid_config(const MslCoreMatchConfig* config)
+     if (config == NULL || !supported_stage(config->stage_id) ||
+         (config->num_players < 2 || config->num_players > 4) ||
+         !isfinite(config->match_damage_ratio) ||
+-        config->match_damage_ratio < 0.0F ||
+-        (config->slippi_patches & ~MSL_PATCH_KNOWN) != 0)
++        config->match_damage_ratio < 0.0F)
+     {
+         return 0;
+     }
+@@ -113,6 +112,12 @@ static int valid_config(const MslCoreMatchConfig* config)
+ 
+ MslCoreResult msl_core_game_data_create(
+     const char* data_root, MslCoreGameData** out_game_data)
++{
++    return msl_core_game_data_create_options(data_root, 0, out_game_data);
++}
++
++MslCoreResult msl_core_game_data_create_options(
++    const char* data_root, unsigned options, MslCoreGameData** out_game_data)
+ {
+     MslCoreGameData* game_data;
+     if (data_root == NULL || data_root[0] == '\0' || out_game_data == NULL) {
+@@ -123,8 +128,7 @@ MslCoreResult msl_core_game_data_create(
+     if (game_data == NULL) {
+         return MSL_CORE_OUT_OF_MEMORY;
+     }
+-    if (msl_core_game_data_init_options(game_data, data_root,
+-                                        msl_core_game_data_env_options()) != 0) {
++    if (msl_core_game_data_init_options(game_data, data_root, options) != 0) {
+         msl_core_game_data_deinit(game_data);
+         free(game_data);
+         return MSL_CORE_INVALID_STATE;
+diff --git a/src/runtime/batch.h b/src/runtime/batch.h
+index a8fe2916..ada25611 100644
+--- a/src/runtime/batch.h
++++ b/src/runtime/batch.h
+@@ -20,6 +20,10 @@ typedef enum MslCoreResult {
+ 
+ MslCoreResult msl_core_game_data_create(
+     const char* data_root, MslCoreGameData** out_game_data);
++// The same with msl_core_game_data_init_options' options (runtime/scalar.h);
++// msl_core_game_data_create is this with 0.
++MslCoreResult msl_core_game_data_create_options(
++    const char* data_root, unsigned options, MslCoreGameData** out_game_data);
+ void msl_core_game_data_destroy(MslCoreGameData* game_data);
+ 
+ MslCoreResult msl_core_batch_create(
+diff --git a/src/runtime/main.c b/src/runtime/main.c
+index 0da50c16..a7ea9885 100644
+--- a/src/runtime/main.c
++++ b/src/runtime/main.c
+@@ -172,8 +172,7 @@ static int run_server(const char* data_root)
+         fprintf(stderr, "could not configure Melee core server buffers\n");
+         return 1;
+     }
+-    if (msl_core_game_data_init_options(&game_data, data_root,
+-                                        msl_core_game_data_env_options()) != 0 ||
++    if (msl_core_game_data_init(&game_data, data_root) != 0 ||
+         msl_core_match_storage_init(&match) != 0)
+     {
+         return 1;
+diff --git a/src/runtime/scalar.c b/src/runtime/scalar.c
+index 2223878a..77047a96 100644
+--- a/src/runtime/scalar.c
++++ b/src/runtime/scalar.c
+@@ -939,14 +939,6 @@ int msl_core_game_data_init_options(MslCoreGameData* game_data,
+ {
+     return game_data_init(game_data, data_root, options);
+ }
+-
+-unsigned msl_core_game_data_env_options(void)
+-{
+-    const char* value = getenv("MSL_STADIUM_TRANSFORMATIONS");
+-    return value != NULL && strcmp(value, "1") == 0
+-               ? MSL_GAME_DATA_STADIUM_TRANSFORMATIONS
+-               : 0;
+-}
+ #if MSL_VISUAL_TRACK_BUILD
+ 
+ int msl_core_game_data_init_visual(MslCoreGameData* game_data,
+diff --git a/src/runtime/scalar.h b/src/runtime/scalar.h
+index 80dec78f..fcafa6fb 100644
+--- a/src/runtime/scalar.h
++++ b/src/runtime/scalar.h
+@@ -147,11 +147,6 @@ enum {
+ };
+ int msl_core_game_data_init_options(MslCoreGameData* game_data,
+                                     const char* data_root, unsigned options);
+-// For hosts that load GameData before any match config is known (the batch
+-// API, the server runner): MSL_GAME_DATA_STADIUM_TRANSFORMATIONS when the
+-// environment sets MSL_STADIUM_TRANSFORMATIONS=1 exactly, else 0. Nothing
+-// else turns it on.
+-unsigned msl_core_game_data_env_options(void);
+ #if MSL_VISUAL_TRACK_BUILD
+ // The same, with the effect data a viewer track's random state needs
+ // (runtime/effects.c); a match with MSL_VISUAL_TRACK requires it.
+diff --git a/tests/melee_core/replay_bench.c b/tests/melee_core/replay_bench.c
+index b0c49f27..c8320da0 100644
+--- a/tests/melee_core/replay_bench.c
++++ b/tests/melee_core/replay_bench.c
+@@ -2,6 +2,7 @@
+ 
+ #include "runtime/batch.h"
+ #include "runtime/benchmark_wire.h"
++#include "runtime/scalar.h"
+ #include "runtime/subsystem_profile.h"
+ 
+ #include <errno.h>
+@@ -494,6 +495,7 @@ int main(int argc, char** argv) {
+   uint64_t preroll_match_frames = 0;
+   uint64_t stage_mask = 0;
+   uint64_t character_mask = 0;
++  unsigned game_data_options = 0;
+   size_t observation_bytes;
+   ReplayCase* cases = NULL;
+   MslCoreObservation* observations = NULL;
+@@ -543,8 +545,18 @@ int main(int argc, char** argv) {
+                       (sizeof(MslCoreObservation) + sizeof(MslCoreTerminal));
+   observations = calloc((size_t)match_count * OBSERVATION_HISTORY, sizeof(*observations));
+   terminals = calloc((size_t)match_count * OBSERVATION_HISTORY, sizeof(*terminals));
+-  if (observations == NULL || terminals == NULL || load_cases(manifest, &cases, &case_count) != 0 ||
+-      msl_core_game_data_create(data_root, &game_data) != MSL_CORE_OK) {
++  if (observations == NULL || terminals == NULL || load_cases(manifest, &cases, &case_count) != 0) {
++    fprintf(stderr, "benchmark workload failed\n");
++    goto done;
++  }
++  // GameData preloads a transforming Stadium only for tapes built with it
++  // (prepare_replay_benchmark.py --stadium-transformations).
++  for (i = 0; i < case_count; ++i) {
++    if (msl_core_config_stadium_transformations(&cases[i].header->config)) {
++      game_data_options |= MSL_GAME_DATA_STADIUM_TRANSFORMATIONS;
++    }
++  }
++  if (msl_core_game_data_create_options(data_root, game_data_options, &game_data) != MSL_CORE_OK) {
+     fprintf(stderr, "benchmark workload failed\n");
+     goto done;
+   }
+diff --git a/tests/melee_core/stadium_defaults_smoke.c b/tests/melee_core/stadium_defaults_smoke.c
+new file mode 100644
+index 00000000..b4204432
+--- /dev/null
++++ b/tests/melee_core/stadium_defaults_smoke.c
+@@ -0,0 +1,94 @@
++// Pokemon Stadium transformations stay off for every config the base's
++// drivers build, Stadium or not (no game data needed):
++// - the public API's MslMatchConfig, set field by field over memory that is
++//   not zeroed (every byte, the struct's padding too, holds noise first), as
++//   a caller compiled against the base's api.h may leave it, then translated
++//   as msl_batch_reset translates it;
++// - the replay runner's wire config, built as tools/validation/native.c's
++//   build_match_config builds it from a replay (zeroed, the replay's Slippi
++//   patches from tools/validation/admission.py, which only ever sets
++//   MSL_PATCH_FD_BACKGROUND_FROZEN), then decoded as runtime/main.c decodes it.
++// Only an explicit request (the suite field, --stadium-transformations) sets
++// MSL_PATCH_STADIUM_TRANSFORMATIONS.
++
++#include "runtime/api_config.h"
++#include "runtime/wire.h"
++
++#include <stdio.h>
++#include <string.h>
++
++static int fail(const char* what, int stage, int noise)
++{
++    fprintf(stderr, "Stadium defaults: %s (stage %d, noise 0x%02x)\n", what, stage, noise);
++    return 1;
++}
++
++int main(void)
++{
++    static const int stages[] = { MSL_STAGE_FINAL_DESTINATION, MSL_STAGE_FOUNTAIN_OF_DREAMS,
++                                  MSL_STAGE_POKEMON_STADIUM };
++    static const int noises[] = { 0x00, 0x01, 0x02, 0x03, 0x7F, 0xA5, 0xFF };
++    size_t s, n;
++    int patches;
++
++    for (s = 0; s < sizeof(stages) / sizeof(stages[0]); ++s) {
++        for (n = 0; n < sizeof(noises) / sizeof(noises[0]); ++n) {
++            MslMatchConfig config;
++            MslMatchConfig defaults = msl_match_config_default();
++            MslCoreMatchConfig core;
++            uint32_t player;
++            // (the fields the base's api.h has, one by one, over noise)
++            memset(&config, noises[n], sizeof(config));
++            memset(&core, noises[n], sizeof(core));
++            config.stage = (uint32_t) stages[s];
++            config.random_seed = 1;
++            config.max_frame = -1;
++            config.damage_ratio = 1.0F;
++            config.num_players = 2;
++            config.is_teams = 0;
++            config.friendly_fire = 0;
++            config.stocks = 4;
++            config.viewpoint_player = 0;
++            config.ucf_cardinals = 1;
++            for (player = 0; player < MSL_MAX_PLAYERS; ++player) {
++                MslPlayerConfig* p = &config.players[player];
++                p->character = defaults.players[player].character;
++                p->team = MSL_TEAM_AUTO;
++                p->facing = MSL_FACING_AUTO;
++                p->controller_port = MSL_CONTROLLER_PORT_AUTO;
++                p->costume = 0;
++                p->handicap = 9;
++                p->start_percent = 0;
++            }
++            if (msl_api_translate_config(&config, &core) != 0) {
++                return fail("the API refused a base config", stages[s], noises[n]);
++            }
++            if (msl_core_config_stadium_transformations(&core)) {
++                return fail("the API turned transformations on", stages[s], noises[n]);
++            }
++            // (and the API's own default)
++            defaults.stage = (uint32_t) stages[s];
++            if (msl_api_translate_config(&defaults, &core) != 0 ||
++                msl_core_config_stadium_transformations(&core)) {
++                return fail("msl_match_config_default", stages[s], noises[n]);
++            }
++        }
++        for (patches = 0; patches <= MSL_PATCH_FD_BACKGROUND_FROZEN; ++patches) {
++            MslCoreMatchConfig built;
++            MslCoreMatchConfig decoded;
++            uint8_t wire[sizeof(MslCoreMatchConfig)];
++            memset(&built, 0, sizeof(built));
++            built.stage_id = (uint8_t) stages[s];
++            built.num_players = 2;
++            built.slippi_patches = (uint8_t) patches;
++            memcpy(wire, &built, sizeof(wire));
++            memset(&decoded, 0xFF, sizeof(decoded));
++            msl_core_decode_match_config(&decoded, wire);
++            if (msl_core_config_stadium_transformations(&decoded)) {
++                return fail("the runner's config turned transformations on", stages[s], patches);
++            }
++        }
++    }
++    printf("Stadium defaults: transformations stay off for the base's API and replay configs\n");
++    return 0;
++}
+diff --git a/tests/test_stadium_transformation_gating.py b/tests/test_stadium_transformation_gating.py
+index 7eabfcb5..2c3ea384 100644
+--- a/tests/test_stadium_transformation_gating.py
++++ b/tests/test_stadium_transformation_gating.py
+@@ -1,8 +1,11 @@
+ """Pokemon Stadium transformations are off unless a caller explicitly turns
+-them on: the defaults (C config, API, Python dtype and builders, suites,
+-viewer), replay-derived configs and admission never infer them from the
+-frozen flag, the stage or the Slippi version, and the GameData preload for
+-them runs only when asked for (no game data needed)."""
++them on (a suite entry's "stadium_transformations": true, or
++--stadium-transformations): the public API and its Python dtype are the
++base's (no field, so nothing a base driver leaves in the struct can turn them
++on), the defaults (C config, suites, viewer), replay-derived configs and
++admission never infer them from the frozen flag, the stage or the Slippi
++version, and the GameData preload for them runs only when asked for (no game
++data needed; tests/melee_core/stadium_defaults_smoke.c runs the C side)."""
+ 
+ from __future__ import annotations
+ 
+@@ -33,20 +36,25 @@ STADIUM_STARTS = [
+ ]
+ 
+ 
+-def test_python_defaults_are_off():
+-    assert MatchConfig().stadium_transformations is False
+-    row = np.zeros((), dtype=match_config_dtype())
+-    assert row["stadium_transformations"] == 0
+-
++def test_the_public_api_and_python_dtype_are_the_base():
++    # (the base's trailing padding stays padding: a driver built on the base's
++    # layout, or one that does not zero it, cannot set anything there)
++    names = match_config_dtype().names
++    assert "stadium_transformations" not in names
++    assert match_config_dtype()["_pad0"].shape == (2,)
++    assert not hasattr(MatchConfig(), "stadium_transformations")
++    api_h = (ROOT / "src/api.h").read_text()
++    assert "stadium_transformations" not in api_h
++    api = (ROOT / "src/api.c").read_text()
++    assert "STADIUM_TRANSFORMATIONS" not in api
++    # and no environment variable turns them on anywhere
++    for path in ("src/runtime/scalar.c", "src/runtime/batch.c", "src/runtime/main.c"):
++        assert "getenv(\"MSL_STADIUM_TRANSFORMATIONS\")" not in (ROOT / path).read_text()
+ 
+-def test_env_batch_writes_the_bit_only_from_the_config():
+-    from melee_sim.env_batch import _write_match_config
+ 
+-    row = np.ones((), dtype=match_config_dtype())[()]
+-    _write_match_config(row, MatchConfig(stage=3), 0, 2)
+-    assert row["stadium_transformations"] == 0
+-    _write_match_config(row, MatchConfig(stage=3, stadium_transformations=True), 0, 2)
+-    assert row["stadium_transformations"] == 1
++@pytest.mark.parametrize("patches_codes", [{}, {0xC21D4578: FROZEN_PATCH}])
++def test_admission_patches_never_carry_the_bit(patches_codes):
++    assert admission.slippi_patches(patches_codes) & 2 == 0
+ 
+ 
+ def test_c_defaults_are_off():
+@@ -54,9 +62,8 @@ def test_c_defaults_are_off():
+     assert re.search(r"MSL_PATCH_STADIUM_TRANSFORMATIONS = 1 << 1,", wire)
+     assert re.search(r"MSL_PATCH_KNOWN = MSL_PATCH_FD_BACKGROUND_FROZEN \|\s*MSL_PATCH_STADIUM_TRANSFORMATIONS", wire)
+     api = (ROOT / "src/api.c").read_text()
+-    # translate_config zeroes the core config and sets the bit only from the field
++    # the API's translation zeroes the core config and never sets the bit
+     assert re.search(r"memset\(target, 0, sizeof\(\*target\)\);", api)
+-    assert re.search(r"if \(source->stadium_transformations\) \{\s*target->slippi_patches \|= MSL_PATCH_STADIUM_TRANSFORMATIONS;", api)
+     native = (ROOT / "tools/validation/native.c").read_text()
+     assert native.count("int stadium_transformations = 0;") == 2
+     assert re.search(r"if \(replay->stadium_transformations\) \{\s*config->slippi_patches \|= MSL_PATCH_STADIUM_TRANSFORMATIONS;", native)
+@@ -71,8 +78,9 @@ def test_game_data_preload_is_explicit_only():
+     assert re.search(r"if \(game_data->stadium_transformations &&\s*preload_match_configuration\(game_data, MSL_CORE_STAGE_POKEMON_STADIUM", scalar)
+     # the default entry points request no options
+     assert re.search(r"int msl_core_game_data_init\(MslCoreGameData\* game_data, const char\* data_root\)\n\{\n    return game_data_init\(game_data, data_root, 0\);", scalar)
+-    # the environment opt-in is the exact string "1"
+-    assert re.search(r'getenv\("MSL_STADIUM_TRANSFORMATIONS"\);\s*return value != NULL && strcmp\(value, "1"\) == 0', scalar)
++    # the batch API's GameData has no options unless its caller passes them
++    batch = (ROOT / "src/runtime/batch.c").read_text()
++    assert "return msl_core_game_data_create_options(data_root, 0, out_game_data);" in batch
+     # and a transforming config on default GameData is refused, not run
+     assert "Stadium transformations need game data loaded with" in scalar
+ 
+diff --git a/tools/data/raw.py b/tools/data/raw.py
+index 0cbe57d5..baa2fb99 100644
+--- a/tools/data/raw.py
++++ b/tools/data/raw.py
+@@ -40,7 +40,7 @@ SUPPORTED_CHARACTERS = (
+     "clink",
+ )
+ # Pokemon Stadium's four forms: extracted, but needed only by GameData loaded
+-# with Stadium transformations explicitly on (MSL_STADIUM_TRANSFORMATIONS=1),
++# for a match that explicitly runs Stadium transformations,
+ # so a data directory without them stays valid.
+ STADIUM_ARCHIVES = ("GrPs1.dat", "GrPs2.dat", "GrPs3.dat", "GrPs4.dat")
+ SUPPORTED_STAGES = ("grnla", "grnba", "griz", "grps", "grst", "grop")
+diff --git a/tools/validation/prepare_replay_benchmark.py b/tools/validation/prepare_replay_benchmark.py
+index b3d95b77..d39117bc 100644
+--- a/tools/validation/prepare_replay_benchmark.py
++++ b/tools/validation/prepare_replay_benchmark.py
+@@ -95,7 +95,7 @@ def prepare(args: argparse.Namespace) -> None:
+     for case in cases:
+         if case.stadium_transformations and not getattr(args, "stadium_transformations", False):
+             # (explicitly transforming suite entries; their tapes need
+-            # --stadium-transformations and a MSL_STADIUM_TRANSFORMATIONS=1 run)
++            # --stadium-transformations; replay-bench loads its GameData for them)
+             skipped_stadium += 1
+             continue
+         # Admission applies even when a tape is cached: a stale export cannot
+@@ -178,8 +178,8 @@ def main() -> None:
+     parser.add_argument("--replay-arithmetic", action="store_true",
+                         help="Include tapes requiring MSL_REPLAY_ARITHMETIC=1.")
+     parser.add_argument("--stadium-transformations", action="store_true",
+-                        help="Include suite entries that explicitly run Stadium transformations; "
+-                             "run the benchmark with MSL_STADIUM_TRANSFORMATIONS=1.")
++                        help="Include suite entries that explicitly run Stadium transformations "
++                             "(replay-bench loads its GameData for them).")
+     prepare(parser.parse_args())
+ 
+ 
+-- 
+2.43.0
+

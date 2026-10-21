@@ -1642,7 +1642,7 @@ void main() {
   /** the shadows the materials that take them get from now on: each a
    *  picture and its world-to-(s, t) matrix, the last made first, as
    *  HSD_MObjAddShadowTexture puts each new one at the head of its list */
-  setShadows(list: { tex: WebGLTexture; mtx: Mat; y?: number }[]) {
+  setShadows(list: { tex: WebGLTexture; mtx: Mat; y?: number; laid?: boolean }[]) {
     const gl = this.gl;
     const n = Math.min(MAX_SHADOWS, list.length);
     for (let k = 0; k < n; k++) {
@@ -1655,8 +1655,15 @@ void main() {
     if (n) gl.uniformMatrix4fv(this.loc.uShadowM, false, this.shadowM.subarray(0, n * 16));
     gl.uniform1i(this.loc.uShadowN, n);
     this.shadowMaps = list.slice(0, n).map((x) => ({ mtx: x.mtx }));
-    for (let k = 0; k < n; k++) this.shadowY[k] = list[k].y ?? Infinity;
+    this.shadowLaid = 0;
+    for (let k = 0; k < n; k++) {
+      this.shadowY[k] = list[k].y ?? Infinity;
+      if (list[k].laid !== false) this.shadowLaid |= 1 << k;
+    }
   }
+  /** the shadows laid on anything (bit k for shadow k): one made but not laid is a fighter's that
+   *  lbShadow_8000EEE0 leaves inactive (ftLib_800872BC: the Ice Climbers' Nana), its texture out of the list */
+  private shadowLaid = 15;
   /** each shadow's fighter's height (its position's y), for the stage's shadow check */
   private shadowY = new Float64Array(MAX_SHADOWS);
   /** the shadows the draw being made takes: bit k for shadow k (the draw log reads it) */
@@ -1667,12 +1674,13 @@ void main() {
    *  the stage's margin is above the joint's place (lb_8000B1CC's
    *  translation); any other joint takes them all */
   private setShadowMask(d: Drawable, sk: Skeleton | null) {
-    let mask = 15;
+    let mask = this.shadowLaid;
     const bias = sk?.shadowBias;
     if (bias !== null && bias !== undefined && d.state.mobj.renderMode & RENDER.SHADOW) {
       const jy = sk!.world[d.jobj.index * 16 + 13];
       mask = 0;
       for (let k = 0; k < this.shadowMaps.length; k++) if (this.shadowY[k] + bias > jy) mask |= 1 << k;
+      mask &= this.shadowLaid;
     }
     if (mask !== this.shadowMask) {
       this.gl.uniform1i(this.loc.uShadowMask, mask);
@@ -1701,6 +1709,19 @@ void main() {
   /** what is drawn next writes depth only: no color, no blend, compared less-or-equal (an outline's second draw) */
   setDepthOnly(on: boolean) { this.depthOnly = on; }
   private depthOnly = false;
+
+  /** A skeleton's meshes of the game's passes in `trsp` (HSD_TRSP_OPA 1, XLU 2, TEXEDGE 4), each mesh's pass as
+   *  DObjLoad gives it from its material: neither of render mode bits 29 and 30 the opaque one, bit 30 alone
+   *  the cut-out one (TEXEDGE), both the see-through one. For what the game draws by its joints' passes
+   *  where the player's two do not split them as it does */
+  drawSkeletonTrsp(sk: Skeleton, trsp: number) {
+    for (const d of sk.drawables) {
+      const rm = d.state.mobj.renderMode & 0x60000000;
+      const of = rm === 0 ? 1 : rm === 0x40000000 ? 4 : 2;
+      if (!(of & trsp) || !sk.isVisible(d) || this.outOfView(d)) continue;
+      this.drawOne(d, null, sk);
+    }
+  }
 
   /** one pass over a skeleton: its opaque parts, or its see-through ones;
    *  flash (0..1) turns it toward white (an L-cancel) */

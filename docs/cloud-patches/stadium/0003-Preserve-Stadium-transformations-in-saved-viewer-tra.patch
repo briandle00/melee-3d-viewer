@@ -1,0 +1,222 @@
+From 75b9f71a1328e490c02bf57de6e81900b6771d4f Mon Sep 17 00:00:00 2001
+From: Kyle Havlovitz <kylehav@gmail.com>
+Date: Mon, 28 Sep 2026 18:55:06 -0700
+Subject: [PATCH 3/8] Preserve Stadium transformations in saved viewer traces
+
+Store the unfrozen mode in match settings and round-trip transformation type, phase and live collision segments through MSLTRACE1. Compare array-valued fields by content so unchanged geometry stays out of delta rows; frozen traces retain their existing stage columns.
+
+Remove the duplicate mode field from match-start provenance. Extend the existing Wasm smoke to round-trip actual frames from all four transformations, verify sparse geometry, and load frozen traces without the new optional match field. Wasm smoke, the legacy example and production browser checks pass.
+
+(cherry picked from upstream commit 52e047224098243a76cde59cd8367385e813e909 onto visual-only/04-shake)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ tests/melee_core/viewer_wasm_smoke.mjs | 29 ++++++++++++++++++++++++--
+ tools/viewer/TRACE_FORMAT.md           |  5 +++++
+ tools/viewer/live/main.js              |  1 -
+ tools/viewer/msltrace1.js              | 29 +++++++++++++++++++-------
+ 4 files changed, 53 insertions(+), 11 deletions(-)
+
+diff --git a/tests/melee_core/viewer_wasm_smoke.mjs b/tests/melee_core/viewer_wasm_smoke.mjs
+index b262fce3..fa74d4af 100644
+--- a/tests/melee_core/viewer_wasm_smoke.mjs
++++ b/tests/melee_core/viewer_wasm_smoke.mjs
+@@ -26,7 +26,7 @@ import {
+   viewerFrameFromState,
+   viewerSettingsFromState,
+ } from "../../tools/viewer/live/viewer_adapter.js";
+-import { replayDataToMslTrace } from "../../tools/viewer/msltrace1.js";
++import { replayDataToMslTrace, mslTraceToReplayData } from "../../tools/viewer/msltrace1.js";
+ 
+ const neutral = () => ({
+   buttons: 0,
+@@ -112,10 +112,13 @@ try {
+   reset({ stageId: STAGE_POKEMON_STADIUM, stadiumTransformations: true });
+   const stadiumTypes = new Set();
+   const stadiumGeometry = new Set();
++  const stadiumFrames = [];
+   for (let tick = 0; tick < 80000 && stadiumTypes.size < 5; tick += 1) {
+     sim.step(controllers());
+     if (tick % 31 === 0) {
+-      const stage = frame().stage;
++      const current = frame();
++      stadiumFrames.push(current);
++      const stage = current.stage;
+       stadiumTypes.add(stage.stadiumType);
+       stadiumGeometry.add(JSON.stringify(stage.collisionLines));
+       assert(stage.collisionLines.length > 0);
+@@ -125,9 +128,31 @@ try {
+   assert.deepEqual([...stadiumTypes].sort((a, b) => a - b), [3, 4, 5, 6, 9]);
+   assert(stadiumGeometry.size > 5);
+   assert.equal(viewerSettingsFromState(sim.viewerView()).isFrozenStadium, false);
++  const stadiumTrace = replayDataToMslTrace({
++    replayData: { settings: viewerSettingsFromState(sim.viewerView()), frames: stadiumFrames },
++    frameCount: stadiumFrames.length - 1,
++  });
++  const restoredStadium = mslTraceToReplayData(JSON.parse(JSON.stringify(stadiumTrace)));
++  assert.equal(restoredStadium.settings.isFrozenStadium, false);
++  assert(stadiumTrace.stage.rows.length < stadiumFrames.length, "unchanged geometry should stay sparse");
++  for (const [index, current] of stadiumFrames.entries()) {
++    const restored = restoredStadium.frames[index].stage;
++    assert.equal(restored.stadiumType, current.stage.stadiumType);
++    assert.equal(restored.stadiumState, current.stage.stadiumState);
++    assert.deepEqual(restored.collisionLines, current.stage.collisionLines);
++  }
+   reset({ stageId: STAGE_POKEMON_STADIUM });
+   assert.equal(frame().stage.collisionLines, undefined);
+   assert.equal(viewerSettingsFromState(sim.viewerView()).isFrozenStadium, true);
++  const frozenTrace = replayDataToMslTrace({
++    replayData: { settings: viewerSettingsFromState(sim.viewerView()), frames: [frame()] },
++    frameCount: 0,
++  });
++  assert.deepEqual(frozenTrace.stage.fields, ["randallExists", "randallX", "randallY"]);
++  delete frozenTrace.match.stadiumTransformations;
++  const restoredFrozen = mslTraceToReplayData(JSON.parse(JSON.stringify(frozenTrace)));
++  assert.equal(restoredFrozen.settings.isFrozenStadium, true);
++  assert.equal(restoredFrozen.frames[0].stage.collisionLines, undefined);
+ 
+   reset({ stageId: STAGE_FOUNTAIN_OF_DREAMS });
+   const fountain = step();
+diff --git a/tools/viewer/TRACE_FORMAT.md b/tools/viewer/TRACE_FORMAT.md
+index 159e5257..d005a546 100644
+--- a/tools/viewer/TRACE_FORMAT.md
++++ b/tools/viewer/TRACE_FORMAT.md
+@@ -46,6 +46,7 @@ not understand.
+ ```
+ 
+ - `stageId`: public MSL stage id. Use the constants in `src/ids.h`.
++- `stadiumTransformations`: optional boolean, default `false`; enables unfrozen Stadium.
+ - `numPlayers`: number of active players in the trace.
+ - `isTeams`: whether team display/ownership is active.
+ - `players`: active players in row order. Frame player arrays use this order.
+@@ -173,6 +174,10 @@ state rather than viewer-side approximations. Missing `stage` data is allowed.
+   position for this frame.
+ - `randallX`, `randallY`: Randall center from the same generated `MSLSTG01`
+   platform transform consumed by collision.
++- `stadiumType`, `stadiumState`: optional Slippi transformation type and phase.
++- `collisionLines`: optional array of `[x1, y1, x2, y2]` world-space collision
++  segments for the current Stadium geometry. A delta replaces the whole array;
++  omit unchanged geometry. `null` means no geometry was recorded for this frame.
+ 
+ ## Items
+ 
+diff --git a/tools/viewer/live/main.js b/tools/viewer/live/main.js
+index 3f9a1322..d997fb35 100644
+--- a/tools/viewer/live/main.js
++++ b/tools/viewer/live/main.js
+@@ -410,7 +410,6 @@ async function main() {
+           simFrameId: 0,
+           randomSeed: seed,
+           stageId: selectedStage.id,
+-          stadiumTransformations: selectedStage.stadiumTransformations,
+           playerCharacters: selectedCharacterIds.map((charId) => ({
+             internalId: charId,
+             label: characterLabel(charId),
+diff --git a/tools/viewer/msltrace1.js b/tools/viewer/msltrace1.js
+index 819ffc6f..d34a9798 100644
+--- a/tools/viewer/msltrace1.js
++++ b/tools/viewer/msltrace1.js
+@@ -6,6 +6,7 @@ const KEYFRAME_INTERVAL = 60;
+ const INPUT_FIELDS = ["buttons", "mainX", "mainY", "cX", "cY", "l", "r"];
+ const FRAME_FIELDS = ["frame", "randomSeed", "players"];
+ const STAGE_FIELDS = ["randallExists", "randallX", "randallY"];
++const STADIUM_FIELDS = ["stadiumType", "stadiumState", "collisionLines"];
+ const PLAYER_FIELDS = [
+   "charId",
+   "actionId",
+@@ -99,7 +100,9 @@ function changedFields(previous, current) {
+   }
+   const changes = [];
+   for (let idx = 0; idx < current.length; idx += 1) {
+-    if (current[idx] !== previous[idx]) {
++    if (current[idx] !== previous[idx] &&
++        (!Array.isArray(current[idx]) ||
++         JSON.stringify(current[idx]) !== JSON.stringify(previous[idx]))) {
+       changes.push([idx, current[idx]]);
+     }
+   }
+@@ -189,7 +192,7 @@ function viewerSettings(trace) {
+     isTeams: Boolean(match.isTeams),
+     stageId,
+     isPal: false,
+-    isFrozenStadium: stageId === 3,
++    isFrozenStadium: stageId === 3 && !match.stadiumTransformations,
+     platform: "dolphin",
+     consoleNickname: "melee-sim-light",
+     timerType: "counting down",
+@@ -293,6 +296,9 @@ function stageObject(frameNumber, row, lookup) {
+   const randallExists = Boolean(Number(row?.[lookup.randallExists] || 0));
+   return {
+     frameNumber,
++    stadiumType: row?.[lookup.stadiumType],
++    stadiumState: row?.[lookup.stadiumState],
++    collisionLines: row?.[lookup.collisionLines] ?? undefined,
+     randall: randallExists
+       ? {
+           exists: true,
+@@ -490,13 +496,18 @@ function itemRowFromViewer(item) {
+   ];
+ }
+ 
+-function stageRowFromViewer(stage) {
++function stageRowFromViewer(stage, stadiumTransformations) {
+   const randall = stage?.randall;
+-  return [
++  const row = [
+     randall?.exists ? 1 : 0,
+     roundNumber(Number(randall?.x || 0)),
+     roundNumber(Number(randall?.y || 0)),
+   ];
++  if (stadiumTransformations) {
++    row.push(stage?.stadiumType ?? 5, stage?.stadiumState ?? 0,
++      stage?.collisionLines ?? null);
++  }
++  return row;
+ }
+ 
+ function encodeInputStreams(inputTrace, frameTotal, numPlayers) {
+@@ -583,11 +594,11 @@ function encodeItemRows(replayData, frameTotal) {
+   return rows;
+ }
+ 
+-function encodeStageRows(replayData, frameTotal) {
++function encodeStageRows(replayData, frameTotal, stadiumTransformations) {
+   const rows = [];
+   let previous = null;
+   for (let frame = 0; frame < frameTotal; frame += 1) {
+-    const row = stageRowFromViewer(replayData.frames[frame]?.stage);
++    const row = stageRowFromViewer(replayData.frames[frame]?.stage, stadiumTransformations);
+     const isKeyframe = frame === 0 || frame % KEYFRAME_INTERVAL === 0;
+     const changes = changedFields(previous, row);
+     if (isKeyframe || previous === null) {
+@@ -616,6 +627,7 @@ export function replayDataToMslTrace({
+     throw new Error("No trace frames are available.");
+   }
+   const settings = replayData.settings;
++  const stadiumTransformations = settings.stageId === 3 && settings.isFrozenStadium === false;
+   const playerSettings = settings.playerSettings || [];
+   const numPlayers = Number(settings.characterUiPlacesCount || playerSettings.length || 2);
+   const firstFrame = replayData.frames[0];
+@@ -636,6 +648,7 @@ export function replayDataToMslTrace({
+     createdAt: new Date().toISOString(),
+     match: {
+       stageId: Number(settings.stageId || 0),
++      stadiumTransformations,
+       numPlayers,
+       isTeams: Boolean(settings.isTeams),
+       players: matchPlayers,
+@@ -663,8 +676,8 @@ export function replayDataToMslTrace({
+     stage: {
+       encoding: SPARSE_DELTA_ENCODING,
+       keyframeInterval: KEYFRAME_INTERVAL,
+-      fields: STAGE_FIELDS,
+-      rows: encodeStageRows(replayData, frameTotal),
++      fields: stadiumTransformations ? [...STAGE_FIELDS, ...STADIUM_FIELDS] : STAGE_FIELDS,
++      rows: encodeStageRows(replayData, frameTotal, stadiumTransformations),
+     },
+     items: {
+       encoding: SPARSE_DELTA_ENCODING,
+-- 
+2.43.0
+

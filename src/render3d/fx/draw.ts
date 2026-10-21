@@ -6,26 +6,17 @@
  * it was to where it is. Color: the texture blends the environment color
  * into the primary one (or the primary color alone, untextured); the
  * alpha-compare the particle carries decides which pixels are drawn; the
- * blend is plain or additive. Quads sharing a texture and blend are drawn
- * together. */
-import { AppSRT, K, Particle, srtApply } from "./particles";
-
-/** a direction through a transform: scaled and turned as srtApply does, not moved */
-function srtTurn(s: AppSRT, x: number, y: number, z: number): [number, number, number] {
-  x *= s.sx; y *= s.sy; z *= s.sz;
-  let c = Math.cos(s.rx), n = Math.sin(s.rx);
-  [y, z] = [y * c - z * n, y * n + z * c];
-  c = Math.cos(s.ry); n = Math.sin(s.ry);
-  [x, z] = [x * c + z * n, -x * n + z * c];
-  c = Math.cos(s.rz); n = Math.sin(s.rz);
-  [x, y] = [x * c - y * n, x * n + y * c];
-  return [x, y, z];
-}
+ * blend is plain or additive. The game draws each particle on its own, in
+ * its lists' order; a run of them with one texture and blend is one batch
+ * here. */
+import { K, Particle } from "./particles";
+import type { Sprite } from "./bank";
+import { appExtents, appMatrix, mtxDir, mtxPoint } from "./appsrt";
 
 export const FLOATS = 17; // pos 3, uv 2, prim 4, env 4, alpha-compare 3, textured 1
 
 export interface Batch {
-  sprite: { key: string; w: number; h: number; rgba: Uint8Array } | null;
+  sprite: Sprite | null;
   additive: boolean;
   /** its texture sampled nearest (the particle's TexInterpNear), else bilinear */
   near: boolean;
@@ -44,66 +35,63 @@ const UV = [
 ];
 
 let scratch = new Float32Array(FLOATS * 4 * 256);
-// (the grouping's and a quad's scratch, kept between frames)
-let groupOf = new Int32Array(256), order = new Int32Array(256);
+// (the draw order's and a quad's scratch, and the batches, kept between frames: the caller draws them before
+// the next build)
+let order = new Int32Array(256), batchOf = new Int32Array(256);
+const pool: Batch[] = [];
 const CORNERS = new Float64Array(8);
 
-/** a particle's color byte part-way to its target as the game draws it (getColorPrimEnv): the share left,
- *  65536 * remain / count, an integer division, then ((target << 16) + (color - target) * share) >> 16, kept
- *  to a byte as the GXColor it is stored in */
+/** a particle's color byte part-way to its target as the game draws it (getColorPrimEnv, and
+ *  psDispParticles' alpha compare): the share left, 65536 * remain / count, an integer division, then
+ *  ((target << 16) + (color - target) * share) >> 16, kept to a byte as the GXColor it is stored in */
 export function psColorByte(cur: number, target: number, remain: number, count: number): number {
   if (!count) return cur & 0xff;
   const scale = Math.trunc((65536 * remain) / count);
   return (((target << 16) + (cur - target) * scale) >> 16) & 0xff;
 }
-const shown = (cur: number, target: number, remain: number, count: number) => psColorByte(cur, target, remain, count) / 255;
+const mixed = psColorByte;
 
 const WORLD_AXES = { right: [1, 0, 0], up: [0, 1, 0] };
+// (the game skips a particle smaller than this: psDispParticles' FLT_EPSILON; and FLT_MIN, below which a
+// motion's up part counts as none)
+const FLT_EPSILON = 1.1920929e-7, FLT_MIN = 1.1754944e-38;
 
-/** the particles as quads, grouped into batches by texture and blend, each
- *  in the plane of the camera whose right and up (world directions) are
- *  given; with its perspective projection (viewProj), a trail's or a
- *  direction particle's way across the picture is where the projection
- *  puts it and where it was, as the game's psDispSub measures it */
+/** the particles as quads, in the order the game draws them (psDispParticles: the lists' particles that
+ *  write depth, TexEdge, in the edge pass, then the rest in the see-through pass, each in its list's order),
+ *  one draw a quad in the game; here one batch for each run of quads whose texture, blend and depth writes
+ *  are the same. Each in the plane of the camera whose right and up (world directions) are given; with its
+ *  perspective projection (viewProj), a trail's or a direction particle's way across the picture is where
+ *  the projection puts it and where it was, as the game's psDispSub measures it */
 export function buildParticles(list: Particle[],
-                               axes: { right: number[]; up: number[]; viewProj?: ArrayLike<number> } = WORLD_AXES,
+                               axes: { right: number[]; up: number[]; viewProj?: ArrayLike<number>; view?: ArrayLike<number> } = WORLD_AXES,
                                shift: ((p: Particle) => [number, number] | null) | null = null):
     { data: Float32Array; batches: Batch[] } {
   const R = axes.right, U = axes.up;
-  // Each particle's batch: its texture and blend. The batches in the order
-  // of their first particle, each's particles in theirs (a stable grouping),
-  // without an object or a string a particle: a frame has hundreds.
   const groups: Batch[] = [];
-  const bySprite = new Map<Batch["sprite"], Batch[]>();
-  if (groupOf.length < list.length) groupOf = new Int32Array(list.length * 2);
+  if (order.length < list.length) { order = new Int32Array(list.length * 2); batchOf = new Int32Array(list.length * 2); }
   let kept = 0;
-  for (let i = 0; i < list.length; i++) {
-    const p = list[i];
-    if (p.dead || p.size < 1e-7 || p.kind & K.POINT) { groupOf[i] = -1; continue; }
-    const sprite = p.kind & K.DISP_TEX ? p.bank.image(p.texGroup, p.pose) : null;
-    const additive = ((p.kind >>> 22) & 3) === 1;
-    const zwrite = (p.kind & K.TEXEDGE) !== 0;
-    const noz = (p.kind & K.NOZCOMP) !== 0;
-    const near = (p.kind & K.TEX_NEAR) !== 0;
-    let same = bySprite.get(sprite);
-    if (!same) bySprite.set(sprite, (same = []));
-    let g = same.find((b) => b.additive === additive && b.zwrite === zwrite && b.nozcomp === noz && b.near === near);
-    if (!g) { g = { sprite, additive, near, zwrite, nozcomp: noz, first: groups.length, count: 0 }; same.push(g); groups.push(g); }
-    g.count++;
-    groupOf[i] = g.first;
-    kept++;
+  let cur: Batch | null = null;
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i];
+      if (((p.kind & K.TEXEDGE) !== 0) !== (pass === 0)) continue;
+      if (p.dead || p.size < FLT_EPSILON || p.kind & K.POINT) continue;
+      const sprite = p.kind & K.DISP_TEX ? p.bank.image(p.texGroup, p.pose) : null;
+      const additive = ((p.kind >>> 22) & 3) === 1;
+      const zwrite = pass === 0;
+      const near = (p.kind & K.TEX_NEAR) !== 0;
+      if (!cur || cur.sprite !== sprite || cur.additive !== additive || cur.zwrite !== zwrite || cur.near !== near) {
+        cur = pool[groups.length] ??= { sprite: null, additive: false, near: false, zwrite: false, nozcomp: false, first: 0, count: 0 };
+        // (every particle tests depth: psDispParticles sets GX_LEQUAL whatever its kind)
+        cur.sprite = sprite; cur.additive = additive; cur.near = near; cur.zwrite = zwrite; cur.nozcomp = false;
+        cur.first = kept; cur.count = 0;
+        groups.push(cur);
+      }
+      cur.count++;
+      batchOf[kept] = groups.length - 1;
+      order[kept++] = i;
+    }
   }
-  // each batch's first quad, then the particles into their places
-  let at = 0;
-  for (const g of groups) { const c = g.count; g.count = 0; (g as { at?: number }).at = at; at += c; }
-  if (order.length < kept) order = new Int32Array(kept * 2);
-  for (let i = 0; i < list.length; i++) {
-    const gi = groupOf[i];
-    if (gi < 0) continue;
-    const g = groups[gi] as Batch & { at: number };
-    order[g.at + g.count++] = i;
-  }
-  for (const g of groups) { g.first = (g as { at?: number }).at!; delete (g as { at?: number }).at; }
   const batches = groups;
   const need = kept * 4 * FLOATS;
   if (scratch.length < need) scratch = new Float32Array(need * 2);
@@ -111,14 +99,31 @@ export function buildParticles(list: Particle[],
   let o = 0;
   for (let qi = 0; qi < kept; qi++) {
     const p = list[order[qi]];
-    const textured = groups[groupOf[order[qi]]].sprite ? 1 : 0;
-    // where it is, and how big, through its transform
-    let cx = p.px, cy = p.py, cz = p.pz, scale = 1;
+    const textured = groups[batchOf[qi]].sprite ? 1 : 0;
+    // where it is, and how big, through its transform (psDispSubAppSRT): its matrix (HSD_MtxSRT, kept as made
+    // once it is STILL), and a quad as wide as |the camera's view times it's first column| times the size and as
+    // tall as |its second column| times it (appsrt.ts); under a generator's own transform that only
+    // follows (its kind's 0x20000: the game's xA2), the particle's place and motion are in the camera's axes
+    // from the transform's place, not turned or sized by it
+    let cx = p.px, cy = p.py, cz = p.pz, ex = p.size, ey = p.size;
     let wx = p.vx, wy = p.vy, wz = p.vz;
-    if (p.srt) {
-      [cx, cy, cz] = srtApply(p.srt, p.px, p.py, p.pz);
-      [wx, wy, wz] = srtTurn(p.srt, p.vx, p.vy, p.vz);
-      scale = Math.abs(p.srt.sx);
+    const srt = p.srt;
+    if (srt) {
+      if (srt.view) {
+        ex = p.size * Math.abs(srt.sx); ey = p.size * Math.abs(srt.sy);
+        const B0 = R[1] * U[2] - R[2] * U[1], B1 = R[2] * U[0] - R[0] * U[2], B2 = R[0] * U[1] - R[1] * U[0];
+        cx = srt.tx + p.px * R[0] + p.py * U[0] + p.pz * B0;
+        cy = srt.ty + p.px * R[1] + p.py * U[1] + p.pz * B1;
+        cz = srt.tz + p.px * R[2] + p.py * U[2] + p.pz * B2;
+        wx = p.vx * R[0] + p.vy * U[0] + p.vz * B0;
+        wy = p.vx * R[1] + p.vy * U[1] + p.vz * B1;
+        wz = p.vx * R[2] + p.vy * U[2] + p.vz * B2;
+      } else {
+        const m = appMatrix(srt);
+        [ex, ey] = appExtents(m, p.size, axes.view);
+        [cx, cy, cz] = mtxPoint(m, p.px, p.py, p.pz);
+        [wx, wy, wz] = mtxDir(m, p.vx, p.vy, p.vz);
+      }
     }
     // (drawn somewhere else than the game has it: the HUD's, at this player's own HUD's place)
     const moved = shift ? shift(p) : null;
@@ -136,19 +141,24 @@ export function buildParticles(list: Particle[],
         vy = (P[1] * cx + P[5] * cy + P[9] * cz + P[13]) / w0 - (P[1] * qx + P[5] * qy + P[9] * qz + P[13]) / w1;
       }
     }
-    const size = p.size * scale;
-    // the game turns a quad clockwise (about the axis away from the
-    // camera): by its rotation, or to point along its motion
-    let turn = p.rotate;
+    // The game turns a quad in the camera's plane, by its rotation or to point along its motion (plus its
+    // rotation, a direction particle), when that is more than 0.01: without a transform clockwise (psDispSub:
+    // about right x up, which points away from the camera), under one counterclockwise and by the motion's way
+    // with its across part negated (psDispSubAppSRT) - the same turn for the motion, the other way for the
+    // rotation. `angle`: counterclockwise
     const trail = (p.kind & K.TRAIL) !== 0;
+    let angle: number;
     if (trail || p.kind & K.DIRVEC) {
-      turn = Math.abs(vy) < 1e-30 ? (vx >= 0 ? Math.PI / 2 : -Math.PI / 2) : Math.atan2(vx, vy);
-      if (p.kind & K.DIRVEC) turn += p.rotate;
-    }
-    const angle = -turn;
+      const ax = srt ? -vx : vx;
+      angle = Math.abs(vy) < FLT_MIN ? (ax >= 0 ? Math.PI / 2 : -Math.PI / 2) : Math.atan2(ax, vy);
+      if (p.kind & K.DIRVEC) angle += p.rotate;
+    } else angle = p.rotate;
+    if (!srt) angle = -angle;
+    if (Math.abs(angle) <= 0.01) angle = 0;
     const c = Math.cos(angle), s = Math.sin(angle);
-    // the game's diagonal basis: R = right + up, U = right - up, turned
-    const rx = (c - s) * size, ry = (s + c) * size, ux = (c + s) * size, uy = (s - c) * size;
+    // the corners' basis, turned: R = (ex, ey), U = (ex, -ey) - without a transform the game's diagonal one,
+    // right + up and right - up, each the particle's size
+    const rx = c * ex - s * ey, ry = s * ex + c * ey, ux = c * ex + s * ey, uy = s * ex - c * ey;
     // corners, across and up the picture from its middle: -R, -U, +R, +U
     // (a trail's first and last from where it was: one step of its velocity back, in the world - psDispSubMakePolygon)
     const corners = CORNERS;
@@ -156,26 +166,29 @@ export function buildParticles(list: Particle[],
     corners[4] = rx; corners[5] = ry; corners[6] = ux; corners[7] = uy;
     const uv = UV[((p.kind >>> 18) & 3)];
     const ms = p.kind & K.MIRROR_S ? 2 : 1, mt = p.kind & K.MIRROR_T ? 2 : 1, mtOff = p.kind & K.MIRROR_T ? 1 : 0;
-    const pr = shown(p.prim.r, p.primTarget.r, p.primRemain, p.primCount);
-    const pg = shown(p.prim.g, p.primTarget.g, p.primRemain, p.primCount);
-    const pb = shown(p.prim.b, p.primTarget.b, p.primRemain, p.primCount);
-    const pa = shown(p.prim.a, p.primTarget.a, p.primRemain, p.primCount);
+    const pr = mixed(p.prim.r, p.primTarget.r, p.primRemain, p.primCount) / 255;
+    const pg = mixed(p.prim.g, p.primTarget.g, p.primRemain, p.primCount) / 255;
+    const pb = mixed(p.prim.b, p.primTarget.b, p.primRemain, p.primCount) / 255;
+    const pa255 = mixed(p.prim.a, p.primTarget.a, p.primRemain, p.primCount);
+    const pa = pa255 / 255;
     const primEnv = (p.kind & K.PRIMENV) !== 0;
-    const er = primEnv ? shown(p.env.r, p.envTarget.r, p.envRemain, p.envCount) : 0;
-    const eg = primEnv ? shown(p.env.g, p.envTarget.g, p.envRemain, p.envCount) : 0;
-    const eb = primEnv ? shown(p.env.b, p.envTarget.b, p.envRemain, p.envCount) : 0;
-    const ea = primEnv ? shown(p.env.a, p.envTarget.a, p.envRemain, p.envCount) : 0;
-    const a1 = p.aCmpCount ? p.aCmp1Target + ((p.aCmp1 - p.aCmp1Target) * p.aCmpRemain) / p.aCmpCount : p.aCmp1;
-    const a2 = p.aCmpCount ? p.aCmp2Target + ((p.aCmp2 - p.aCmp2Target) * p.aCmpRemain) / p.aCmpCount : p.aCmp2;
+    const er = primEnv ? mixed(p.env.r, p.envTarget.r, p.envRemain, p.envCount) / 255 : 0;
+    const eg = primEnv ? mixed(p.env.g, p.envTarget.g, p.envRemain, p.envCount) / 255 : 0;
+    const eb = primEnv ? mixed(p.env.b, p.envTarget.b, p.envRemain, p.envCount) / 255 : 0;
+    const ea255 = primEnv ? mixed(p.env.a, p.envTarget.a, p.envRemain, p.envCount) : 0;
+    const ea = ea255 / 255;
+    const a1 = mixed(p.aCmp1, p.aCmp1Target, p.aCmpRemain, p.aCmpCount);
+    const a2 = mixed(p.aCmp2, p.aCmp2Target, p.aCmpRemain, p.aCmpCount);
     for (let k = 0; k < 4; k++) {
       const a = corners[k * 2], b = corners[k * 2 + 1];
       const back = trail && (k === 0 || k === 3) ? 1 : 0;
       const ox = cx - back * wx, oy = cy - back * wy, oz = cz - back * wz;
       out[o++] = ox + a * R[0] + b * U[0]; out[o++] = oy + a * R[1] + b * U[1]; out[o++] = oz + a * R[2] + b * U[2];
       out[o++] = uv[k * 2] * ms; out[o++] = uv[k * 2 + 1] * mt + mtOff;
-      const fade = trail && (k === 0 || k === 3) ? p.trail : 1;
-      out[o++] = pr; out[o++] = pg; out[o++] = pb; out[o++] = pa * fade;
-      out[o++] = er; out[o++] = eg; out[o++] = eb; out[o++] = ea * fade;
+      // (a trail's tail: its alpha times the particle's trail, kept to 8 bits as GXColor4u8 takes it)
+      const tail = trail && (k === 0 || k === 3);
+      out[o++] = pr; out[o++] = pg; out[o++] = pb; out[o++] = tail ? Math.trunc(pa255 * p.trail) / 255 : pa;
+      out[o++] = er; out[o++] = eg; out[o++] = eb; out[o++] = tail ? Math.trunc(ea255 * p.trail) / 255 : ea;
       out[o++] = p.aCmpMode; out[o++] = a1; out[o++] = a2;
       out[o++] = textured;
     }
