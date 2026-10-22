@@ -10,7 +10,9 @@
  * In float32 as the console has it, through gxmath.ts (HSD_MtxSRT, PSMTXConcat, MSL's sqrtf, HSD_MtxGetScale).
  */
 import type { AppSRT } from "./particles";
-import { HSD_MtxGetScale, HSD_MtxSRT, PSMTXConcat, mtxFromGL, sqrtf } from "../gxmath";
+import {
+  HSD_MtxGetScale, HSD_MtxSRT, PSMTXConcat, PSMTXIdentity, PSMTXScale, madd, mtxFromGL, sqrtf,
+} from "../gxmath";
 
 const f32 = Math.fround;
 const srtS = [0, 0, 0], srtR = [0, 0, 0], srtT = [0, 0, 0];
@@ -64,4 +66,28 @@ export function appExtents(m: Float32Array, size: number, view?: ArrayLike<numbe
 export function mtxGetScale(w: ArrayLike<number>): [number, number, number] {
   HSD_MtxGetScale(mtxFromGL(w, gsM, 0), gsOut);
   return [gsOut[0], gsOut[1], gsOut[2]];
+}
+
+const fwT = new Float32Array(12), fwS = [0, 0, 0];
+
+/** the matrix a transform that only follows draws its particles by (psDispSubAppSRT's xA2 path, a generator
+ *  of kind 0x20000): in the camera's space, the transform's place through the view (PSMTXConcat(vmtx, its
+ *  translation)) and that matrix's scale alone (HSD_MtxGetScale, then PSMTXScale) - no turn, and not the
+ *  transform's own scale (which sizes the quads: appExtents). `vmtx` a GX 3 x 4; into out (3 x 4) */
+export function followMatrix(s: AppSRT, vmtx: Float32Array, out: Float32Array): Float32Array {
+  PSMTXIdentity(fwT);
+  fwT[3] = f32(s.tx); fwT[7] = f32(s.ty); fwT[11] = f32(s.tz);
+  PSMTXConcat(vmtx, fwT, fwT);
+  HSD_MtxGetScale(fwT, fwS);
+  PSMTXScale(out, fwS[0], fwS[1], fwS[2]);
+  out[3] = fwT[3]; out[7] = fwT[7]; out[11] = fwT[11];
+  return out;
+}
+
+/** a point through a draw matrix as psDispSubAppSRT writes it, m03 + (m02 z + (m00 x + m01 y)): in this
+ *  -fp_contract on code the inner sum fuses its first product, the middle one fuses m02 z, the move is its own
+ *  add */
+export function drawPoint(m: Float32Array, x: number, y: number, z: number, out: number[]): number[] {
+  for (let r = 0; r < 3; r++) out[r] = f32(m[r * 4 + 3] + madd(m[r * 4 + 2], z, madd(m[r * 4], x, f32(m[r * 4 + 1] * y))));
+  return out;
 }

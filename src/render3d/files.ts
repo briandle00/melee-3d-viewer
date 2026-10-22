@@ -21,6 +21,8 @@ import { EffectKit } from "./effects3d";
 import { hatFiles, KirbyCopy, KirbyHat, loadHat } from "./kirby";
 import { EFFECT_FILES, effectFilesOf } from "./fx/dispatch";
 import { HudKit, stageMagnifierColors } from "./hud";
+import { bgFlashTables } from "./fx/bgflash";
+import type { ColAnimTables } from "./fx/colanim";
 import { pageCache, sharedPromise, trim } from "../state/pageCache";
 import { decodeTrack, decodeTrackFloats } from "./trackcodec";
 import { motionTableFromDol, textFontFromDol } from "./dol";
@@ -479,6 +481,13 @@ export function hud(): Promise<HudKit> {
   });
   hudKit.catch(() => { hudKit = undefined; });
   return hudKit;
+}
+
+/** the screen flash's color animations (LbBf.dat's lbBgFlashColAnimData: fx/bgflash.ts), or null */
+let bgFlashP: Promise<ColAnimTables | null> | undefined;
+export function bgFlash(): Promise<ColAnimTables | null> {
+  bgFlashP ??= file("LbBf.dat").then((b) => bgFlashTables(parseArchive(b)), () => null);
+  return bgFlashP;
 }
 
 /** a stage's colors for the magnifier's background (its grGroundParam), or null */

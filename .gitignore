@@ -16,3 +16,4 @@ public/effect-table.json
 .env
 # the Melee decompilation, for scripts/generate-item-animations.py: see README.md
 vendor/
+__pycache__/

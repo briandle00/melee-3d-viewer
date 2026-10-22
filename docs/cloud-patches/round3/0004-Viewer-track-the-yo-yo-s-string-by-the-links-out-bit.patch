@@ -1,0 +1,107 @@
+From 31ba251b59ea4f931f0000a3b1b0a0d2364962d6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 08:33:16 +0000
+Subject: [PATCH 4/4] Viewer track: the yo-yo's string by the links' out bit
+
+The "hook" line left out a link still at the origin, the hookshot's and the
+grapple's sign of a link not yet out. A yo-yo link that is not out keeps its
+spawn place or the hand's (it_802BF28C, it_802BF4A0 do not move it), so its
+string went through links the game does not draw. The yo-yo's links are now
+told by x2C_b0, as it_802A24A0 draws them: set as the string pays out from
+the ball and for the ball (it_802BE65C, it_802C0010), cleared as it is drawn
+back (it_802BF800) or under the shortest length (it_802BF28C). "lm" already
+writes that bit as each link's out, checked against the same sites.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ agent_docs/VIEWER_TRACK.md |  2 +-
+ src/runtime/viewer_track.c | 27 +++++++++++++++++++--------
+ 2 files changed, 20 insertions(+), 9 deletions(-)
+
+diff --git a/agent_docs/VIEWER_TRACK.md b/agent_docs/VIEWER_TRACK.md
+index ca9848e3..d0a27cec 100644
+--- a/agent_docs/VIEWER_TRACK.md
++++ b/agent_docs/VIEWER_TRACK.md
+@@ -102,7 +102,7 @@ fighter's port (0-3) and `sub` 0 for the leader, 1 for Nana.
+ | `gcolor` | state | stage object, rgba (0 when it stops) | stage material color scripts |
+ | `bgcolor` | state | rgba | the camera's background color |
+ | `cam` | state | eye x, y, z, interest x, y, z, fov, quake x, y | the game camera without its quake, and the quake |
+-| `hook` | event | port, sub, x, y pairs | each frame a hookshot, grapple or yo-yo chain is out: tip first, links not yet out left out |
++| `hook` | event | port, sub, x, y pairs | each frame a hookshot, grapple or yo-yo chain is out: tip first, links not yet out left out (the yo-yo's by `x2C_b0`, the others' by a place still at the origin) |
+ | `art` | state | item kind, owner's character, article index (-1 none) | which of the owner's articles an item kind draws, once per kind |
+ | `irot` | state | item id, rot x, y, z | an item's root joint turn, once it turns |
+ | `jp` | event | item id, then per joint that changed: joint, mask, values | an item's joints below its root as its code and animation left them (rot x, y, z, scale x, y, z, translate x, y, z; mask bit k says value k follows); joint = preorder index in the item's model file; a joint is written once it leaves the file's rest pose, then on change |
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index b65932b7..c8ee847d 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -1172,11 +1172,12 @@ static bool item_owner_port(Item* ip, int* port, int* sub)
+ 
+ // A chain as [x, y] pairs: `head` first when given, then each link from
+ // `start` along next (`along_next`) or prev, then `tail` when given. Points
+-// still at the origin (not out yet) are left out, and a chain with none
+-// left writes no event.
++// still at the origin (not out yet) are left out, and with `by_out` each
++// link that is not out (x2C_b0 clear: not drawn, it_802A24A0) too; a chain
++// with none left writes no event.
+ static void track_chain(MslViewerTrack* track, int frame, Item* ip,
+                         const Vec3* head, ItemLink* start, bool along_next,
+-                        const Vec3* tail)
++                        const Vec3* tail, bool by_out)
+ {
+     enum { MAX_LINKS = 64 };
+     char key[TRACK_KEY_LEN];
+@@ -1200,7 +1201,8 @@ static void track_chain(MslViewerTrack* track, int frame, Item* ip,
+          link = along_next ? link->next : link->prev, ++count)
+     {
+         if (&link->pos == head || &link->pos == tail ||
+-            (link->pos.x == 0.0F && link->pos.y == 0.0F))
++            (link->pos.x == 0.0F && link->pos.y == 0.0F) ||
++            (by_out && !link->x2C_b0))
+         {
+             continue;
+         }
+@@ -1241,7 +1243,8 @@ static void track_items(MslViewerTrack* track, int frame,
+             // its spawn point. Head first, then back toward the hand.
+             ItemLink* hook = ip->xDD4_itemVar.linkhookshot.x0;
+             if (hook != NULL) {
+-                track_chain(track, frame, ip, &hook->pos, hook, true, NULL);
++                track_chain(track, frame, ip, &hook->pos, hook, true, NULL,
++                            false);
+             }
+             break;
+         }
+@@ -1251,7 +1254,8 @@ static void track_items(MslViewerTrack* track, int frame,
+             // core does not run, so only the ones that have moved appear.
+             ItemLink* claw = ip->xDD4_itemVar.samusgrapple.x0;
+             if (claw != NULL) {
+-                track_chain(track, frame, ip, &claw->pos, claw, true, NULL);
++                track_chain(track, frame, ip, &claw->pos, claw, true, NULL,
++                            false);
+             }
+             break;
+         }
+@@ -1259,10 +1263,17 @@ static void track_items(MslViewerTrack* track, int frame,
+             // Ness's yo-yo: the string's links from the hand (xDD4+C) toward
+             // the ball, then the ball (xDD4+8, the link the yo-yo's hitbox
+             // position is written to) last. The item itself stays at its
+-            // spawn point.
++            // spawn point. A link not out keeps its spawn place or the hand's
++            // (it_802BF28C, it_802BF4A0 leave it there), never the origin,
++            // so it is told by x2C_b0: set as the string pays out from the
++            // ball (it_802BF28C, it_802BF4A0) and for the ball itself
++            // (it_802BE65C, it_802C0010), cleared as it is drawn back
++            // (it_802BF800) or under the shortest length (it_802BF28C), so
++            // the links out are one run from the ball. ("lm" writes the same
++            // bit as each link's out.)
+             ItemLink* ball = ip->xDD4_itemVar.nessyoyo.x8;
+             track_chain(track, frame, ip, NULL, ip->xDD4_itemVar.nessyoyo.xC,
+-                        false, ball != NULL ? &ball->pos : NULL);
++                        false, ball != NULL ? &ball->pos : NULL, true);
+             break;
+         }
+         default:
+-- 
+2.43.0
+

@@ -1,0 +1,471 @@
+From 5833be15b757354ecde6b8488dcbe4dc7f30ec61 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 14:41:59 +0000
+Subject: [PATCH] Viewer track: world matrices for the pose check (wf, wi, ws),
+ behind MSL_VIEWER_TRACK_WORLD
+
+With MSL_VIEWER_TRACK_WORLD=1 in the environment as the track is made, each
+fighter part's, item joint's and stage joint's world matrix at the frame's
+end is written, made as HSD_JObjMakeMatrix makes it (its scale
+compensation, HSD_MtxSRT, HSD_MtxSRTQuat, HSD_MtxSRTConcat) in the track's
+own storage, so nothing of the match changes. Joints the game places
+another way (RObjs, IK, user and independent matrices, path animations),
+cold fighter parts and the parts of stopped stage animations are left out
+with everything under them. Off, nothing is written or allocated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ agent_docs/VIEWER_TRACK.md       |   3 +
+ src/runtime/viewer_track.c       | 334 ++++++++++++++++++++++++++++++-
+ tools/validation/visual_state.py |   3 +
+ 3 files changed, 334 insertions(+), 6 deletions(-)
+
+diff --git a/agent_docs/VIEWER_TRACK.md b/agent_docs/VIEWER_TRACK.md
+index f372a723..c604abb8 100644
+--- a/agent_docs/VIEWER_TRACK.md
++++ b/agent_docs/VIEWER_TRACK.md
+@@ -108,6 +108,9 @@ fighter's port (0-3) and `sub` 0 for the leader, 1 for Nana.
+ | `jp` | event | item id, then per joint that changed: joint, mask, values | an item's joints below its root as its code and animation left them (rot x, y, z, scale x, y, z, translate x, y, z; mask bit k says value k follows); joint = preorder index in the item's model file; a joint is written once it leaves the file's rest pose, then on change |
+ | `fp` | event | port, sub, character, then per part that changed: part, mask, values | a fighter's swinging joints (`ftdynamics.c`), the same nine values: the chains a hurtbox sits on, which gameplay solves, and, with the track, the capes, caps and hair the gameplay build drops, kept as copies the game's solver goes on with (`msl_viewer_track_keep_dynamics`; not yet Peach's, Zelda's and Donkey Kong's); a fighter's first line (and its first as another character) has all of them |
+ | `fj` | event | port, sub, character, then per part that changed: part, mask, values | a fighter's joints as the game left them at the frame's end (its animation, the blend into it, and whatever its own code set after: `ftParts`, the state's code, the swinging chains), the same nine values as `jp`, by part: every part with a live joint of its own, not part 0's place (only its turn and size, values 0 to 5: facing, the state's tilts and spins, model scale), not the presentation-only parts the hosted build leaves cold (`ftParts_HeadlessGameplayMask`), not a quaternion joint; a fighter's first line (and its first as another character) has all of them, then each value only on change |
++| `wf` | event | port, sub, character, then per part that changed: part, mask, values | only with `MSL_VIEWER_TRACK_WORLD=1` set as the track is made: a fighter part's world matrix as `HSD_JObjMakeMatrix` makes it from the joint's values at the frame's end (rows 0 to 2 of the 3 x 4 matrix, row by row, twelve values, mask bits 0-11), made in the track's own storage; left out, with all under them: cold parts, joints with an RObj (constraints, limits), IK joints, `JOBJ_USER_DEF_MTX`, `JOBJ_MTX_INDEP_PARENT`, `JOBJ_MTX_INDEP_SRT`, path animations |
++| `wi` | event | item, then per joint that changed: joint, mask, values | the same for an item's joints, numbered as `jp` numbers them, the root 0 too |
++| `ws` | event | part, then per joint that changed: joint, mask, values | the same for a stage part's joints, parts and joints numbered as `sp` numbers them; a part whose animation the hosted build stops is left out |
+ | `lm` | event | item id, link count, then per link that changed: link, out, mask, values | a chain's links (hookshots, Samus's grapple, Sheik's chain, Ness's yo-yo, the Ice Climbers' belay): each link's matrix as the item's code set it (rows 0-2 of the 3x4, mask bits 0-11); link 0 is the end with no `prev`; out is `x2C_b0` (a link is drawn only then); a link that comes out or goes back is written whole |
+ | `sp` | event | stage part, then per joint that changed: joint, mask, values | a stage part's joints as its animations and code left them (the moving parts: Fountain of Dreams', Yoshi's Story's and Pokemon Stadium's platforms and the rest), the same nine values as `jp`; the part is numbered as `gjoint` numbers it (its `map_id`, an extra copy's `map_id + 1000 * k`), the joint by preorder index in its tree as `stage_joint` counts it (0 the part's scale root from `Ground_801C14D0`, at rest rot 0, scale the stage's, translate 0; the file's tree from 1, an instance's children left out); a joint is written once it leaves the file's rest pose, then on change |
+ | `ij` | state | item id, joint, offset x, y, z, 3x3 matrix | an item joint a generator was made on: place from the item's and its turn, at the frame's end |
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index c3b0f190..8e11b09e 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -21,6 +21,7 @@
+ #include "runtime/effect_pieces.h"
+ #include "runtime/effects.h"
+ #include "runtime/scalar.h"
++#include "runtime/fighter_pose.h"
+ 
+ #include <stdarg.h>
+ #include <stdint.h>
+@@ -30,6 +31,7 @@
+ #include <baselib/gobj.h>
+ #include <baselib/gobjproc.h>
+ #include <baselib/jobj.h>
++#include <baselib/mtx.h>
+ #include <baselib/random.h>
+ 
+ // The game camera's render transform and extras (cm/camera.c), read only.
+@@ -51,7 +53,7 @@ enum { TRACK_ITEM_JOINTS = 128 };
+ 
+ // (a stage part's tree runs to a few hundred joints: a joint past the last
+ // is not written)
+-enum { TRACK_POSE_OWNERS = 128, TRACK_POSE_JOINTS = 512 };
++enum { TRACK_POSE_OWNERS = 128, TRACK_POSE_JOINTS = 512, TRACK_WORLD_OWNERS = 64 };
+ 
+ // One owner's joints as last written (track_poses): an item, a fighter, a
+ // chain's links, a stage part.
+@@ -94,6 +96,10 @@ struct MslViewerTrack {
+     char pose_line[256 * 1024];
+     // (track_fighter_joints: the parts on a chain this build leaves unsolved)
+     uint8_t chain_parts[TRACK_POSE_JOINTS];
++    // The world matrices ("wf", "wi", "ws": track_world), only when the
++    // environment sets MSL_VIEWER_TRACK_WORLD=1 as the track is made: their
++    // owners, allocated with the track, else NULL.
++    MslTrackPose* world;
+     size_t pose_used;
+     // The HUD's stock icons per port (track_hud_step).
+     struct {
+@@ -117,12 +123,24 @@ MslViewerTrack* msl_viewer_track_create(void)
+         return NULL;
+     }
+     track->text[0] = '\0';
++    {
++        const char* world = getenv("MSL_VIEWER_TRACK_WORLD");
++        if (world != NULL && strcmp(world, "1") == 0) {
++            track->world = calloc(TRACK_WORLD_OWNERS, sizeof(*track->world));
++            if (track->world == NULL) {
++                free(track->text);
++                free(track);
++                return NULL;
++            }
++        }
++    }
+     return track;
+ }
+ 
+ void msl_viewer_track_destroy(MslViewerTrack* track)
+ {
+     if (track != NULL) {
++        free(track->world);
+         free(track->text);
+         free(track);
+     }
+@@ -1389,13 +1407,13 @@ static void track_items(MslViewerTrack* track, int frame,
+ //   it/items/itclimbersstring.c,gr/ground.c::Ground_801C14D0}
+ 
+ // The owner of a pose, kept while it is there.
+-static MslTrackPose* pose_owner(MslViewerTrack* track, char kind, int id,
+-                                int frame)
++static MslTrackPose* owner_in(MslTrackPose* pool, int count, char kind,
++                              int id, int frame)
+ {
+     int i;
+     int free_at = -1;
+-    for (i = 0; i < TRACK_POSE_OWNERS; ++i) {
+-        MslTrackPose* o = &track->pose[i];
++    for (i = 0; i < count; ++i) {
++        MslTrackPose* o = &pool[i];
+         if (o->used && o->kind == kind && o->id == id) {
+             o->frame = frame;
+             return o;
+@@ -1408,7 +1426,7 @@ static MslTrackPose* pose_owner(MslViewerTrack* track, char kind, int id,
+         return NULL;
+     }
+     {
+-        MslTrackPose* o = &track->pose[free_at];
++        MslTrackPose* o = &pool[free_at];
+         memset(o, 0, sizeof(*o));
+         o->used = 1;
+         o->kind = kind;
+@@ -1418,6 +1436,12 @@ static MslTrackPose* pose_owner(MslViewerTrack* track, char kind, int id,
+     }
+ }
+ 
++static MslTrackPose* pose_owner(MslViewerTrack* track, char kind, int id,
++                                int frame)
++{
++    return owner_in(track->pose, TRACK_POSE_OWNERS, kind, id, frame);
++}
++
+ static void pose_append(MslViewerTrack* track, const char* format, ...)
+ {
+     size_t room = sizeof(track->pose_line) - track->pose_used;
+@@ -1883,6 +1907,301 @@ void msl_viewer_track_keep_dynamics(Fighter* fp)
+     }
+ }
+ 
++
++// The world matrices ("wf", "wi", "ws"): with MSL_VIEWER_TRACK_WORLD=1, each
++// fighter part's, item joint's and stage joint's matrix as the frame's end
++// leaves it, the one HSD_JObjMakeMatrix makes from the joint's values (its
++// scale compensation, HSD_MtxSRT / HSD_MtxSRTQuat and the concat with its
++// parent's, as this build has them), made here into the track's own storage
++// so no joint, flag or scale vector of the match is touched. Left out, with
++// everything under them: a joint the game's code places another way
++// (constraints and limits: an RObj; IK: JOBJ_JOINT1, JOBJ_JOINT2,
++// JOBJ_EFFECTOR; JOBJ_USER_DEF_MTX, JOBJ_MTX_INDEP_PARENT, JOBJ_MTX_INDEP_SRT;
++// a path animation's translation), a fighter part the hosted build leaves
++// cold (no animation there: not the game's pose), and every joint of a
++// stage part whose animation the hosted build stops (stage_animation_stopped).
++//   [frame,"wf",port,sub,character,(part,mask,values)...]
++//   [frame,"wi",item,(joint,mask,values)...]   (joints as "jp", root 0)
++//   [frame,"ws",part,(joint,mask,values)...]   (parts and joints as "sp")
++// The twelve values are rows 0 to 2 of the 3 x 4 matrix, row by row; mask
++// bit k says value k follows; a value is written when it changes, an owner's
++// first line has them all.
++// refs/melee/src/sysdolphin/baselib/jobj.c::HSD_JObjMakeMatrix,
++// HSD_JObjSetupMatrixSub
++
++typedef struct TrackWorld {
++    Mtx mtx;
++    Vec3 scl;
++    int has_scl;
++} TrackWorld;
++
++static int world_excluded(const HSD_JObj* j, int fighter)
++{
++    HSD_JObj* path = NULL;
++    if (j->robj != NULL ||
++        (j->flags & (JOBJ_JOINT | JOBJ_USER_DEF_MTX | JOBJ_MTX_INDEP_PARENT |
++                     JOBJ_MTX_INDEP_SRT)))
++    {
++        return 1;
++    }
++    if (fighter) {
++        if (j->flags & JOBJ_MSL_GAMEPLAY_COLD) {
++            return 1;
++        }
++#ifdef MSL_CORE_NATIVE
++        if (msl_fighter_pose_path(j, &path) && path != NULL) {
++            return 1;
++        }
++        return 0;
++#endif
++    }
++    if (j->aobj != NULL && j->aobj->hsd_obj != NULL) {
++        return 1;
++    }
++    (void) path;
++    return 0;
++}
++
++// The joint's matrix from its parent's (NULL at the root), as
++// HSD_JObjMakeMatrix makes it.
++static void world_make(const HSD_JObj* jc, const TrackWorld* parent,
++                       TrackWorld* out)
++{
++    HSD_JObj* j = (HSD_JObj*) jc;
++    Vec3* pscl = parent != NULL && parent->has_scl ? (Vec3*) &parent->scl
++                                                   : NULL;
++    if (j->flags & 8) {
++        out->has_scl = pscl != NULL;
++        if (pscl != NULL) {
++            out->scl = *pscl;
++        }
++    } else {
++        out->has_scl = 1;
++        if (pscl != NULL) {
++            out->scl.x = j->scale.x * pscl->x;
++            out->scl.y = j->scale.y * pscl->y;
++            out->scl.z = j->scale.z * pscl->z;
++        } else {
++            out->scl = j->scale;
++        }
++    }
++    if (j->flags & JOBJ_USE_QUATERNION) {
++        HSD_MtxSRTQuat(out->mtx, &j->scale, &j->rotate, &j->translate, pscl);
++        if (parent != NULL) {
++            PSMTXConcat((MtxPtr) parent->mtx, out->mtx, out->mtx);
++        }
++    } else if (parent != NULL) {
++#ifdef MSL_CORE_NATIVE
++        HSD_MtxSRTConcat(out->mtx, (MtxPtr) parent->mtx, &j->scale,
++                         (Vec3*) &j->rotate, &j->translate, pscl);
++#else
++        HSD_MtxSRT(out->mtx, &j->scale, (Vec3*) &j->rotate, &j->translate,
++                   pscl);
++        PSMTXConcat((MtxPtr) parent->mtx, out->mtx, out->mtx);
++#endif
++    } else {
++        HSD_MtxSRT(out->mtx, &j->scale, (Vec3*) &j->rotate, &j->translate,
++                   NULL);
++    }
++}
++
++// A joint's matrix made from the root down; 0 when it or one above it is
++// left out.
++static int world_of(const HSD_JObj* j, int fighter, TrackWorld* out)
++{
++    TrackWorld parent;
++    if (j == NULL || world_excluded(j, fighter)) {
++        return 0;
++    }
++    if (j->parent != NULL) {
++        if (!world_of(j->parent, fighter, &parent)) {
++            return 0;
++        }
++        world_make(j, &parent, out);
++    } else {
++        world_make(j, NULL, out);
++    }
++    return 1;
++}
++
++static void world_joint(MslViewerTrack* track, MslTrackPose* o, int at,
++                        const TrackWorld* w)
++{
++    float v[12];
++    int r;
++    for (r = 0; r < 3; ++r) {
++        v[r * 4 + 0] = w->mtx[r][0];
++        v[r * 4 + 1] = w->mtx[r][1];
++        v[r * 4 + 2] = w->mtx[r][2];
++        v[r * 4 + 3] = w->mtx[r][3];
++    }
++    pose_joint(track, o, at, -1, v, 12);
++}
++
++static void world_fighter(MslViewerTrack* track, int frame, Fighter_GObj* gobj)
++{
++    Fighter* fp = GET_FIGHTER(gobj);
++    int port = fp->player_id;
++    int sub = fp->x221F_b4 ? 1 : 0;
++    MslTrackPose* o;
++    char head[64];
++    int count;
++    int part;
++    if (fp->parts == NULL) {
++        return;
++    }
++    o = owner_in(track->world, TRACK_WORLD_OWNERS, 'F', port * 2 + sub,
++                 frame);
++    if (o == NULL) {
++        return;
++    }
++    if (o->character != (int) fp->kind + 1) {
++        memset(o->known, 0, sizeof(o->known));
++        o->character = (int) fp->kind + 1;
++    }
++    count = (int) ftPartsTable[fp->kind]->parts_num;
++    if (count > TRACK_POSE_JOINTS) {
++        count = TRACK_POSE_JOINTS;
++    }
++    for (part = 0; part < count; ++part) {
++        TrackWorld w;
++        if (world_of(fp->parts[part].joint, 1, &w)) {
++            world_joint(track, o, part, &w);
++        }
++    }
++    snprintf(head, sizeof(head), "[%d,\"wf\",%d,%d,%d", frame, port, sub,
++             (int) fp->kind);
++    pose_flush(track, head);
++}
++
++// An item's joints in its file's preorder, as pose_item_walk counts them,
++// the root 0 too.
++static void world_item_walk(MslViewerTrack* track, MslTrackPose* o,
++                            HSD_JObj* j, HSD_Joint* d, int* index)
++{
++    for (; d != NULL; d = d->next, j = j != NULL ? j->next : NULL) {
++        int at = (*index)++;
++        TrackWorld w;
++        if (at < TRACK_POSE_JOINTS && j != NULL && world_of(j, 0, &w)) {
++            world_joint(track, o, at, &w);
++        }
++        if (d->child != NULL) {
++            world_item_walk(track, o,
++                            j != NULL && !(j->flags & JOBJ_INSTANCE)
++                                ? j->child
++                                : NULL,
++                            d->child, index);
++        }
++    }
++}
++
++static void world_stage_walk(MslViewerTrack* track, MslTrackPose* o,
++                             HSD_JObj* j, const HSD_Joint* d, int* index)
++{
++    for (; d != NULL && j != NULL; d = d->next, j = j->next) {
++        int at = (*index)++;
++        TrackWorld w;
++        if (at < TRACK_POSE_JOINTS && world_of(j, 0, &w)) {
++            world_joint(track, o, at, &w);
++        }
++        if (!(j->flags & JOBJ_INSTANCE)) {
++            world_stage_walk(track, o, j->child, d->child, index);
++        }
++    }
++}
++
++static void track_world(MslViewerTrack* track, int frame,
++                        const MslCoreMatch* match)
++{
++    Item_GObj* item;
++    HSD_GObj* gobj;
++    int others[64];
++    char head[64];
++    int i;
++    for (i = 0; i < match->config.num_players; ++i) {
++        if (match->fighters[i] != NULL) {
++            world_fighter(track, frame, match->fighters[i]);
++        }
++        if (match->follower_fighters[i] != NULL &&
++            !GET_FIGHTER(match->follower_fighters[i])->x221F_b3)
++        {
++            world_fighter(track, frame, match->follower_fighters[i]);
++        }
++    }
++    for (item = (Item_GObj*) match->gobj.entities->items; item != NULL;
++         item = (Item_GObj*) item->next)
++    {
++        Item* ip = GET_ITEM(item);
++        HSD_JObj* root = GET_JOBJ(item);
++        MslTrackPose* o;
++        int index = 0;
++        if (root == NULL || ip->xC8_joint == NULL) {
++            continue;
++        }
++        o = owner_in(track->world, TRACK_WORLD_OWNERS, 'I', (int) ip->x1C,
++                     frame);
++        if (o == NULL) {
++            continue;
++        }
++        world_item_walk(track, o, root, ip->xC8_joint, &index);
++        snprintf(head, sizeof(head), "[%d,\"wi\",%d", frame, (int) ip->x1C);
++        pose_flush(track, head);
++    }
++    memset(others, 0, sizeof(others));
++    for (gobj = (HSD_GObj*) match->gobj.entities->x14; gobj != NULL;
++         gobj = gobj->next)
++    {
++        UnkArchiveStruct* archive;
++        const HSD_Joint* desc;
++        HSD_JObj* root;
++        MslTrackPose* o;
++        int map_id;
++        int id;
++        int index = 1;
++        TrackWorld w;
++        if (gobj->classifier != HSD_GOBJ_CLASS_STAGE ||
++            gobj->user_data == NULL || gobj->hsd_obj == NULL)
++        {
++            continue;
++        }
++        map_id = (int) GET_GROUND(gobj)->map_id;
++        if (map_id < 0 || map_id >= 64) {
++            continue;
++        }
++        id = map_id;
++        if (stage_info.x180[map_id] != gobj) {
++            id = map_id + 1000 * ++others[map_id];
++        }
++        archive = grDatFiles_801C6330(map_id);
++        if (archive == NULL || archive->unk4 == NULL ||
++            map_id >= archive->unk4->unkC)
++        {
++            continue;
++        }
++        desc = archive->unk4->unk8[map_id].unk0;
++        root = gobj->hsd_obj;
++        if (desc == NULL || stage_animation_stopped(gobj)) {
++            continue;
++        }
++        o = owner_in(track->world, TRACK_WORLD_OWNERS, 'S', id, frame);
++        if (o == NULL) {
++            continue;
++        }
++        if (world_of(root, 0, &w)) {
++            world_joint(track, o, 0, &w);
++        }
++        world_stage_walk(track, o, root->child, desc, &index);
++        snprintf(head, sizeof(head), "[%d,\"ws\",%d", frame, id);
++        pose_flush(track, head);
++    }
++    // (an owner not seen this frame is gone: its place is free)
++    for (i = 0; i < TRACK_WORLD_OWNERS; ++i) {
++        if (track->world[i].used && track->world[i].frame != frame) {
++            track->world[i].used = 0;
++        }
++    }
++}
++
+ static void track_poses(MslViewerTrack* track, int frame,
+                         const MslCoreMatch* match)
+ {
+@@ -1901,6 +2220,9 @@ static void track_poses(MslViewerTrack* track, int frame,
+     }
+     track_item_poses(track, frame, match);
+     track_stage_poses(track, frame, match);
++    if (track->world != NULL) {
++        track_world(track, frame, match);
++    }
+     // (an owner not seen this frame is gone: its place is free)
+     for (i = 0; i < TRACK_POSE_OWNERS; ++i) {
+         if (track->pose[i].used && track->pose[i].frame != frame) {
+diff --git a/tools/validation/visual_state.py b/tools/validation/visual_state.py
+index 8deed80f..eebdd971 100644
+--- a/tools/validation/visual_state.py
++++ b/tools/validation/visual_state.py
+@@ -36,6 +36,9 @@ UNLOCKED_KINDS = frozenset({
+     "send",
+     "sp",
+     "stadscreen",
++    "wf",
++    "wi",
++    "ws",
+ })
+ 
+ 
+-- 
+2.43.0
+

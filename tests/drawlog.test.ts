@@ -7,8 +7,10 @@ import assertNode from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   DrawLog, RENDERER_NAMES, dlPrims, drawLogCommand, geoHash, gxHash, gxProjection, imageId, probes, tlutId, vertexSize,
+  gameTexMaps, normalMatrix,
 } from "../src/render3d/drawlog.ts";
-import { compileMaterial } from "../src/render3d/gx.ts";
+import { LOBJ, RENDER, compileMaterial } from "../src/render3d/gx.ts";
+import { LightSet } from "../src/render3d/lightset.ts";
 import type { Archive, MObj, PObj } from "../src/render3d/hsd.ts";
 import { perspective } from "../src/render3d/math.ts";
 
@@ -173,6 +175,33 @@ test("a mesh's record: its primitives, matrices, pixel engine and probe", () => 
   for (const k of ["begin", "drawOne", "setFog"]) assert(any[k] === (before as Record<string, unknown>)[k], `${k} is the renderer's own again`);
 });
 
+test("a lit material's probe: its alpha the light sum's through the alpha channel when a light has LOBJ_ALPHA", () => {
+  const probeAlpha = (flags: number) => {
+    const r = standIn();
+    // deno-lint-ignore no-explicit-any
+    const any = r as any;
+    any.lighting = new LightSet([{ desc: 1, kind: "infinite", flags: LOBJ.INFINITE | LOBJ.DIFFUSE | flags,
+      color: [1, 1, 1, 1], position: [0, 0, 1], interest: null, raw: null, spot: null, dist: null, anim: null }]).at(0);
+    const dl = new Uint8Array(32);
+    dl.set(hex(TRI), 0);
+    const d = {
+      key: "f0:0:0:0", archive: archiveOf(dl), pobj: POBJ(0, 32), jobj: { index: 0 }, mats: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+      nMats: 1, translucent: false, group: null,
+      state: { mobj: { ...MOBJ, renderMode: RENDER.DIFFUSE }, diffuse: new Float32Array([1, 1, 1, 1]), ambient: new Float32Array([0, 0, 0, 1]),
+               specular: new Float32Array([0, 0, 0, 1]), alpha: 1, tex: [], override: null, skip: null, mirror: null },
+    };
+    drawLogCommand(any, { start: true });
+    any.begin();
+    any.drawOne(d, null, null);
+    const frames = drawLogCommand(any, { take: true, stop: true }) as { draws: Record<string, unknown>[] }[];
+    return (frames[0].draws[1].probe as number[][])[0][3];
+  };
+  // (probe 0's light sum alpha 49: (255 * (49 + 0)) >> 8 = 48, HSD_State_80405A38_90 with ambient alpha 0)
+  assertEquals(probeAlpha(LOBJ.ALPHA), 48);
+  // (no light in HSD_LObjGetLightMaskAlpha: the unlit channel, HSD_State_80405A38_C0)
+  assertEquals(probeAlpha(0), 255);
+});
+
 test("nothing is logged without start, and particles keep their batches", () => {
   const r = standIn();
   // deno-lint-ignore no-explicit-any
@@ -240,4 +269,31 @@ test("while the log is on nothing is culled (GX culls no mesh), and the renderer
   assertEquals(any.cullOn, false);
   log.detach();
   assertEquals(any.cullOn, true);
+});
+
+test("the draw log numbers texture maps as HSD_TObjAssignResources does: the bump map after the plain ones", () => {
+  const BUMP = 1 << 24;
+  // (Link's sword: a UV texture, the bump map, a reflection)
+  assertNode.deepEqual(gameTexMaps([0x10, 0x10 | BUMP, 0x11]), [0, 2, 1]);
+  // a toon texture last; of two bump maps the last is kept
+  assertNode.deepEqual(gameTexMaps([4, BUMP, 0, BUMP]), [2, -1, 0, 1]);
+  // at most 8 plain ones, 6 with a bump map
+  assertNode.deepEqual(gameTexMaps([0, 0, 0, 0, 0, 0, 0, BUMP]), [0, 1, 2, 3, 4, 5, -1, 6]);
+});
+
+test("normalMatrix: the modelview's 3 x 3 inverse transposed", () => {
+  // (a turn about z by 90 degrees, scaled 0.6: the normal matrix is the turn over 0.6)
+  const m = new Float32Array([0, 0.6, 0, 0, -0.6, 0, 0, 0, 0, 0, 0.6, 0, 5, 6, 7, 1]);
+  const n = normalMatrix(m);
+  const want = [0, -1 / 0.6, 0, 1 / 0.6, 0, 0, 0, 0, 1 / 0.6];
+  n.forEach((v, i) => assertNode.ok(Math.abs(v - want[i]) < 1e-6, `${i}: ${v} vs ${want[i]}`));
+});
+
+test("a UV set's texture matrix row is logged as the game's effective one: its third column's constant in the fourth", async () => {
+  const { uvRow } = await import("../src/render3d/drawlog.ts");
+  // (a texture turned out of its plane, as Fountain of Dreams' water: s from the row's third column)
+  assertEquals(uvRow([7.2e-5, 0, 0.9989, 0.0001], 0), [7.2e-5, 0, 0, 0.9989 + 0.0001]);
+  assertEquals(uvRow([1, 0, 0, 0.5], 1), [1, 0, 0, 0.5]);
+  // (the others' rows as they are)
+  assertEquals(uvRow([1, 2, 3, 4], 4), [1, 2, 3, 4]);
 });

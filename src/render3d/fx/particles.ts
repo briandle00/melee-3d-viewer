@@ -12,7 +12,8 @@
  */
 import { CmdList, EffectBank } from "./bank";
 import { atan2f, cosf, sinf, tanf } from "./gamemath";
-import { APP_ONCE, appMatrix, mtxGetScale } from "./appsrt";
+import { APP_ONCE, appMatrix, mtxGetScale, mtxSRT } from "./appsrt";
+import { madd } from "../gxmath";
 
 // particle kind bits (HSD_ParticleKind)
 export const K = {
@@ -875,9 +876,27 @@ export class ParticleSystem {
           case 0xaf: p.kind = (p.kind & ~K.MIRROR_T) | K.MIRROR_S; break;
           case 0xb0: p.kind = (p.kind & ~K.MIRROR_S) | K.MIRROR_T; break;
           case 0xb1: p.kind |= K.MIRROR_S | K.MIRROR_T; break;
-          case 0xb2: // bake the transform in and leave it
-            if (p.srt) { const w = srtApply(p.srt, p.px, p.py, p.pz); p.px = w[0]; p.py = w[1]; p.pz = w[2]; p.srt = null; }
+          case 0xb2: { // the transform baked into the place, and left (particle.c's 0xB2)
+            const s = p.srt;
+            if (!s) break;
+            // (only the player's way of placing it: the game's particle has no transform, its place is the world's)
+            if (s.player) { const w = srtApply(s, p.px, p.py, p.pz); p.px = w[0]; p.py = w[1]; p.pz = w[2]; p.srt = null; break; }
+            // (none under a transform that only follows, xA2)
+            if (s.view) break;
+            // its generator first goes along its joint (hsd_803983A4), then the matrix is made again whatever its
+            // status (HSD_MtxSRT into mmtx) and the place goes through it a coordinate at a time, each row reading
+            // the ones already written (pos.x is new for y and z, pos.y for z); then the transform is let go
+            // (psRemoveParticleAppSRT)
+            const gp = s.owner;
+            if (gp && !(gp.kind & 0x800) && gp.type & 0x100) this.follow(gp);
+            const m = mtxSRT(s.mmtx ??= new Float32Array(12), s);
+            p.px = f32(m[3] + madd(m[2], p.pz, madd(m[0], p.px, f32(m[1] * p.py))));
+            p.py = f32(m[7] + madd(m[6], p.pz, madd(m[4], p.px, f32(m[5] * p.py))));
+            p.pz = f32(m[11] + madd(m[10], p.pz, madd(m[8], p.px, f32(m[9] * p.py))));
+            s.used = (s.used ?? 1) - 1;
+            p.srt = null;
             break;
+          }
           case 0xb3: {
             if (p.aCmpCount) {
               const s = part(p.aCmpRemain, p.aCmpCount);

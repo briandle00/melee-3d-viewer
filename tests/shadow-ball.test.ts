@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isShadowBall, shadowBallScale } from "../src/render3d/shadow-ball.ts";
+import { chargeShotScale, isShadowBall, shadowBallScale } from "../src/render3d/shadow-ball.ts";
 import { readGameFile, withGameFiles } from "./game-files.ts";
 
 const MEWTWO = 16;
@@ -19,6 +19,20 @@ test("the ball's size is its recorded charge's, held or thrown, not its state's 
   }
   assert.equal(shadowBallScale(9, 7, 7, 0.5, 2), null);
   assert.equal(shadowBallScale(0, 0, 0, 0.5, 2), null);
+});
+
+test("the charge shot's size: whole charges of the most, in float32, between its two sizes", () => {
+  const f = Math.fround;
+  assert.equal(chargeShotScale(0, 7, 0.5, 2), f(0.5));
+  assert.equal(chargeShotScale(7, 7, 0.5, 2), f(f(7 * f(f(1.5) / 7)) + 0.5));
+  assert.equal(chargeShotScale(3, 7, 0.5, 2), f(f(3 * f(f(1.5) / 7)) + 0.5));
+  // (past the most, the most; a charge not whole, its whole part; no most, 7)
+  assert.equal(chargeShotScale(9, 7, 0.5, 2), chargeShotScale(7, 7, 0.5, 2));
+  assert.equal(chargeShotScale(3.9, 7, 0.5, 2), chargeShotScale(3, 7, 0.5, 2));
+  assert.equal(chargeShotScale(3, 0, 0.5, 2), chargeShotScale(3, 7, 0.5, 2));
+  assert.equal(chargeShotScale(3, 7.5, 0.5, 2), chargeShotScale(3, 7, 0.5, 2));
+  assert.equal(chargeShotScale(3, 7, 0, 2), null);
+  assert.equal(chargeShotScale(3, 7, 0.5, 60), null);
 });
 
 test("game files: only the ball's first grandchild is scaled, after each pose", withGameFiles, async () => {

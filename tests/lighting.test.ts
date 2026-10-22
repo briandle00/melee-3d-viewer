@@ -5,8 +5,8 @@
 import test from "node:test";
 import assertNode from "node:assert/strict";
 import { jointInView, lightsInView, newViewLights, specularDirs } from "../src/render3d/gxlights.ts";
-import { packLighting } from "../src/render3d/lightset.ts";
-import { type GxLight, diffuseChannel } from "../src/render3d/gx.ts";
+import { LightSet, packLighting } from "../src/render3d/lightset.ts";
+import { type GxLight, LOBJ, alphaChannel, diffuseChannel } from "../src/render3d/gx.ts";
 import { HSD_MtxInverseTranspose, PSVECNormalize, mtxToGL3 } from "../src/render3d/gxmath.ts";
 import { MATF, MATI, SHADERS } from "../src/render3d/renderer.ts";
 import { browser, runPage } from "./webgl.ts";
@@ -56,15 +56,47 @@ test("the normal matrix of a turn and a uniform scale is the turn over the scale
   assertNode.deepEqual(Array.from(n, (x) => x + 0), [0, 0.5, 0, -0.5, 0, 0, 0, 0, 0.5]);
 });
 
-test("the vertex shader's lit channel is gx.ts diffuseChannel's, vertex for vertex", { skip: !browser() && "no browser" }, () => {
+test("the alpha channel: lit by the LOBJ_ALPHA lights and the ambient's alpha when it has the flag, else 255", () => {
+  const light = (alpha: boolean, a: number, diffuse = true): GxLight => ({ pos: [0, 0, 1, 0], axis: [0, 0, 1],
+    color: [1, 1, 1, a], attn: [1, 0, 0, 1, 0, 0], diffuse, specular: !diffuse, alpha });
+  const p = [0, 0, 0], n = [0, 0, 1];
+  // (no light in HSD_LObjGetLightMaskAlpha and an ambient without it: HSD_State_80405A38_C0, the register's 255)
+  assertNode.equal(alphaChannel([light(false, 0.5)], null, p, n), 255);
+  // (a specular-only light is not set up as a diffuse one: never in the mask)
+  assertNode.equal(alphaChannel([light(true, 0.5, false)], null, p, n), 255);
+  // (the light's alpha 49 head on, ambient alpha 0: (255 * (49 + 0)) >> 8 = 48)
+  assertNode.equal(alphaChannel([light(true, 49 / 255)], null, p, n), 48);
+  // (the ambient's alpha with LOBJ_ALPHA: the ambient register's, lights or none)
+  assertNode.equal(alphaChannel([], 49 / 255, p, n), 48);
+  assertNode.equal(alphaChannel([light(true, 100 / 255), light(false, 1)], 200 / 255, p, n), 255);
+  // a set's lights: the flag carried to the packed lights (w 4) and the ambient's alpha
+  const set = new LightSet([
+    { desc: 1, kind: "ambient", flags: LOBJ.DIFFUSE | LOBJ.ALPHA, color: [0.5, 0.5, 0.5, 0.25], position: null,
+      interest: null, raw: null, spot: null, dist: null, anim: null },
+    { desc: 2, kind: "infinite", flags: LOBJ.INFINITE | LOBJ.DIFFUSE | LOBJ.ALPHA, color: [1, 1, 1, 1],
+      position: [0, 0, 1], interest: null, raw: null, spot: null, dist: null, anim: null },
+    { desc: 3, kind: "infinite", flags: LOBJ.INFINITE | LOBJ.DIFFUSE | LOBJ.SPECULAR, color: [1, 1, 1, 1],
+      position: [0, 1, 0], interest: null, raw: null, spot: null, dist: null, anim: null },
+    { desc: 4, kind: "infinite", flags: LOBJ.INFINITE | LOBJ.SPECULAR | LOBJ.ALPHA, color: [1, 1, 1, 1],
+      position: [1, 0, 0], interest: null, raw: null, spot: null, dist: null, anim: null },
+  ]).at(0);
+  assertNode.equal(set.ambientAlpha, 0.25);
+  assertNode.deepEqual([3, 7, 11].map((i) => set.attnA[i]), [5, 3, 2]);
+  assertNode.equal(new LightSet([{ desc: 1, kind: "ambient", flags: LOBJ.DIFFUSE, color: [1, 1, 1, 1], position: null,
+    interest: null, raw: null, spot: null, dist: null, anim: null }]).at(0).ambientAlpha, null);
+});
+
+test("the vertex shader's lit channels are gx.ts diffuseChannel's and alphaChannel's, vertex for vertex", { skip: !browser() && "no browser" }, () => {
   // three lights in view space - an infinite one 2^20 out, a point light that fades, a spot - and an ambient
   const lights: GxLight[] = [
-    { pos: [f(0.3 * 1048576), f(0.5 * 1048576), f(0.8 * 1048576), 1], axis: [0, 0, 0], color: [0.8, 0.7, 0.6, 1],
-      attn: [1, 0, 0, 1, 0, 0], diffuse: true, specular: false },
+    { pos: [f(0.3 * 1048576), f(0.5 * 1048576), f(0.8 * 1048576), 1], axis: [0, 0, 0], color: [0.8, 0.7, 0.6, 0.4],
+      attn: [1, 0, 0, 1, 0, 0], diffuse: true, specular: false, alpha: true },
     { pos: [40, 10, -60, 1], axis: [0, 0, 0], color: [0.5, 0.9, 0.2, 1], attn: [1, 0, 0, 1, 0.01, 0.0005], diffuse: true, specular: false },
-    { pos: [-20, 50, -40, 1], axis: [0, 0.6, 0.8], color: [0.3, 0.4, 1, 1], attn: [-2, 3, 0, 1, 0, 0], diffuse: true, specular: false },
+    { pos: [-20, 50, -40, 1], axis: [0, 0.6, 0.8], color: [0.3, 0.4, 1, 0.7], attn: [-2, 3, 0, 1, 0, 0], diffuse: true,
+      specular: false, alpha: true },
   ];
-  const amb = [0.25, 0.3, 0.35], matAmb = [0.6, 0.7, 0.8];
+  // (and the alpha channel: the first and the spot in the alpha mask, with the ambient's alpha)
+  const amb = [0.25, 0.3, 0.35], matAmb = [0.6, 0.7, 0.8], ambA = 0.1;
   let seed = 7;
   const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296; };
   const n = 512, pos: number[] = [], nrm: number[] = [];
@@ -75,7 +107,8 @@ test("the vertex shader's lit channel is gx.ts diffuseChannel's, vertex for vert
   }
   const L = packLighting([0, 0, 0], lights);
   const want = Array.from({ length: n }, (_, i) =>
-    diffuseChannel(lights, amb, matAmb, pos.slice(i * 3, i * 3 + 3), nrm.slice(i * 3, i * 3 + 3)));
+    [...diffuseChannel(lights, amb, matAmb, pos.slice(i * 3, i * 3 + 3), nrm.slice(i * 3, i * 3 + 3)),
+     alphaChannel(lights, ambA, pos.slice(i * 3, i * 3 + 3), nrm.slice(i * 3, i * 3 + 3))]);
   const got = runPage<number[]>(`
 const gl = document.createElement("canvas").getContext("webgl2");
 const S = ${JSON.stringify(SHADERS)};
@@ -94,7 +127,7 @@ const I4 = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
 gl.uniformMatrix4fv(U("uMats"), false, I4); gl.uniformMatrix4fv(U("uMV"), false, I4); gl.uniformMatrix4fv(U("uProj"), false, I4);
 gl.uniformMatrix4fv(U("uView"), false, I4); gl.uniformMatrix4fv(U("uViewProj"), false, I4);
 gl.uniformMatrix3fv(U("uNrm"), false, new Float32Array([1,0,0, 0,1,0, 0,0,1]));
-gl.uniform3fv(U("uAmbLight"), ${JSON.stringify(amb)});
+gl.uniform3fv(U("uAmbLight"), ${JSON.stringify(amb)}); gl.uniform1f(U("uAmbA"), ${ambA});
 gl.uniform1i(U("uNumLights"), ${L.n});
 gl.uniform4fv(U("uLPosV"), ${JSON.stringify(Array.from(L.pos))});
 gl.uniform4fv(U("uLAxisV"), ${JSON.stringify(Array.from(L.axis))});
@@ -122,7 +155,7 @@ const r = new Float32Array(${n} * 4); gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_
 done(Array.from(r));`);
   let exact = 0, worst = 0;
   for (let i = 0; i < n; i++) {
-    for (let c = 0; c < 3; c++) {
+    for (let c = 0; c < 4; c++) {
       const g = Math.round(got[i * 4 + c] * 255), d = Math.abs(g - want[i][c]);
       worst = Math.max(worst, d);
       if (d === 0) exact++;
@@ -130,5 +163,5 @@ done(Array.from(r));`);
   }
   // (the GPU's float against JS's double: a term on a rounding edge may land a level the other way)
   assertNode.ok(worst <= 1, `worst ${worst} levels`);
-  assertNode.ok(exact >= n * 3 * 0.98, `exact ${exact} of ${n * 3}`);
+  assertNode.ok(exact >= n * 4 * 0.98, `exact ${exact} of ${n * 4}`);
 });

@@ -16,7 +16,7 @@
 import { Archive, Image, MObj, TObj, Tlut, decodeImage } from "./hsd";
 import { DrawGroup, Drawable, MatState, Skeleton, TexState, billboardViewOf } from "./skeleton";
 import { Mat, invert, lookAt, mul } from "./math";
-import { HSD_MtxInverseTranspose, concatGL, mtxFromGL, mtxToGL3 } from "./gxmath";
+import { HSD_MtxInverseTranspose, PSMTXConcat, concatGL, mkBillBoardMtx, mtxFromGL, mtxToGL, mtxToGL3 } from "./gxmath";
 import { type ViewLights, jointInView, lightsInView, newViewLights, specularDirs } from "./gxlights";
 import { SHADOW_SIZE, shadowGray } from "./shadow";
 import type { Tint as ColTint } from "./fx/colanim";
@@ -180,7 +180,7 @@ ivec4 tevProgram() {
 }`;
 
 const VS = `#version 300 es
-in vec3 aPos; in vec3 aNrm; in vec2 aUv0; in vec2 aUv1; in vec4 aClr; in float aMtx; in vec3 aBin; in vec3 aTan;
+in vec3 aPos; in vec3 aNrm; in vec2 aUv0; in vec2 aUv1; in vec2 aUv2; in vec4 aClr; in float aMtx; in vec3 aBin; in vec3 aTan;
 uniform mat4 uViewProj;
 uniform mat4 uView;
 uniform mat4 uMats[10];
@@ -195,8 +195,9 @@ uniform float uPointSize; // a point list's points, pixels across (GX's point si
 ${MAT_DECL}
 // the lights (lightset.ts): the ambient, then each light's place (w 1) or
 // the way to it (w 0), axis, color, angle attenuation (w: 1 diffuse, 2
-// specular) and distance attenuation
+// specular, 4 alpha) and distance attenuation
 uniform vec3 uAmbLight;
+uniform float uAmbA; // the ambient light's alpha when it has LOBJ_ALPHA, else -1
 uniform int uNumLights;
 uniform vec4 uLPos[8]; uniform vec4 uLAxis[8]; uniform vec4 uLCol[8]; uniform vec4 uLA[8]; uniform vec4 uLK[8];
 uniform vec3 uEye;    // the camera, world space
@@ -220,7 +221,7 @@ out vec4 vRas0; out vec3 vRas1; out vec3 vT0; out vec3 vT1; out vec3 vT2; out ve
 out vec3 vNrmV; out vec3 vPosV; out float vOverA; out vec3 vPosW;
 out vec2 vBump; // an emboss bump map's coordinates, shifted toward the first diffuse light
 
-vec3 texGen(int i, vec2 uv0, vec2 uv1, vec3 nv, vec4 W) {
+vec3 texGen(int i, vec2 uv0, vec2 uv1, vec2 uv2, vec3 nv, vec4 W) {
   int kind = uMatI[1][i];
   vec4 r0 = uMatF[6 + i * 3], r1 = uMatF[7 + i * 3], r2 = uMatF[8 + i * 3];
   if (kind == 4) {
@@ -248,7 +249,7 @@ vec3 texGen(int i, vec2 uv0, vec2 uv1, vec3 nv, vec4 W) {
     float e = 0.5 - 0.5 * dot(h, nv);
     return vec3(r0.x * e + r0.w, r1.x * e + r1.w, 1.0);
   }
-  vec2 uv = kind == 1 ? uv1 : uv0;
+  vec2 uv = kind == 1 ? uv1 : kind == 5 ? uv2 : uv0;
   return vec3(dot(r0, vec4(uv, 1.0, 1.0)), dot(r1, vec4(uv, 1.0, 1.0)), 1.0);
 }
 
@@ -275,25 +276,55 @@ vec3 chanOut(ivec3 acc) { ivec3 l = clamp(acc, 0, 255); return vec3((255 * (l + 
 // infinite one 2^20 out - its way to the vertex normalized, its spot attenuation by that way and its axis, its
 // distance attenuation by the distance)
 vec3 toLightV(vec3 p, vec3 V, out float dist) { vec3 v = p - V; dist = length(v); return v / max(dist, 1e-30); }
+// (a diffuse light's angle and distance attenuation times the normal's turn to it)
+float diffuseTurn(int k, vec3 V, vec3 N) {
+  vec4 a = uLA[k];
+  float dist;
+  vec3 ld = toLightV(uLPosV[k].xyz, V, dist);
+  float c = max(dot(ld, uLAxisV[k].xyz), 0.0);
+  vec3 kk = uLK[k].xyz;
+  float att = max(a.x + a.y * c + a.z * c * c, 0.0) / (kk.x + kk.y * dist + kk.z * dist * dist);
+  return att * max(dot(N, ld), 0.0);
+}
 vec3 diffuseLights(vec3 V, vec3 N) {
   ivec3 L = (bytes3(uAmbLight) * bytes3(uMatF[1].rgb)) / 255;
   bool first = firstLightOnly();
   for (int k = 0; k < 8; k++) {
     if (k >= uNumLights || (first && k > 0)) break;
-    vec4 a = uLA[k];
-    if ((int(a.w) & 1) == 0 || uOverMode == 2) continue;
-    float dist;
-    vec3 ld = toLightV(uLPosV[k].xyz, V, dist);
-    float c = max(dot(ld, uLAxisV[k].xyz), 0.0);
-    vec3 kk = uLK[k].xyz;
-    float att = max(a.x + a.y * c + a.z * c * c, 0.0) / (kk.x + kk.y * dist + kk.z * dist * dist);
-    L += term(att * max(dot(N, ld), 0.0), uLCol[k].rgb);
+    if ((int(uLA[k].w) & 1) == 0 || uOverMode == 2) continue;
+    L += term(diffuseTurn(k, V, N), uLCol[k].rgb);
   }
   float od;
   vec3 ol = toLightV(uOverPosV, V, od);
   if (uOverMode == 2) L += term(max(dot(N, ol), 0.0), uOverLight.rgb);
   else if (uOverMode == 1 && !first) L += term(max(dot(N, ol), 0.0), vec3(1.0));
   return chanOut(L);
+}
+
+// the alpha channel (gx.ts alphaChannel; HSD_SetupChannelMode's lit case, HSD_State_80405A38_90): lit when the
+// ambient light has LOBJ_ALPHA (its alpha the ambient register's) or a light is in HSD_LObjGetLightMaskAlpha (w 4,
+// ambient alpha 0) - each such light's alpha by its attenuation and turn, rounded, as the color's terms, the sum
+// clamped, times the register's 255 - else unlit (HSD_State_80405A38_C0): 255
+// (a color animation's added light has LOBJ_ALPHA, ftCo_8009F5AC, and is in the mask with the set's own; while it
+// lights alone, or for a see-through material whose channels are set with the ambient and x588 alone, x588 has it
+// cleared, ftCo_8009F75C(fp, false): the mask is empty)
+float alphaLights(vec3 V, vec3 N) {
+  bool lit = uAmbA >= 0.0;
+  int A = lit ? bytes3(vec3(uAmbA)).x : 0;
+  bool own = uOverMode == 0 || (uOverMode == 1 && !firstLightOnly());
+  for (int k = 0; k < 8; k++) {
+    if (k >= uNumLights || !own) break;
+    if ((int(uLA[k].w) & 4) == 0) continue;
+    lit = true;
+    A += term(diffuseTurn(k, V, N), vec3(uLCol[k].a)).x;
+  }
+  if (own && uOverMode == 1) {
+    float od;
+    vec3 ol = toLightV(uOverPosV, V, od);
+    lit = true;
+    A += term(max(dot(N, ol), 0.0), vec3(uOverLight.a)).x;
+  }
+  return lit ? chanOut(ivec3(A)).x : 1.0;
 }
 
 // the specular channel: each specular light aimed along the half-way vector
@@ -334,23 +365,20 @@ void main() {
   ivec4 m0 = uMatI[0];
   vRas0 = vec4(1.0);
   if (m0.y == 1) vRas0 = aClr;
-  else if (m0.y == 2) vRas0 = vec4(diffuseLights(pv, nv), 1.0);
+  else if (m0.y == 2) vRas0 = vec4(diffuseLights(pv, nv), alphaLights(pv, nv));
   vRas1 = (m0.z & 4) != 0 ? specularLights(pv, nv) : vec3(0.0);
-  // (the added color is the light's times the rasterized alpha, GX_CC_RASA: a lit material's alpha channel is
-  // lit by the added light alone (LOBJ_ALPHA); an unlit one's is its vertex alpha or its material's)
-  // (the alpha channel's byte: the light's alpha by the turn, through the channel; the fragment shader adds
-  // the light's color times it, ftMaterial_800BF534's stage)
-  float od;
-  vec3 ol = toLightV(uOverPosV, pv, od);
-  float rasA = m0.y == 2 ? chanOut(term(max(dot(nv, ol), 0.0), vec3(uOverLight.a))).x : m0.y == 1 ? aClr.a : uMatF[0].a;
+  // (the added color is the light's times the rasterized alpha, GX_CC_RASA: a lit material's alpha channel -
+  // the added light's alpha by the turn with the set's alpha lights', alphaLights; an unlit one's is its vertex
+  // alpha or its material's; the fragment shader adds the light's color times it, ftMaterial_800BF534's stage)
+  float rasA = m0.y == 2 ? vRas0.a : m0.y == 1 ? aClr.a : uMatF[0].a;
   vOverA = uOverMode == 1 ? rasA : -1.0;
   // (and that lit alpha is the rasterized alpha the material's alpha stage takes, lerp(0, alpha, ras.a), as it
   // is the color's: while the light adds, a lit material's alpha is its alpha times the light's alpha by the turn)
   if (m0.y == 2 && uOverMode == 1) vRas0.a = rasA;
-  vT0 = texGen(0, aUv0, aUv1, nv, w);
-  vT1 = texGen(1, aUv0, aUv1, nv, w);
-  vT2 = texGen(2, aUv0, aUv1, nv, w);
-  vT3 = texGen(3, aUv0, aUv1, nv, w);
+  vT0 = texGen(0, aUv0, aUv1, aUv2, nv, w);
+  vT1 = texGen(1, aUv0, aUv1, aUv2, nv, w);
+  vT2 = texGen(2, aUv0, aUv1, aUv2, nv, w);
+  vT3 = texGen(3, aUv0, aUv1, aUv2, nv, w);
   // GX's bump texture coordinates: the map's own, moved by the first
   // diffuse light's direction along the tangent and the binormal
   int bs = ((m0.z >> 4) & 7) - 1;
@@ -515,8 +543,8 @@ export const SHADERS = { VS, FS, PARTICLE_VS, PARTICLE_FS, TEV_GLSL, TEV_PROG_GL
 
 // the model programs' attribute slots (the meshes' vertex arrays serve both),
 // the uniforms looked up once they are linked, and the particles' slots
-const ATTRS = ["aPos", "aNrm", "aUv0", "aUv1", "aClr", "aMtx", "aBin", "aTan"];
-const UNIFORMS = ["uViewProj", "uView", "uMats", "uMV", "uProj", "uAmbLight", "uNumLights", "uLPos", "uLAxis",
+const ATTRS = ["aPos", "aNrm", "aUv0", "aUv1", "aUv2", "aClr", "aMtx", "aBin", "aTan"];
+const UNIFORMS = ["uViewProj", "uView", "uMats", "uMV", "uProj", "uAmbLight", "uAmbA", "uNumLights", "uLPos", "uLAxis",
                   "uLCol", "uLA", "uLK", "uEye", "uNrm", "uLPosV", "uLAxisV", "uLSpecV", "uOverPosV", "uTint", "uTex0", "uTex1", "uTex2", "uTex3", "uInflate",
                   "uFlat", "uOutline", "uFlash", "uOverColor", "uOverLight", "uOverDir", "uOverMode",
                   "uFogI", "uFogF", "uFogColor", "uPointSize", "uShadow0", "uShadow1", "uShadow2", "uShadow3", "uShadowM",
@@ -818,11 +846,11 @@ export class Renderer {
     const fits = (m: Drawable["mesh"]) => {
       const n = m.mtx.length;
       return m.pos.length === n * 3 && m.nrm.length === n * 3 && m.uv.length === n * 2 && m.uv1.length === n * 2 && m.clr.length === n * 4 &&
-        (!m.bin || !m.tan || (m.bin.length === n * 3 && m.tan.length === n * 3));
+        (!m.uv2 || m.uv2.length === n * 2) && (!m.bin || !m.tan || (m.bin.length === n * 3 && m.tan.length === n * 3));
     };
     const ds: Drawable[] = [];
     const seen = new Set<string>();
-    let nv = 0, ni = 0, nbt = false;
+    let nv = 0, ni = 0, nbt = false, nt2 = false;
     for (const d of g.drawables) {
       if (seen.has(d.key) || !fits(d.mesh)) continue;
       seen.add(d.key);
@@ -830,11 +858,14 @@ export class Renderer {
       nv += d.mesh.mtx.length;
       ni += d.mesh.indices.length;
       if (d.mesh.bin && d.mesh.tan) nbt = true;
+      if (d.mesh.uv2) nt2 = true;
     }
     const pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3), uv0 = new Float32Array(nv * 2), uv1 = new Float32Array(nv * 2);
     const clr = new Float32Array(nv * 4), mtx = new Float32Array(nv);
     // (the meshes without binormals and tangents read zeros, as an attribute left off does)
     const bin = nbt ? new Float32Array(nv * 3) : null, tan = nbt ? new Float32Array(nv * 3) : null;
+    // (and those without a third texture coordinate set zeros)
+    const uv2 = nt2 ? new Float32Array(nv * 2) : null;
     const wide = nv > 65536;
     const idx = wide ? new Uint32Array(ni) : new Uint16Array(ni);
     const type = wide ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT, bytes = wide ? 4 : 2;
@@ -845,6 +876,7 @@ export class Renderer {
       const m = d.mesh, n = m.mtx.length, ix = m.indices;
       pos.set(m.pos, v * 3); nrm.set(m.nrm, v * 3); uv0.set(m.uv, v * 2); uv1.set(m.uv1, v * 2); clr.set(m.clr, v * 4); mtx.set(m.mtx, v);
       if (bin && tan && m.bin && m.tan) { bin.set(m.bin, v * 3); tan.set(m.tan, v * 3); }
+      if (uv2 && m.uv2) uv2.set(m.uv2, v * 2);
       for (let k = 0; k < ix.length; k++) idx[i + k] = ix[k] + v;
       meshes.set(d.key, { vao, buffers: [], count: ix.length, type, mode: m.points ? gl.POINTS : gl.TRIANGLES, offset: i * bytes });
       v += n;
@@ -862,6 +894,7 @@ export class Renderer {
     };
     buf(pos, "aPos", 3); buf(nrm, "aNrm", 3); buf(uv0, "aUv0", 2); buf(uv1, "aUv1", 2); buf(clr, "aClr", 4); buf(mtx, "aMtx", 1);
     if (bin && tan) { buf(bin, "aBin", 3); buf(tan, "aTan", 3); }
+    if (uv2) buf(uv2, "aUv2", 2);
     const ib = gl.createBuffer()!;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
@@ -902,6 +935,7 @@ export class Renderer {
     buf(d.mesh.mtx, "aMtx", 1);
     // (a mesh without binormals and tangents reads zeros: the attributes stay off)
     if (d.mesh.bin && d.mesh.tan) { buf(d.mesh.bin, "aBin", 3); buf(d.mesh.tan, "aTan", 3); }
+    if (d.mesh.uv2) buf(d.mesh.uv2, "aUv2", 2);
     const ib = gl.createBuffer()!;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, d.mesh.indices, gl.STATIC_DRAW);
@@ -1246,7 +1280,7 @@ void main() {
    *  over the match), or into a target, cleared to a color first (the
    *  magnifier's picture). endOverlay() puts the match camera back. */
   overlay(proj: Mat, view: Mat, target: RenderTarget | null = null, clear: [number, number, number, number] | null = null,
-          mirrored = false) {
+          mirrored = false, gx: Float32Array | null = null) {
     const gl = this.gl;
     this.endPass();
     // (a camera that turns the picture over turns the faces' winding too)
@@ -1267,8 +1301,11 @@ void main() {
     gl.uniformMatrix4fv(this.loc.uView, false, this.ovView);
     gl.uniformMatrix4fv(this.loc.uProj, false, this.ovProj);
     this.camera(viewProj, this.ovView, this.ovProj);
+    // (the GX projection it was made from, when the caller has one: for the draw log)
+    if (gx) this.camGx = (this.ovGx.set(gx), this.ovGx);
     this.dirty();
   }
+  private ovGx = new Float32Array(16);
 
   private mirrored = false;
   private overlayVP: Mat | null = null;
@@ -1568,6 +1605,7 @@ void main() {
     const gl = this.gl;
     this.litVersion.set(p, l.version);
     gl.uniform3fv(loc.uAmbLight, l.ambient);
+    gl.uniform1f(loc.uAmbA, l.ambientAlpha ?? -1);
     gl.uniform1i(loc.uNumLights, l.n);
     gl.uniform4fv(loc.uLPos, l.pos);
     gl.uniform4fv(loc.uLAxis, l.axis);
@@ -1914,8 +1952,17 @@ void main() {
   private uploadMats(M: Float32Array, count: number, d: Drawable | null = null) {
     const n = count * 16, V = this.shifted ? this.shiftView : this.camView, MV = this.mvBuf;
     // (a billboard drawn through the view it was made under: its modelview as the game made it - every slot but a
-    // shared-vertex skin's second joint's)
-    const bb = d && d.bbMV && d.bbMVView === this.bbFrame && !this.shifted && this.camView === this.view ? d.bbMV : null;
+    // shared-vertex skin's second joint's; the frame's camera or another's, the mirror's)
+    let bb = d && d.bbMV && !this.shifted && d.bbMVView === (this.camView === this.view ? this.bbFrame : billboardViewOf(this.camView))
+      ? d.bbMV : null;
+    // (one drawn through another camera it was not posed under - a mirror's, a shadow's - made again under that
+    // camera's view, as HSD_JObjMakePositionMtx makes it with the vmtx of the camera drawing)
+    if (!bb && d && d.bbMV && d.bbW && d.bbKind && !this.shifted) {
+      const V12 = mtxFromGL(V, this.bbV12, 0), W12 = mtxFromGL(d.bbW, this.bbW12, 0);
+      PSMTXConcat(V12, W12, W12);
+      mkBillBoardMtx(d.bbKind, d.bbPersp ?? false, d.bbRotZ ?? 0, W12, this.bbP12);
+      bb = mtxToGL(this.bbP12, this.bbMVAgain);
+    }
     const N = this.nrmBuf, T = this.nrmTmp;
     for (let k = 0; k < count; k++) {
       if (bb && !(k === 1 && d!.second >= 0)) MV.set(bb, k * 16);
@@ -1929,6 +1976,10 @@ void main() {
     this.lastMatsN = n;
     this.lastMatsView = this.viewVer;
   }
+  private bbV12 = new Float32Array(12);
+  private bbW12 = new Float32Array(12);
+  private bbP12 = new Float32Array(12);
+  private bbMVAgain = new Float32Array(16);
   private lastMats = new Float32Array(32);
   private lastMatsN = 0;
   private lastMatsView = -1;
@@ -1956,7 +2007,9 @@ void main() {
     const l = this.lighting, K = this.lightVKey;
     if (!l || (K[0] === l.version && K[1] === this.viewVer && K[2] === this.overVer)) return;
     K[0] = l.version; K[1] = this.viewVer; K[2] = this.overVer;
-    const V = mtxFromGL(this.shifted ? this.shiftView : this.camView, this.lightMtx, 0);
+    // (by the camera as it is, a shake or not: the game sets the lights up from the current camera
+    // (ftCo_8009F5AC's HSD_LObjSetupInit) and only the meshes' modelview takes the shake (ftDrawCommon_8008051C))
+    const V = mtxFromGL(this.camView, this.lightMtx, 0);
     const v = lightsInView(l, V, this.overDir, this.lightV);
     const gl = this.gl, loc = this.loc;
     gl.uniform4fv(loc.uLPosV, v.pos);
@@ -2110,8 +2163,8 @@ void main() {
     this.mirrorCache.tex = this.mirror && this.mirrorDrawn ? this.mirror.tex : this.white;
     return this.mirrorCache;
   }
-  /** returns the mirror camera's right and up (world directions: what faces it) */
-  beginMirror(): { right: number[]; up: number[] } {
+  /** returns the mirror camera's right and up (world directions: what faces it), its view and its projection */
+  beginMirror(): { right: number[]; up: number[]; view: Mat; viewProj: Mat } {
     const gl = this.gl;
     if (!this.mirror) {
       const tex = gl.createTexture()!;
@@ -2168,7 +2221,9 @@ void main() {
     this.overlayVP = this.mirrorViewProj;
     this.dirty();
     const mv = this.mirrorView;
-    return { right: [mv[0], mv[4], mv[8]], up: [mv[1], mv[5], mv[9]] };
+    // (and the mirror camera's view and projection: the particles it draws are sized and turned by its view, the
+    // vmtx psDispSubAppSRT is handed when grIzumi_801CCEA0's camera draws them)
+    return { right: [mv[0], mv[4], mv[8]], up: [mv[1], mv[5], mv[9]], view: this.mirrorView, viewProj: this.mirrorViewProj };
   }
   endMirror() {
     const gl = this.gl;

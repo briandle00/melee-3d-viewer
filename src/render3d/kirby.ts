@@ -45,6 +45,10 @@ export interface KirbyHat {
   prop: Prop | null;
   /** a hat in Kirby's colors: a skeleton like his, posed as he is */
   skin: Skeleton | null;
+  /** a colored hat's meshes hidden in the passes that draw his low-detail model - the shadows' and a
+   *  mirror's (ftDrawCommon_80081200, ftDrawCommon_80080C28: ftParts_800750C8 hides lookup 0 and shows
+   *  lookup 1, which ftKb_UnkIntBoolFunc0 does to the hat's meshes too) */
+  lowHidden?: Set<number>;
   /** Mr. Game & Watch's: the outline's shells (drawn first, in its color,
    *  as his are), and how thin it is across (ftKb_SpecialN_800F14B4) */
   outline?: { shown: Set<number>; hidden: Set<number>; color: [number, number, number, number] };
@@ -53,6 +57,8 @@ export interface KirbyHat {
    *  its symbol's +0x10), and its joints' map onto his (hatJointMap) */
   mask?: number;
   map?: number[];
+  /** and each of its joints' part in his part list (hatJointParts) */
+  parts?: number[];
   /** a colored hat's face: the textures turned with Kirby's own (its
    *  symbol's +8: ftKb_Init_UnkCallbackPairs0_1, face.ts) */
   face?: FaceTextures | null;
@@ -73,8 +79,9 @@ export function hatFiles(kind: number, costume: number): [string, string | null]
 /** a parts visibility description (FtPartsDesc: model count, then the tables
  *  per costume): the meshes to hide - lookups 1 and 3 (the game shows every
  *  variant of a hat's lookup 0 while it draws: ftKb_UnkIntBoolFunc0,
- *  ftParts_80074CA0) */
-function hiddenBy(a: Archive, desc: number, costume = 0, metal = false): Set<number> {
+ *  ftParts_80074CA0); with `shownLookup` 1, its low-detail look's: lookups 0
+ *  and 3 hidden, every variant of lookup 1 shown */
+function hiddenBy(a: Archive, desc: number, costume = 0, metal = false, shownLookup = 0): Set<number> {
   const d = a.data, out = new Set<number>(), shown = new Set<number>();
   const n = d.getUint32(desc), vis = ptr(a, desc + 4);
   if (vis === null || n > 64) return out;
@@ -85,7 +92,7 @@ function hiddenBy(a: Archive, desc: number, costume = 0, metal = false): Set<num
       const count = d.getUint32(lk + m * 8), list = ptr(a, lk + m * 8 + 4);
       for (let v = 0; v < count && v < 64 && list !== null; v++) {
         const c = d.getUint32(list + v * 8), ids = ptr(a, list + v * 8 + 4);
-        for (let i = 0; i < c && i < 256 && ids !== null; i++) (k === 0 ? shown : out).add(d.getUint8(ids + i));
+        for (let i = 0; i < c && i < 256 && ids !== null; i++) (k === shownLookup ? shown : out).add(d.getUint8(ids + i));
       }
     }
   }
@@ -120,7 +127,8 @@ export function loadHat(kind: number, data: ArrayBuffer, colored: ArrayBuffer | 
     if (!share) return null;
     const { all, dobjs } = loadJoint(m, share[1]);
     const skin = new Skeleton(m, all, dobjs, `${tag}:kbhat`);
-    hiddenBy(a, sym, costume).forEach((i) => skin.hidden.add(i));
+    const normal = hiddenBy(a, sym, costume);
+    normal.forEach((i) => skin.hidden.add(i));
     const hat: KirbyHat = { prop: null, skin, mask: a.data.getUint32(sym + 0x10),
                             face: faceTextures(a, sym + 8, costume, m, skin, all) };
     // Mr. Game & Watch's copy: its outline's lookup (+0x18), and its looks
@@ -143,6 +151,9 @@ export function loadHat(kind: number, data: ArrayBuffer, colored: ArrayBuffer | 
       const w = d.getFloat32(looks);
       if (w > 0.001 && w < 10) hat.thin = w;
     }
+    // (the low-detail look: lookup 1's meshes for lookup 0's, the rest hidden as they always are)
+    hat.lowHidden = hiddenBy(a, sym, costume, false, 1);
+    skin.hidden.forEach((i) => { if (!normal.has(i)) hat.lowHidden!.add(i); });
     return hat;
   }
   const joint = ptr(a, sym);
@@ -169,14 +180,25 @@ export function loadHat(kind: number, data: ArrayBuffer, colored: ArrayBuffer | 
  *  joints its copy adds where his part list keeps room for them (the
  *  entries of PlCo.dat's table its copy's mask names: ftKb_SpecialN_800EF040).
  *  For each of the hat's joints: his model's joint it moves as, or -1 for
- *  one of its own (left at its rest pose: the game swings them as loose
- *  bones, which is not done here) */
+ *  one of its own (the game swings them as loose bones: left at its rest
+ *  pose unless the viewer track has them, poseSkin) */
 export function hatJointMap(hatJoints: number, mask: number): number[] {
   const skips = partSkips(KIRBY), out: number[] = [];
   for (let p = 0; out.length < hatJoints && p < hatJoints + skips.length; p++) {
     const i = skips.indexOf(p);
     if (i < 0) out.push(partToModelJoint(KIRBY, p, skips));
     else if (mask & (1 << i)) out.push(-1);
+  }
+  return out;
+}
+
+/** each of a colored hat's joints' part in Kirby's part list (hatJointMap's walk): his own parts, and the
+ *  room his list keeps for the copy's extra joints, which ftKb_SpecialN_800EF040 fills with them */
+export function hatJointParts(hatJoints: number, mask: number): number[] {
+  const skips = partSkips(KIRBY), out: number[] = [];
+  for (let p = 0; out.length < hatJoints && p < hatJoints + skips.length; p++) {
+    const i = skips.indexOf(p);
+    if (i < 0 || mask & (1 << i)) out.push(p);
   }
   return out;
 }
@@ -207,15 +229,34 @@ export function yoshiHatAnim(state: (k: number) => number | undefined): { slot: 
   return { slot: first === YS_AIR_START || first === 419 || first === 420 ? 3 : 1, frame: k };
 }
 
-/** a skinned hat posed as Kirby is: his joints' pose copied, then its matrices */
-export function poseSkin(hat: KirbyHat, kirby: Skeleton) {
+/** a skinned hat posed as Kirby is: his joints' pose copied, then its matrices. `swung`: his joints as the
+ *  viewer track has them, by part (its "fj" and "fp" lines: rot, scale, translate, NaN for a value not sent),
+ *  laid on the hat's own joints - the copy's extra joints are his parts while he wears it, and the copy's
+ *  swinging chain (Mewtwo's tail: ftCo_8009DB50) moves them */
+export function poseSkin(hat: KirbyHat, kirby: Skeleton, ...swung: (Map<number, Float32Array> | null | undefined)[]) {
   const sk = hat.skin!;
   // (once PlCo.dat's table is in; until then joint for joint)
-  if (!hat.map && partSkips(KIRBY).length) hat.map = hatJointMap(sk.n, hat.mask ?? 0);
+  if (!hat.map && partSkips(KIRBY).length) {
+    hat.map = hatJointMap(sk.n, hat.mask ?? 0);
+    hat.parts = hatJointParts(sk.n, hat.mask ?? 0);
+  }
   const map = hat.map ?? Array.from({ length: sk.n }, (_, i) => i);
   sk.resetPose();
   map.forEach((j, h) => {
-    if (j < 0 || j >= kirby.n) return;
+    if (j < 0) {
+      const p = hat.parts?.[h];
+      for (const by of swung) {
+        const v = p === undefined ? undefined : by?.get(p);
+        if (!v) continue;
+        for (let k = 0; k < 3; k++) {
+          if (!Number.isNaN(v[k])) sk.rot[h * 3 + k] = v[k];
+          if (!Number.isNaN(v[3 + k])) sk.scale[h * 3 + k] = v[3 + k];
+          if (!Number.isNaN(v[6 + k])) sk.trans[h * 3 + k] = v[6 + k];
+        }
+      }
+      return;
+    }
+    if (j >= kirby.n) return;
     for (let k = 0; k < 3; k++) {
       sk.rot[h * 3 + k] = kirby.rot[j * 3 + k];
       sk.scale[h * 3 + k] = kirby.scale[j * 3 + k];

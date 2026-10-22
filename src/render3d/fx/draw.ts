@@ -11,7 +11,8 @@
  * here. */
 import { K, Particle } from "./particles";
 import type { Sprite } from "./bank";
-import { appExtents, appMatrix, mtxDir, mtxPoint } from "./appsrt";
+import { appExtents, appMatrix, drawPoint, followMatrix, mtxDir, mtxPoint } from "./appsrt";
+import { PSMTXInverse, PSMTXMultVec, mtxFromGL } from "../gxmath";
 
 export const FLOATS = 17; // pos 3, uv 2, prim 4, env 4, alpha-compare 3, textured 1
 
@@ -52,6 +53,9 @@ export function psColorByte(cur: number, target: number, remain: number, count: 
 const mixed = psColorByte;
 
 const WORLD_AXES = { right: [1, 0, 0], up: [0, 1, 0] };
+// (the camera's view as GX's 3 x 4 and its inverse, the follow-only transforms' draw matrix, points: kept)
+const viewG = new Float32Array(12), viewInv = new Float32Array(12), followM = new Float32Array(12);
+const curV = [0, 0, 0], prevV = [0, 0, 0], curW = [0, 0, 0], prevW = [0, 0, 0];
 // (the game skips a particle smaller than this: psDispParticles' FLT_EPSILON; and FLT_MIN, below which a
 // motion's up part counts as none)
 const FLT_EPSILON = 1.1920929e-7, FLT_MIN = 1.1754944e-38;
@@ -97,19 +101,35 @@ export function buildParticles(list: Particle[],
   if (scratch.length < need) scratch = new Float32Array(need * 2);
   const out = scratch;
   let o = 0;
+  // (with the camera's view, a follow-only transform's particles are placed as the game places them: in its
+  // space, then back into the world for the renderer, which takes them through the view again)
+  const haveView = !!axes.view && PSMTXInverse(mtxFromGL(axes.view, viewG, 0), viewInv) === 1;
   for (let qi = 0; qi < kept; qi++) {
     const p = list[order[qi]];
     const textured = groups[batchOf[qi]].sprite ? 1 : 0;
     // where it is, and how big, through its transform (psDispSubAppSRT): its matrix (HSD_MtxSRT, kept as made
     // once it is STILL), and a quad as wide as |the camera's view times it's first column| times the size and as
     // tall as |its second column| times it (appsrt.ts); under a generator's own transform that only
-    // follows (its kind's 0x20000: the game's xA2), the particle's place and motion are in the camera's axes
-    // from the transform's place, not turned or sized by it
+    // follows (its kind's 0x20000: the game's xA2), the quad is sized the same way but the particle's place
+    // and motion are in the camera's axes from the transform's place, not turned or scaled by it
     let cx = p.px, cy = p.py, cz = p.pz, ex = p.size, ey = p.size;
     let wx = p.vx, wy = p.vy, wz = p.vz;
     const srt = p.srt;
     if (srt) {
-      if (srt.view) {
+      if (srt.view && haveView) {
+        // psDispSubAppSRT's xA2 path: the quad sized by |vmtx mmtx| as any transform's, the particle placed by
+        // the follow matrix (the transform's place through the view, that matrix's scale alone), where it was a
+        // step of its velocity back the same way
+        [ex, ey] = appExtents(appMatrix(srt), p.size, axes.view);
+        followMatrix(srt, viewG, followM);
+        drawPoint(followM, p.px, p.py, p.pz, curV);
+        const dz = Math.fround(p.pz - p.vz), dx = Math.fround(p.px - p.vx), dy = Math.fround(p.py - p.vy);
+        drawPoint(followM, dx, dy, dz, prevV);
+        PSMTXMultVec(viewInv, curV, curW);
+        PSMTXMultVec(viewInv, prevV, prevW);
+        cx = curW[0]; cy = curW[1]; cz = curW[2];
+        wx = curW[0] - prevW[0]; wy = curW[1] - prevW[1]; wz = curW[2] - prevW[2];
+      } else if (srt.view) {
         ex = p.size * Math.abs(srt.sx); ey = p.size * Math.abs(srt.sy);
         const B0 = R[1] * U[2] - R[2] * U[1], B1 = R[2] * U[0] - R[0] * U[2], B2 = R[0] * U[1] - R[1] * U[0];
         cx = srt.tx + p.px * R[0] + p.py * U[0] + p.pz * B0;

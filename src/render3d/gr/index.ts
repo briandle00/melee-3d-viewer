@@ -8,13 +8,15 @@
  * started ("ganim") and of Battlefield's background ("bg"), and each
  * stage's own logic (Final Destination's background, Dream Land's Whispy
  * and birds, Fountain of Dreams' water, Pokemon Stadium's screen) - from the
- * track when it has what is needed, else worked out the game's way.
+ * track when it has what is needed, else worked out the game's way - and,
+ * last, the joints as the game posed them, when the track has them ("sp").
  */
 import type { ReplayData } from "~/common/types";
 import type { Stage, StageLogic } from "../stage";
 import type { StageFrame } from "../stage";
 import type { ViewerTrack } from "../track";
 import { TrackAnims } from "./anims";
+import { TrackJoints } from "./joints";
 import { FinalDestination, fixedSchedule, trackSchedule } from "./finaldest";
 import { Emitter, StageParticles } from "./particles";
 import { Fountain } from "./fountain";
@@ -100,6 +102,8 @@ export class StageScene implements StageLogic {
       this.parts.push(this.screen);
       emitters.push(...this.screen.emitters);
     }
+    // (the joints as the game posed them, when the track has them: over all of the above)
+    if (track?.has("sp")) this.parts.push(new TrackJoints(track));
     st.logic = this;
     this.particles = new StageParticles(st);
     this.particles.emitters = track?.has("sgen") ? withTrackGens(st, track, emitters) : emitters;

@@ -168,3 +168,14 @@ test("the matrices move to and from GL's column-major 4 x 4s unchanged", () => {
 });
 
 test.after?.(cleanC);
+
+test("PSMTXConcat's zero signs: Unit01's 0 times the translation goes into column 2 alone", () => {
+  // (a facing turn's row (-0.97, -0, ~0, 0) down an identity: column 1 is -0 + -0 + -0, with nothing after it;
+  // column 2 of a row with a positive translation ends -0 + 0 * 5 = +0, as ps_madds1 by Unit01 makes it)
+  const a = new Float32Array([-1, -0, -0, 5, 0, 1, 0, 0, -0.97, -0, -5.4e-8, 0]);
+  const id = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]);
+  const m = G.PSMTXConcat(a, id, new Float32Array(12));
+  assertNode.ok(Object.is(m[9], -0), "row 2 column 1");
+  assertNode.ok(Object.is(m[1], -0), "row 0 column 1");
+  assertNode.ok(Object.is(m[2], 0), "row 0 column 2");
+});

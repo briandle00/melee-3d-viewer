@@ -282,6 +282,38 @@ export function shakeKindOf(v: V2, facing: number, hf: HitFeel = HIT_FEEL): { ki
   return len > 0.9 && len < 1.1 ? { kind: 1, normal: [nx / len, ny / len] } : null;
 }
 
+/** what a fighter's draw offset is read from in a viewer track (track.ts) */
+export interface ShakeTrack {
+  has(type: string): boolean;
+  valid(frame: number): boolean;
+  at(type: string, key: string, frame: number): (number | string)[] | null;
+}
+
+/** a fighter's draw offset on game frame `g` as the viewer track has it ("shake", by `port:sub`): the sum
+ *  ftCommon_8008021C makes each frame - the hit's shake (ftCo_80090690), the wobble of a held one mashing
+ *  (x2224_b5, a step of its table each mash: ftCommon_GrabMash) and a smash attack's charge
+ *  (ftCo_800DEEE8) - that ftDrawCommon_8008051C moves the fighter's draw by. The offset, null when it has
+ *  none then, undefined when the track does not say (it has no shake, or does not hold on that frame) */
+export function trackShake(tr: ShakeTrack | null | undefined, key: string, g: number): V2 | null | undefined {
+  if (!tr || !tr.has("shake") || !tr.valid(g)) return undefined;
+  const v = tr.at("shake", key, g);
+  if (!v) return null;
+  const x = Number(v[0]), y = Number(v[1]);
+  return x === 0 && y === 0 ? null : [x, y];
+}
+
+/** whether a smash attack is charging at the end of frame `g` (its smash_attrs.state Charging,
+ *  ftLib_IsChargingSmash): its animation stands at or past its script's charge frame and stays there
+ *  the next frame */
+export function smashCharging(stateAt: (g: number) => PlayerState | undefined, g: number,
+                              chargeFrame: (state: number) => number | null): boolean {
+  const a = stateAt(g), b = stateAt(g + 1);
+  if (!a || !b || a.isDead || a.actionStateId !== b.actionStateId) return false;
+  if ((a.hitlagRemaining ?? 0) > 0 || (b.hitlagRemaining ?? 0) > 0) return false;
+  const at = chargeFrame(a.actionStateId);
+  return at !== null && a.actionStateFrameCounter >= at - 0.001 && b.actionStateFrameCounter === a.actionStateFrameCounter;
+}
+
 /** a smash attack's charge trembling on frame `f` (null when not): the
  *  charge holds the animation from its script's charge frame (`chargeFrame`
  *  of a state, null for one that does not charge) until the button is let
@@ -290,13 +322,7 @@ export function shakeKindOf(v: V2, facing: number, hf: HitFeel = HIT_FEEL): { ki
  *  a step of its table a frame (ftCo_800DEEE8, ftCo_800DEF38) */
 export function chargeShakeAt(stateAt: (g: number) => PlayerState | undefined, f: number,
                               chargeFrame: (state: number) => number | null, hf: HitFeel = HIT_FEEL): V2 | null {
-  const holds = (g: number): boolean => {
-    const a = stateAt(g), b = stateAt(g + 1);
-    if (!a || !b || a.isDead || a.actionStateId !== b.actionStateId) return false;
-    if ((a.hitlagRemaining ?? 0) > 0 || (b.hitlagRemaining ?? 0) > 0) return false;
-    const at = chargeFrame(a.actionStateId);
-    return at !== null && a.actionStateFrameCounter >= at - 0.001 && b.actionStateFrameCounter === a.actionStateFrameCounter;
-  };
+  const holds = (g: number): boolean => smashCharging(stateAt, g, chargeFrame);
   if (!holds(f)) return null;
   let from = f;
   while (from > 0 && f - from < 600 && holds(from - 1)) from--;

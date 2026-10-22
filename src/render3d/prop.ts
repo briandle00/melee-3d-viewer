@@ -5,8 +5,20 @@
  * the viewer only says where it is and which frame of its animation. */
 import { AObj, Archive, DObj, JObj, MatAnim, loadAnimJoint, loadJoint, loadMatAnimJoint } from "./hsd";
 import { RENDER } from "./gx";
-import { ident, invert, Mat, mul, srt } from "./math";
+import { ident, invert, Mat, mul } from "./math";
+import { HSD_MtxSRT, mtxToGL } from "./gxmath";
 import { Skeleton } from "./skeleton";
+
+// the root's place as the game makes a joint's matrix: HSD_MtxSRT, in float32 with its own sinf and cosf
+// (an item's turn of a quarter about y is the game's cosf of it, not 0)
+const srtM = new Float32Array(12), srtS = [0, 0, 0], srtR = [0, 0, 0], srtT = [0, 0, 0];
+export function gameSrt(out: Mat, sx: number, sy: number, sz: number, rx: number, ry: number, rz: number, tx: number, ty: number,
+                 tz: number) {
+  srtS[0] = sx; srtS[1] = sy; srtS[2] = sz;
+  srtR[0] = rx; srtR[1] = ry; srtR[2] = rz;
+  srtT[0] = tx; srtT[1] = ty; srtT[2] = tz;
+  mtxToGL(HSD_MtxSRT(srtM, srtS, srtR, srtT, null), out);
+}
 
 const NO_DOBJS: DObj[] = [];
 
@@ -24,6 +36,15 @@ export class Prop {
   private anim: (AObj | null)[] | null;
   private matAnim: (MatAnim | null)[][] | null;
   private place: Mat = new Float32Array(16);
+  /** an item's model (loadArticle): its root's own scale is the item's (Item_8026849C sets it to the item's
+   *  scl, x60_scale, over the file's - lb_8000B804 lays the file's rest down first when it is picked up,
+   *  it_802742F4), so the file's rest scale of the root is not kept under the place's; a root whose
+   *  animation sets its scale keeps the animation's */
+  itemRoot = false;
+  /** an item a fighter has picked up: it_802742F4 clears JOBJ_HIDDEN on the root's first child and everything
+   *  under it (HSD_JObjClearFlagsAll), so the file's hidden joints there are shown until its animation or code
+   *  hides them again */
+  pickedUp = false;
   /** its joints as the game posed them, when the viewer track has them ("jp": by preorder joint, rot,
    *  scale, translate; NaN for a value not sent: the file's rest): laid over its animation's pose */
   trackPose: Map<number, Float32Array> | null = null;
@@ -40,6 +61,26 @@ export class Prop {
     if (blend) for (const d of this.skeleton.drawables) d.translucent = true;
     this.anim = animJoint === null ? null : loadAnimJoint(a, animJoint);
     this.matAnim = matAnimJoint === null ? null : loadMatAnimJoint(a, matAnimJoint);
+    this.rootScaled = !!this.anim?.[0]?.tracks.some((t) => t.type >= 8 && t.type <= 10);
+  }
+  /** whether its animation sets the root's scale (HSD_A_J_SCAX..SCAZ on joint 0) */
+  private rootScaled: boolean;
+
+  /** an item's root at the item's own scale alone (itemRoot): the file's rest scale of it dropped */
+  private itemRootScale() {
+    if (!this.itemRoot || this.rootScaled) return;
+    const sk = this.skeleton;
+    sk.scale[0] = sk.scale[1] = sk.scale[2] = 1;
+  }
+
+  /** the rest pose, with a picked-up item's joints under the root's first child shown (pickedUp) */
+  private reset() {
+    const sk = this.skeleton;
+    sk.resetPose();
+    if (this.pickedUp) {
+      const child = sk.parent.indexOf(0);
+      if (child > 0) sk.setBranchShown(child, true);
+    }
   }
 
   /** every material drawn with no depth test (HSD's ZMODE_ALWAYS): over
@@ -62,7 +103,7 @@ export class Prop {
   /** at frame `frame` of its animations (looped when loop), at (x, y, z),
    *  scaled by `scale`, turned `rotY` about the vertical and `rotZ` in the
    *  picture's plane (as the game sets an effect's root joint), and `rotX`
-   *  about its own x axis (a thrown needle's tilt). `rootSet`: the place is the
+   *  about its own x axis. `rootSet`: the place is the
    *  root joint's own, over the file's (an effect model the game's dispatch
    *  made at a place or on a joint: HSD_JObjSetTranslate on its root).
    *  `jointFrame`: the joints' animation at a frame of its own, the materials'
@@ -71,15 +112,16 @@ export class Prop {
   pose(frame: number, x: number, y: number, z: number, scale: number, rotY = 0, loop = true, rotZ = 0, rotX = 0,
        rootSet = false, jointFrame = frame) {
     const sk = this.skeleton;
-    sk.resetPose();
+    this.reset();
     if (this.anim) sk.applyAObjs(this.anim, jointFrame, loop);
     this.layTrackPose();
     if (this.rootAtOrigin || rootSet) sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
+    this.itemRootScale();
     if (this.matAnim) {
       sk.resetMaterials();
       sk.applyMatAnims(this.matAnim, (j) => this.joints[j]?.dobjs ?? NO_DOBJS, frame, loop);
     }
-    srt(this.place, scale, scale, scale, rotX, rotY, rotZ, x, y, z);
+    gameSrt(this.place, scale, scale, scale, rotX, rotY, rotZ, x, y, z);
     sk.update(this.place);
   }
 
@@ -96,10 +138,42 @@ export class Prop {
     this.skeleton.update(this.place);
   }
 
+  /** after the pose, the root's size along z set to `value` (an item's code: HSD_JObjSetScaleZ) */
+  setRootScaleZ(value: number) {
+    this.skeleton.scale[2] = value;
+    this.skeleton.update(this.place);
+  }
+
+  /** after the pose, the root's size along y set to `value` (an item's code: HSD_JObjSetScaleY) */
+  setRootScaleY(value: number) {
+    this.skeleton.scale[1] = value;
+    this.skeleton.update(this.place);
+  }
+
   /** after the pose, the root's turn about z set to `value`, the same way (HSD_JObjSetRotationZ) */
   setRootRotationZ(value: number) {
     this.skeleton.rot[2] = value;
     this.skeleton.update(this.place);
+  }
+
+  /** after the pose, the turn about x of the root's first child set to `value` (an item's code:
+   *  HSD_JObjSetRotationX on HSD_JObjGetChild of its root - a thrown needle's or a missile's tilt) */
+  setChildRotationX(value: number) {
+    const sk = this.skeleton;
+    const child = sk.parent.indexOf(0);
+    if (child <= 0) return;
+    sk.rot[child * 3] = value;
+    sk.update(this.place);
+  }
+
+  /** after the pose, the root's first child's next joint and everything under it hidden (HSD_JObjSetFlagsAll
+   *  HIDDEN on HSD_JObjGetNext(HSD_JObjGetChild(root)): an effect's callback). Hidden meshes are not drawn, so
+   *  no matrix is made again */
+  hideSecondChild() {
+    const sk = this.skeleton;
+    const first = sk.parent.indexOf(0);
+    if (first < 0) return;
+    for (let j = first + 1; j < sk.n; j++) if (sk.parent[j] === 0) { sk.setBranchShown(j, false); return; }
   }
 
   /** after the pose, a joint's z place set to `value` (an effect's callback moving one of its joints) */
@@ -130,9 +204,10 @@ export class Prop {
    *  about the vertical (a stand whose height alone grows) */
   poseScaled(x: number, y: number, z: number, scale: [number, number, number], rotY: number) {
     const sk = this.skeleton;
-    sk.resetPose();
+    this.reset();
     if (this.rootAtOrigin) sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
-    srt(this.place, scale[0], scale[1], scale[2], 0, rotY, 0, x, y, z);
+    this.itemRootScale();
+    gameSrt(this.place, scale[0], scale[1], scale[2], 0, rotY, 0, x, y, z);
     sk.update(this.place);
   }
 
@@ -142,10 +217,11 @@ export class Prop {
    *  ties to a fighter's hand (a position and an orientation constraint) */
   poseUnder(frame: number, parent: Float32Array, scale: number, loop = true, attach = 0) {
     const sk = this.skeleton;
-    sk.resetPose();
+    this.reset();
     if (this.anim) sk.applyAObjs(this.anim, frame, loop);
     this.layTrackPose();
     if (this.rootAtOrigin) sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
+    this.itemRootScale();
     if (this.matAnim) {
       sk.resetMaterials();
       sk.applyMatAnims(this.matAnim, (j) => this.joints[j]?.dobjs ?? NO_DOBJS, frame, loop);
@@ -233,6 +309,21 @@ export class Prop {
       sk.rot[0] = sk.rot[1] = sk.rot[2] = 0;
       sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
       sk.scale[0] = sk.scale[1] = sk.scale[2] = 1;
+    }
+    this.place.set(m.subarray(0, 16));
+    sk.update(this.place);
+  }
+  /** at frame `frame` of its animations, as the child of a root given the matrix `m` outright: a model the
+   *  game loads whole, gives its root a matrix of its own (HSD_JObjCopyMtx) and animates from the root's child
+   *  down (HSD_JObjAddAnimAll on jobj->child), this tree being that child's - its own turn, size and place,
+   *  as its animation has them, under the root's matrix (the grapple beam's links: itsamusgrapple.c) */
+  poseUnderMatrix(m: Float32Array, frame: number) {
+    const sk = this.skeleton;
+    sk.resetPose();
+    if (this.anim) sk.applyAObjs(this.anim, frame, false);
+    if (this.matAnim) {
+      sk.resetMaterials();
+      sk.applyMatAnims(this.matAnim, (j) => this.joints[j]?.dobjs ?? NO_DOBJS, frame, false);
     }
     this.place.set(m.subarray(0, 16));
     sk.update(this.place);

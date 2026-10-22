@@ -40,6 +40,10 @@ export interface StageInfo {
    *  parts whose materials the code changes: moving the others' see-through
    *  meshes ahead hid Final Destination's grid under its top */
   layers?: Record<number, { layer: number; flags?: number; joint?: number }>;
+  /** parts whose setup starts no animation (their StageCallbacks' first
+   *  function calls no grAnime_801C8138, and the ground's own setup starts
+   *  none): they stand as the file has them until the code starts one */
+  idle?: number[];
   /** parts the stage's code shows only later (Battlefield's other
    *  backgrounds and the wireframe between them): loaded, not drawn until
    *  something says they are up (setBattle) */
@@ -92,6 +96,9 @@ export const STAGES: Record<number, StageInfo> = {
   // behind the tree, drawn first and hiding nothing (a star KO flies past it)
   28: { file: "GrOp", name: "Dream Land N64", parts: [0, 1, 3, 4, 5, 6, 7, 8],
         lightsPart: 5, fogPart: 5,
+        // (the flowers' setup, grOldPupupu_80211C10, is empty: they bend first when Whispy blows,
+        // grOldPupupu_80211C1C)
+        idle: [6],
         layers: { 3: { layer: 2, flags: 0x28000000, joint: 0 } },
         // (grOldPupupu_80210B04 sets b5 on part 4; grOldPupupu_80211CA8: above the joint)
         shadowCheck: { 4: 0 } },
@@ -308,7 +315,7 @@ export class Stage {
   mirror = false;
   private archive: Archive;
   /** Yoshi's Story: the Shy Guy's model (a stage item), and its scale */
-  shyGuy: { prop: Prop; scale: number } | null = null;
+  shyGuy: { prop: Prop; prop2: Prop | null; scale: number } | null = null;
   /** how far the camera goes (the game's camera range: general points 0x95
    *  and 0x96, at the stage's scale), or null without them */
   camBounds: { left: number; right: number; top: number; bottom: number } | null = null;
@@ -797,7 +804,9 @@ export class Stage {
   playing(index: number): (number | null)[][] {
     const runs = this.runs.get(index);
     if (runs) return runs.map((r) => [r.anim, r.joint, r.hold === undefined ? r.from : null, r.rate, r.hold ?? null]);
-    // (none: its first set, from where the code started it or from the stage's building)
+    // (none: nothing for a part its setup leaves still; else its first set, from where the code started it or
+    // from the stage's building)
+    if (this.info.idle?.includes(index)) return [];
     return [[0, 0, this.animFrom.get(index) ?? -1, 1, null]];
   }
 
@@ -860,7 +869,11 @@ export class Stage {
     const sk = p.skeleton;
     const runs = this.runsOf(p);
     if (runs) this.poseRuns(p, runs, frame);
-    else if (!p.still) {
+    else if (this.info.idle?.includes(p.index)) {
+      // (a part its setup starts nothing on: as the file has it)
+      sk.resetPose();
+      if (p.matAnim) sk.resetMaterials();
+    } else if (!p.still) {
       // (a part the code started on a frame of its own plays once from
       // there; the rest were started as the stage was built, and have been
       // stepped once more than the frame's number by the time it is drawn)
@@ -918,6 +931,9 @@ export class Stage {
       place[0] = place[5] = place[10] = this.scale;
       sk.update(place);
       this.stars = sk;
+      // (on the background's layer: grIzumi_801CCB18 sets its x11 b012 to 2, so fn_800301D0 draws it whole
+      // with that camera, before the rest of the stage)
+      this.layer.set(sk, 2);
     }
   }
   /** Fountain of Dreams' stars (setupFountain), or null */
@@ -1138,7 +1154,7 @@ function quakesOf(a: Archive): StageCamera["quakes"] {
  *  stage's items as {kind, article}; the Shy Guy is kind 0xD2). Its model is a
  *  card whose texture animation is the Shy Guy flying; its scale is the
  *  item's own (the article's attributes, +0x60). */
-function shyGuyOf(a: Archive, stageId: number): { prop: Prop; scale: number } | null {
+function shyGuyOf(a: Archive, stageId: number): { prop: Prop; prop2: Prop | null; scale: number } | null {
   const list = a.publics.get("itemdata");
   if (list === undefined) return null;
   for (let i = 0; i < 16; i++) {
@@ -1155,8 +1171,11 @@ function shyGuyOf(a: Archive, stageId: number): { prop: Prop; scale: number } | 
     // the root's own offset are left out: the replay says where the Shy Guy
     // is, frame by frame, and it is drawn there.
     const mj = states === null ? null : ptr(a, states + 4);
+    // (its state 4 plays animation 2's instead: itheiho.c's it_803F83F0)
+    const mj2 = states === null ? null : ptr(a, states + 2 * 0x10 + 4);
     try {
       return { prop: new Prop(a, joint, null, mj, `stage${stageId}:shyguy`, true),
+               prop2: mj2 === null || mj2 === mj ? null : new Prop(a, joint, null, mj2, `stage${stageId}:shyguy`, true),
                scale: attr === null ? 1 : a.data.getFloat32(attr + 0x60) || 1 };
     } catch {
       return null;

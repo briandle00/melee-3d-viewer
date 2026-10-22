@@ -78,6 +78,8 @@ export interface GxLight {
   attn: Attn;
   diffuse: boolean;
   specular: boolean;
+  /** it lights the alpha channel too (LOBJ_ALPHA, a diffuse light's: HSD_LObjGetLightMaskAlpha) */
+  alpha?: boolean;
   /** where the light is in the world as its LObj holds it (an infinite light's position too, and a spot's
    *  interest: what HSD_LObjSetup hands GX through the view) */
   place?: [number, number, number];
@@ -110,14 +112,33 @@ export function diffuseChannel(lights: GxLight[], ambient: V3, matAmbient: V3, p
   const out = mulColor([0, 1, 2].map((i) => byteOf(matAmbient[i])), [0, 1, 2].map((i) => byteOf(ambient[i])));
   for (const l of lights) {
     if (!l.diffuse) continue;
-    const { ld, dist } = toLight(l, p);
-    const c = Math.max(dot(ld, l.axis), 0);
-    const [a0, a1, a2, k0, k1, k2] = l.attn;
-    const att = Math.max(a0 + a1 * c + a2 * c * c, 0) / (k0 + k1 * dist + k2 * dist * dist);
-    const f = att * Math.max(dot(N, ld), 0);
+    const f = diffuseFactor(l, p, N);
     for (let i = 0; i < 3; i++) out[i] += Math.round(f * byteOf(l.color[i]));
   }
   return out.map((v) => chanColor(255, v));
+}
+
+/** a diffuse light's angle and distance attenuation times the normal's turn to it (N normalized) */
+function diffuseFactor(l: GxLight, p: V3, N: V3): number {
+  const { ld, dist } = toLight(l, p);
+  const c = Math.max(dot(ld, l.axis), 0);
+  const [a0, a1, a2, k0, k1, k2] = l.attn;
+  const att = Math.max(a0 + a1 * c + a2 * c * c, 0) / (k0 + k1 * dist + k2 * dist * dist);
+  return att * Math.max(dot(N, ld), 0);
+}
+
+/** the alpha channel at a vertex, a byte (HSD_SetupChannelMode's lit case): with the ambient light's alpha when it
+ *  has LOBJ_ALPHA (HSD_State_80405A38_90's ambient alpha its color.a), or else when any light is in
+ *  HSD_LObjGetLightMaskAlpha (ambient alpha 0), the channel is lit by those lights - each one's alpha times its
+ *  attenuation and turn, rounded, as the color channel's terms - the sum clamped, times the register's material
+ *  alpha 255 (chanColor); with neither, it is unlit (HSD_State_80405A38_C0): the register's 255 */
+export function alphaChannel(lights: GxLight[], ambientAlpha: number | null, p: V3, n: V3): number {
+  const mask = lights.filter((l) => l.diffuse && l.alpha);
+  if (ambientAlpha === null && mask.length === 0) return 255;
+  const N = norm(n);
+  let acc = ambientAlpha === null ? 0 : byteOf(ambientAlpha);
+  for (const l of mask) acc += Math.round(diffuseFactor(l, p, N) * byteOf(l.color[3]));
+  return chanColor(255, acc);
 }
 
 /** the specular channel at a vertex, in bytes: each specular light aimed
@@ -159,7 +180,7 @@ export const TEX = {
  *  view-space normal, the highlight of the first infinite light, or where a
  *  point falls in a stage's mirror image (Fountain of Dreams' pond: the
  *  game's code turns that texture into a shadow-style projection) */
-export const enum TexGen { UV0 = 0, UV1 = 1, REFLECTION = 2, HIGHLIGHT = 3, MIRROR = 4 }
+export const enum TexGen { UV0 = 0, UV1 = 1, REFLECTION = 2, HIGHLIGHT = 3, MIRROR = 4, UV2 = 5 }
 
 /** one TEV step of a material: a texture laid on the color (and alpha)
  *  carried so far, in the part of the material it belongs to */
@@ -226,7 +247,7 @@ export function compileMaterial(mo: MObj, tobjs: TObj[], skip?: (t: TObj) => boo
     s = prog.textures.length;
     prog.textures.push(i);
     prog.texGen.push(mirror && mirror(t) ? TexGen.MIRROR : coord === 1 ? TexGen.REFLECTION : coord === 2 ? TexGen.HIGHLIGHT
-      : t.src === 5 ? TexGen.UV1 : TexGen.UV0);
+      : t.src === 5 ? TexGen.UV1 : t.src === 6 ? TexGen.UV2 : TexGen.UV0);
     sampler.set(i, s);
     return s;
   };

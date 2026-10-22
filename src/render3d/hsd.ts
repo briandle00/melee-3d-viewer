@@ -495,6 +495,8 @@ export interface Mesh {
   nrm: Float32Array; // 3
   uv: Float32Array; // 2
   uv1: Float32Array; // 2, the second texture coordinate set (zeros when there is none)
+  /** 2, the third texture coordinate set, when the mesh has one (Dream Land's birds) */
+  uv2?: Float32Array;
   clr: Float32Array; // 4
   mtx: Float32Array; // envelope index (pnmtxidx / 3), as a float for the vertex shader
   hasNormals: boolean;
@@ -507,7 +509,7 @@ export interface Mesh {
   points?: boolean;
 }
 
-const A_PNMTX = 0, A_POS = 9, A_NRM = 10, A_CLR0 = 11, A_TEX0 = 13, A_TEX1 = 14, A_NBT = 25;
+const A_PNMTX = 0, A_POS = 9, A_NRM = 10, A_CLR0 = 11, A_TEX0 = 13, A_TEX1 = 14, A_TEX2 = 15, A_NBT = 25;
 
 function readComp(d: DataView, at: number, compType: number, shift: number): [number, number] {
   const s = 1 / (1 << shift);
@@ -538,9 +540,10 @@ function readColor(d: DataView, at: number, compType: number): [number, number, 
 export function decodePObj(a: Archive, p: PObj): Mesh {
   const d = a.data;
   const pos: number[] = [], nrm: number[] = [], uv: number[] = [], uv1: number[] = [], clr: number[] = [], mtx: number[] = [];
+  const uv2: number[] = [];
   const idx: number[] = [], pts: number[] = [];
   const has = (x: number) => p.attrs.some((t) => t.attr === x || (x === A_NRM && t.attr === A_NBT));
-  const hasN = has(A_NRM), hasC = has(A_CLR0);
+  const hasN = has(A_NRM), hasC = has(A_CLR0), hasT2 = has(A_TEX2);
 
   const readAttr = (t: VtxAttr, at: number, out: number[]) => {
     const attr = t.attr === A_NBT ? A_NRM : t.attr;
@@ -591,7 +594,7 @@ export function decodePObj(a: Archive, p: PObj): Mesh {
     const first = mtx.length;
     for (let v = 0; v < count; v++) {
       let m = 0;
-      let gotPos = false, gotN = false, gotC = false, gotT = false, gotT1 = false;
+      let gotPos = false, gotN = false, gotC = false, gotT = false, gotT1 = false, gotT2 = false;
       for (const t of p.attrs) {
         let at: number;
         if (t.type === 1) {
@@ -610,7 +613,7 @@ export function decodePObj(a: Archive, p: PObj): Mesh {
         }
         const attr = t.attr === A_NBT ? A_NRM : t.attr;
         const target = attr === A_POS ? pos : attr === A_NRM ? nrm : attr === A_CLR0 ? clr
-          : attr === A_TEX0 ? uv : attr === A_TEX1 ? uv1 : null;
+          : attr === A_TEX0 ? uv : attr === A_TEX1 ? uv1 : attr === A_TEX2 ? uv2 : null;
         const size = t.attr === A_NBT ? readNbt(t, at) : readAttr(t, at, target ?? []);
         if (t.type === 1) o += size;
         if (attr === A_POS) gotPos = true;
@@ -618,6 +621,7 @@ export function decodePObj(a: Archive, p: PObj): Mesh {
         if (attr === A_CLR0) gotC = true;
         if (attr === A_TEX0) gotT = true;
         if (attr === A_TEX1) gotT1 = true;
+        if (attr === A_TEX2) gotT2 = true;
       }
       if (!gotPos) pos.push(0, 0, 0);
       if (!gotN) nrm.push(0, 0, 1);
@@ -625,6 +629,7 @@ export function decodePObj(a: Archive, p: PObj): Mesh {
       if (!gotC) clr.push(1, 1, 1, 1);
       if (!gotT) uv.push(0, 0);
       if (!gotT1) uv1.push(0, 0);
+      if (hasT2 && !gotT2) uv2.push(0, 0);
       mtx.push(m);
     }
     const n = count;
@@ -649,6 +654,7 @@ export function decodePObj(a: Archive, p: PObj): Mesh {
     nrm: new Float32Array(nrm),
     uv: new Float32Array(uv),
     uv1: new Float32Array(uv1),
+    ...(hasT2 ? { uv2: new Float32Array(uv2) } : {}),
     clr: new Float32Array(clr),
     mtx: new Float32Array(mtx),
     hasNormals: hasN,

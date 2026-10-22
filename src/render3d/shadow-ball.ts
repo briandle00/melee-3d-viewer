@@ -16,3 +16,16 @@ export function shadowBallScale(state: number, charge: number, maximum: number, 
   if (!(maximum > 0) || state < 0 || state > 8 || !Number.isFinite(charge)) return null;
   return low + (high - low) * Math.max(0, Math.min(1, charge / maximum));
 }
+
+/** Samus's charge shot's size (itsamuschargeshot.c): its code sets the scale of its model's first grandchild
+ *  joint, not the root's, to charge x ((x1C - x18) / the most) + x18 in float32 - while it is held and grows
+ *  (itSamuschargeshot_UnkMotion0_Anim) and, fired, at the charge it left with (it_802B56E4's xDE4,
+ *  itSamuschargeshot_UnkMotion8_Anim). The charge and the most are whole numbers (ftSs_SpecialLw_80129100);
+ *  null when its attributes are not sizes */
+export function chargeShotScale(charge: number, most: number, low: number, high: number): number | null {
+  if (!(low > 0) || !(high > 0) || high >= 50 || !Number.isFinite(charge)) return null;
+  const m = Math.trunc(most) > 0 ? Math.trunc(most) : 7;
+  const c = Math.max(0, Math.min(m, Math.trunc(charge)));
+  const f = Math.fround;
+  return f(f(c * f(f(high - low) / m)) + low);
+}

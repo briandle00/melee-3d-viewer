@@ -42,6 +42,17 @@
  *   ["lm", f, spawn_id, links, (link, out, mask, values)...]
  *       a chain's links as the item's code turned them: each link's matrix
  *       (rows 0-2 of the 3x4), link 0 the chain's end, out whether it is drawn
+ *   ["sp", f, part, (joint, mask, values)...]
+ *       a stage part's joints as its animations and code left them, the nine
+ *       values of "jp": the part by its number as "gjoint" has it (an extra
+ *       copy's plus 1000 for each made before it), the joint by its preorder
+ *       index counting the joint the game puts above the file's root as 0 (the
+ *       file's root, a part's joint 0 here, is its 1); a joint not yet sent is
+ *       at its file's rest
+ *   ["fj", f, port, sub, character, (part, mask, values)...]
+ *       a fighter's joints as the game left them (its animation, the blend into
+ *       it and what its code set after), the nine values, by part: every part
+ *       with a live joint but 0; the first line has every value
  * and the ones for later (effects, part switches, stage animations): kept,
  * asked for by type.
  *
@@ -70,7 +81,7 @@ export interface TrackData {
   decoded?: boolean;
 }
 
-/** one owner's pose lines ("jp", "fp", "lm"), each with the joints as of it */
+/** one owner's pose lines ("jp", "fp", "lm"), each with the joints as of it (the streamed ones: PoseStream) */
 interface PoseSnap { frame: number; joints: Map<number, Float32Array>; out: Map<number, number> | null; links: number }
 
 /** a pose as of a frame: by joint (an item's preorder joint, a fighter's part, a chain's link) its values -
@@ -84,19 +95,101 @@ const POSES: Record<string, { key: number; width: number; out: boolean; links: b
   jp: { key: 1, width: 9, out: false, links: false },
   fp: { key: 3, width: 9, out: false, links: false },
   lm: { key: 1, width: 12, out: true, links: true },
+  sp: { key: 1, width: 9, out: false, links: false },
+  fj: { key: 3, width: 9, out: false, links: false },
 };
+
+/** the pose types with a line on most frames (a fighter's every joint, an animated stage's): not kept as a
+ *  snapshot a line, but as their lines with a snapshot every POSE_EVERY of them, played forward from the
+ *  nearest to the frame asked for (PoseStream) */
+const STREAMED = new Set(["sp", "fj"]);
+const POSE_EVERY = 64;
+/** no joint sent (poseSent on a frame the owner has no line) */
+const NONE_SENT: ReadonlySet<number> = new Set();
+
+/** one owner's lines of a streamed pose type, and where it was last asked for: asked for frame after frame,
+ *  each step plays the lines since, into the one pose it hands out */
+class PoseStream {
+  readonly frames: number[] = [];
+  readonly lines: TrackEvent[] = [];
+  /** the joints as of line k * POSE_EVERY (made as they are first passed) */
+  private marks: Map<number, Float32Array>[] = [];
+  /** the pose handed out, as of line `at` (-1: none yet) */
+  private at = -1;
+  readonly pose: TrackPose = { joints: new Map(), out: null, links: 0 };
+
+  constructor(private first: number, private width: number) {}
+
+  /** the joints line i and the lines before it on the same frame have values for (one set, made again each ask) */
+  private sentSet = new Set<number>();
+  sentOn(i: number): ReadonlySet<number> {
+    const out = this.sentSet;
+    out.clear();
+    for (let k = i; k >= 0 && this.frames[k] === this.frames[i]; k--) {
+      const e = this.lines[k];
+      let at = this.first;
+      while (at < e.length) {
+        out.add(Number(e[at]));
+        let mask = Number(e[at + 1]);
+        at += 2;
+        while (mask) { at += mask & 1; mask >>>= 1; }
+      }
+    }
+    return out;
+  }
+
+  /** the pose as of line i, played forward from where it is or from the mark before i */
+  seek(i: number): TrackPose {
+    const joints = this.pose.joints;
+    const k = Math.min(Math.floor(i / POSE_EVERY), this.marks.length - 1);
+    if (i < this.at || (i - this.at > POSE_EVERY && k * POSE_EVERY > this.at)) {
+      if (k >= 0) {
+        // (to a mark: its joints, into the pose's own arrays)
+        const mark = this.marks[k];
+        for (const j of joints.keys()) if (!mark.has(j)) joints.delete(j);
+        for (const [j, v] of mark) {
+          const had = joints.get(j);
+          if (had) had.set(v);
+          else joints.set(j, Float32Array.from(v));
+        }
+        this.at = k * POSE_EVERY;
+      } else {
+        joints.clear();
+        this.at = -1;
+      }
+    }
+    while (this.at < i) {
+      this.at++;
+      this.play(this.lines[this.at]);
+      if (this.at % POSE_EVERY === 0 && this.marks.length === this.at / POSE_EVERY) {
+        const mark = new Map<number, Float32Array>();
+        for (const [j, v] of joints) mark.set(j, Float32Array.from(v));
+        this.marks.push(mark);
+      }
+    }
+    return this.pose;
+  }
+
+  private play(e: TrackEvent) {
+    const joints = this.pose.joints, w = this.width;
+    let i = this.first;
+    while (i < e.length) {
+      const j = Number(e[i++]);
+      const mask = Number(e[i++]);
+      let v = joints.get(j);
+      if (!v) joints.set(j, (v = new Float32Array(w).fill(NaN)));
+      for (let k = 0; k < w; k++) if (mask & (1 << k)) v[k] = Number(e[i++]);
+    }
+  }
+}
 
 /** how many values after the type name an event's thing is (its key): the
  *  rest is its new state. Types not here are instants (an effect started). */
 const KEYS: Record<string, number> = {
-  tint: 3, charge: 3, part: 3, pos: 2, shake: 2, hide: 2,
+  tint: 3, charge: 3, part: 3, pos: 2, shake: 2, hide: 2, cns: 2,
   bg: 0, fd: 0, bgcolor: 0, cam: 0, ganim: 1, gcolor: 1, gjoint: 2,
   hook: 2, irot: 1, fdrot: 0, stadscreen: 0, anim: 2, rng: 0, fod: 0, ij: 2,
 };
-
-/** the most a fighter's depth moves in a frame, and a little (Nana's 0.2;
- *  the others' 0.1): a last "pos" nearer the plane than this has ended */
-const DEPTH_STEP = 0.35;
 
 /** a fighter's animation as the game played it ("anim"), as of game frame `since` */
 export interface TrackAnim {
@@ -218,10 +311,13 @@ export class ViewerTrack {
 
   /** how far off the stage's plane a fighter stands on game frame `frame`:
    *  the game moves fighters that overlap apart in depth (Nana behind Popo
-   *  by 3.8), a little each frame. "pos" is sent while a fighter is off the
-   *  plane, only as it changes: its last depth holds while it stands still
-   *  out there (`x`, `y`: where the replay has it now), and one within a
-   *  step of the plane with nothing after it is back on it. 0 without one */
+   *  by 3.8), a little each frame while they overlap (ftCommon_8007DD7C's
+   *  nudges, added in Fighter_procUpdate), and nothing brings it back: a few
+   *  nudges can leave one a fraction of a unit off the plane for good.
+   *  "pos" is sent while a fighter is off the plane, only as it changes, and
+   *  once more the frame it is back on it (its depth 0): its last depth
+   *  holds while it stands still out there (`x`, `y`: where the replay has
+   *  it now), however near the plane. 0 without one */
   depthAt(port: number, sub: number, frame: number, x: number, y: number): number {
     const list = this.states.get("pos")?.get(`${port}:${sub}`);
     if (!list || !list.length || list[0][0] > frame || frame >= this.until) return 0;
@@ -236,7 +332,7 @@ export class ViewerTrack {
     // (nothing sent since: it stands where it stood, out there - or it left
     // the depth at once, and has moved on since)
     const near = (p: number, q: number) => Math.abs(p - q) <= 1e-3 * Math.max(1, Math.abs(q));
-    return Math.abs(z) > DEPTH_STEP && near(Number(e[4]), x) && near(Number(e[5]), y) ? z : 0;
+    return near(Number(e[4]), x) && near(Number(e[5]), y) ? z : 0;
   }
 
   /** the game's random state after game frame `frame`'s gameplay ("rng", one
@@ -342,10 +438,41 @@ export class ViewerTrack {
     return byKey;
   }
 
+  /** the streamed poses ("sp", "fj"), by type and owner, made the first time they are asked for */
+  private poseStreams = new Map<string, Map<string, PoseStream>>();
+
+  private streamsOf(type: string): Map<string, PoseStream> {
+    let byKey = this.poseStreams.get(type);
+    if (byKey) return byKey;
+    byKey = new Map();
+    this.poseStreams.set(type, byKey);
+    const how = POSES[type];
+    for (const e of this.instants.get(type) ?? []) {
+      const key = e.slice(2, 2 + how.key).join(":");
+      let s = byKey.get(key);
+      if (!s) byKey.set(key, (s = new PoseStream(2 + how.key, how.width)));
+      s.frames.push(e[0]);
+      s.lines.push(e);
+    }
+    return byKey;
+  }
+
   /** an owner's pose as of game frame `frame` (its last line at or before it), or null: "jp" and "lm" by
-   *  item spawn id, "fp" by `port:sub:character` */
+   *  item spawn id, "fp" and "fj" by `port:sub:character`, "sp" by stage part. A streamed type's ("sp",
+   *  "fj") is the owner's one pose, played to the frame: good until the next ask for the same owner */
   pose(type: string, key: string, frame: number): TrackPose | null {
     if (frame >= this.until || !this.instants.has(type)) return null;
+    if (STREAMED.has(type)) {
+      const s = this.streamsOf(type).get(key);
+      if (!s || !s.frames.length || s.frames[0] > frame) return null;
+      let lo = 0, hi = s.frames.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (s.frames[mid] <= frame) lo = mid;
+        else hi = mid - 1;
+      }
+      return s.seek(lo);
+    }
     const list = this.posesOf(type).get(key);
     if (!list || !list.length || list[0].frame > frame) return null;
     let lo = 0, hi = list.length - 1;
@@ -355,6 +482,22 @@ export class ViewerTrack {
       else hi = mid - 1;
     }
     return list[lo];
+  }
+
+  /** the joints a streamed pose type ("sp", "fj") has a line with values for on exactly game frame `frame`:
+   *  empty when the owner has no line then, null when the track has no lines of the owner's at or before it.
+   *  Good until the next ask */
+  poseSent(type: string, key: string, frame: number): ReadonlySet<number> | null {
+    if (frame >= this.until || !STREAMED.has(type)) return null;
+    const s = this.streamsOf(type).get(key);
+    if (!s || !s.frames.length || s.frames[0] > frame) return null;
+    let lo = 0, hi = s.frames.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (s.frames[mid] <= frame) lo = mid;
+      else hi = mid - 1;
+    }
+    return s.frames[lo] === frame ? s.sentOn(lo) : NONE_SENT;
   }
 
   /** a fighter's stored charge (the fighter's own field: "dk", "ss", ...), or undefined */

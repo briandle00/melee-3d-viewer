@@ -1,6 +1,6 @@
 // The viewer track's exact floats and poses: a float written as its IEEE
 // single's word ("0x3f800000") reads back as that float, from JSON and from
-// the compact form (VTB1's column kind 4); the pose lines ("jp", "fp", "lm")
+// the compact form (VTB1's column kind 4); the pose lines ("jp", "fp", "lm", "sp", "fj")
 // add up, owner by owner, to each joint's values as of a frame.
 //
 //   deno test --no-check --sloppy-imports tests/
@@ -110,4 +110,94 @@ test("a chain's links: each link's matrix and whether it is out, and the chain's
   assert.equal(b.out!.get(2), 1);
   assert.equal(b.joints.get(2)![0], 300);
   assert.equal(b.joints.get(0)![11], 11);
+});
+
+test("streamed poses (\"sp\", \"fj\") read the same as the lines added up, asked in any order", () => {
+  // a fighter's joints on most frames, a stage part's now and then: seeded, each line a few joints' values
+  let seed = 0x2545f491;
+  const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296; };
+  const events: TrackEvent[] = [];
+  const want = new Map<string, Map<number, number[]>[]>();
+  const frames = new Map<string, number[]>();
+  for (let f = -123; f < 600; f++) {
+    for (const [type, owner, n] of [["fj", [2, 0, 9], 40], ["sp", [1004], 6]] as const) {
+      if (type === "sp" && rnd() < 0.7) continue;
+      const key = `${type}/${owner.join(":")}`;
+      const list = want.get(key) ?? [];
+      const prev = list.length ? list[list.length - 1] : new Map<number, number[]>();
+      const now = new Map([...prev].map(([j, v]) => [j, [...v]]));
+      const e: TrackEvent = [f, type, ...owner];
+      for (let j = 1; j < n; j++) {
+        if (list.length && rnd() < 0.6) continue;
+        const v = now.get(j) ?? new Array(9).fill(NaN);
+        let mask = 0;
+        for (let k = 0; k < 9; k++) if (!list.length || rnd() < 0.3) { mask |= 1 << k; v[k] = Math.fround(rnd() * 10 - 5); }
+        if (!mask) continue;
+        now.set(j, v);
+        e.push(j, mask);
+        for (let k = 0; k < 9; k++) if (mask & (1 << k)) e.push(v[k]);
+      }
+      if (e.length === 2 + owner.length) continue;
+      events.push(e);
+      list.push(now);
+      want.set(key, list);
+      frames.set(key, [...(frames.get(key) ?? []), f]);
+    }
+  }
+  const t = new ViewerTrack({ version: 2, decoded: true, events });
+  const check = (type: string, owner: string, frame: number) => {
+    const key = `${type}/${owner}`, fs = frames.get(key)!;
+    let i = -1;
+    while (i + 1 < fs.length && fs[i + 1] <= frame) i++;
+    const p = t.pose(type, owner, frame);
+    if (i < 0) return assert.equal(p, null, `${key} at ${frame}`);
+    const w = want.get(key)![i];
+    assert.equal(p!.joints.size, w.size, `${key} at ${frame}: joints`);
+    for (const [j, v] of w) {
+      const got = [...p!.joints.get(j)!];
+      assert.deepEqual(got.map((x) => (Number.isNaN(x) ? null : x)), v.map((x) => (Number.isNaN(x) ? null : x)),
+                       `${key} at ${frame}, joint ${j}`);
+    }
+  };
+  // (frame by frame, as a replay plays; then back, far ahead, and at random)
+  for (let f = -130; f < 610; f++) { check("fj", "2:0:9", f); check("sp", "1004", f); }
+  for (const f of [599, 0, -123, 300, 5, 450, 449, 64, 63, 65, 128]) { check("fj", "2:0:9", f); check("sp", "1004", f); }
+  for (let n = 0; n < 200; n++) { const f = Math.floor(rnd() * 740) - 130; check("fj", "2:0:9", f); check("sp", "1004", f); }
+  assert.equal(t.pose("fj", "2:0:10", 100), null);
+  // (one owner's pose is the same object frame to frame: nothing made per frame)
+  assert.equal(t.pose("fj", "2:0:9", 200), t.pose("fj", "2:0:9", 201));
+});
+
+test("a fighter's last depth off the plane holds while it stands there, however near the plane", () => {
+  // (nudged apart in depth, then left a third of a unit off the plane: the track's "pos" line, then nothing
+  // until the line that brings it back to depth 0)
+  const t = new ViewerTrack({ version: 2, decoded: true, events: [
+    [10, "pos", 1, 0, -18.5, 0.0001, -0.3, 0, 1.57, 0, 0.94],
+    [11, "pos", 1, 0, -18.8, 0.0001, -0.3223, 0, 1.57, 0, 0.94],
+    [40, "pos", 1, 0, -18.8, 0.0001, 0, 0, 1.57, 0, 0.94],
+  ] });
+  assert.equal(t.depthAt(1, 0, 11, -18.8, 0.0001), -0.3223);
+  assert.equal(t.depthAt(1, 0, 30, -18.8, 0.0001), -0.3223);
+  // (moved on with no line: not where the line has it, so back on the plane)
+  assert.equal(t.depthAt(1, 0, 30, -10, 0.0001), 0);
+  assert.equal(t.depthAt(1, 0, 41, -18.8, 0.0001), 0);
+});
+
+test("the joints a streamed pose's line has on exactly a frame (a joint left out keeps its last values)", () => {
+  const t = new ViewerTrack({ version: 2, events: [
+    // (part 1 every value, part 3 its x turn and z place; then part 3 alone, twice on one frame; then nothing)
+    [10, "fj", 0, 0, 25, 1, 0x1ff, 1, 2, 3, 4, 5, 6, 7, 8, 9, 3, 0x101, 0.5, 2.5],
+    [11, "fj", 0, 0, 25, 3, 0x4, 0.25],
+    [11, "fj", 0, 0, 25, 4, 0x80, 1.5],
+    [14, "fj", 0, 0, 25, 1, 0x1, 0.75],
+  ] });
+  assert.equal(t.poseSent("fj", "0:0:25", 9), null);
+  assert.deepEqual([...t.poseSent("fj", "0:0:25", 10)!].sort(), [1, 3]);
+  assert.deepEqual([...t.poseSent("fj", "0:0:25", 11)!].sort(), [3, 4]);
+  assert.deepEqual([...t.poseSent("fj", "0:0:25", 12)!], []);
+  assert.deepEqual([...t.poseSent("fj", "0:0:25", 14)!], [1]);
+  // (the pose as of a frame with no line is the one before's, all joints)
+  assert.deepEqual([...t.pose("fj", "0:0:25", 12)!.joints.keys()].sort(), [1, 3, 4]);
+  assert.equal(t.poseSent("fj", "0:0:26", 11), null);
+  assert.equal(t.poseSent("jp", "0:0:25", 11), null);
 });

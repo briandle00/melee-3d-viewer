@@ -1,0 +1,51 @@
+From 14b3b3c879b945e0faf99dd8b4ce657067f91904 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 09:17:26 +0000
+Subject: [PATCH] Viewer track: Fountain of Dreams' water columns stretched to
+ the recorded height
+
+grIzumi_801CC358 returns before its stretch when the recording gives the
+platform's height, so the column kept its first frame's stretch and sp
+wrote that. The track build now sets it from the recorded height.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ src/melee/gr/grizumi.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/melee/gr/grizumi.c b/src/melee/gr/grizumi.c
+index a2501bc0..68571509 100644
+--- a/src/melee/gr/grizumi.c
++++ b/src/melee/gr/grizumi.c
+@@ -599,6 +599,27 @@ void grIzumi_801CC358(Ground_GObj* gobj)
+         // The recording owns height publication, while the source machine
+         // owns platform timers and RNG before item callbacks run.
+         msl_grizumi_apply_replay_platform_height(gobj, replay_height, changed);
++#if MSL_VISUAL_TRACK_BUILD
++        // The water column's stretch below (the r29 block), which this
++        // return skips: without it the column keeps the stretch of its
++        // first frame, and the viewer track's "sp" writes that. The game
++        // sets it whenever its platform moves, from the height it moved
++        // to, so it always matches the height; it is set here from the
++        // recording's height on every frame for the same result. Only the
++        // track build does it, and only with a track on.
++        // refs/melee/src/melee/gr/grizumi.c::grIzumi_801CC358
++        if (msl_viewer_track_on()) {
++            HSD_JObj* jobj2 = HSD_JObjGetChild(jobj);
++            if (jobj2 != NULL) {
++                float f = gp->gv.izumi3.xD0 / (double) gp->gv.izumi3.xD8;
++                if (f < 0.01f) {
++                    f = 0.01f;
++                }
++                HSD_JObjSetScaleX(jobj2, 0.5f * f + 0.5f);
++                HSD_JObjSetScaleY(jobj2, f);
++            }
++        }
++#endif // MSL_VISUAL_TRACK_BUILD
+         return;
+     }
+ #endif
+-- 
+2.43.0
+

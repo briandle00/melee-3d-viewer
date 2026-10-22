@@ -26,7 +26,7 @@ import { Hud3D } from "./Hud3D";
 import { CRT_LOOKS, type CrtPreset, isCrtPreset, tubeOutline, unbend } from "./crt";
 import { invert, lookAt, mat, perspective, translation, mul } from "./math";
 import { CAM_ASPECT, CAM_STRIDE, cameraPlanes, CamActor, CameraRun, cameraRun, gameProjection, gameView, playerScales } from "./camera";
-import { chargeShakeAt, floorHeights, HIT_FEEL, hitShakeAt, quakeOf, shakeKindOf } from "./hitlag";
+import { chargeShakeAt, floorHeights, HIT_FEEL, hitShakeAt, quakeOf, shakeKindOf, smashCharging, trackShake } from "./hitlag";
 import { setBillboardView } from "./skeleton";
 import { DEFAULT_LIGHTING, Renderer } from "./renderer";
 import type { Lighting } from "./lightset";
@@ -60,13 +60,17 @@ import { SHIELD_FX, trackFilesOf, trackShapes, type TrackShapes } from "./fx/dra
 import { type EggRoll, eggRollAt, YOSHI } from "./yoshiroll";
 import { kirbyStoneAt } from "./kirbystone";
 import { ROLLOUT_ATTRS, ROLLOUT_FIRST, rolloutAngle, rolloutAttrs } from "./rollout";
-import { Hud, HudActor, HudKit } from "./hud";
-import { drawLogCommand } from "./drawlog";
-import type { Tint as ColTint } from "./fx/colanim";
+import { fighterShown, Hud, HudActor, HudKit, toScreen } from "./hud";
+import { EDGE_W, edgePoint } from "./hudlogic";
+import { drawLogCommand, setLiveGame } from "./drawlog";
+import { PoseLog, poseLogCommand } from "./poselog";
+import type { ColAnimTables, Tint as ColTint } from "./fx/colanim";
+import { BgFlash, FLASH_CAMERA, flashQuad } from "./fx/bgflash";
 import { itemAnimation, itemAnimationIndex } from "./item-animation";
 import { samusBombClocks, samusBombRotation } from "./item-facing";
+import { THUNDERS, thunderScaleY } from "./thunder";
 import { itemSource } from "./item-source";
-import { isShadowBall, shadowBallScale } from "./shadow-ball";
+import { chargeShotScale, isShadowBall, shadowBallScale } from "./shadow-ball";
 import { shadowCamera } from "./shadow";
 import { stageFrame, stageRevision } from "~/simulation-stage";
 import { mark, timed } from "./startup";
@@ -108,6 +112,11 @@ const NO_HUD = new URLSearchParams(location.search).get("debug") === "nohud";
 // Nothing sets them but such a tool; empty, every draw is the player's own.
 type Layer = "back" | "stage" | "fighters" | "items" | "effects" | "hud";
 let layersOff: Partial<Record<Layer, boolean>> = {};
+// ?poselog: the pose log (poselog.ts) on from the first frame drawn, as { start: true } through the debug handle
+// starts it (__viewer3d.poseLog); off, nothing of it runs but a test of a null at each hook
+const POSE_LOG = new URLSearchParams(location.search).has("poselog");
+// (the log of the frame being drawn, when it is logged: for the items, drawn outside the viewer's own closure)
+let itemPoseLog: PoseLog | null = null;
 
 // A fighter the game does not draw: dead, or waiting to come back (action
 // states 0-11: the Dead* states and Sleep), or in the middle of a move that
@@ -320,6 +329,23 @@ function trackFacesOf(tr: ViewerTrack): TrackFaces | null {
   if (t === undefined) trackFaces.set(tr, (t = tr.has("tex") ? new TrackFaces(tr.between("tex", -1e9, 1e9)) : null));
   return t;
 }
+// the screen flash of each track (fx/bgflash.ts), from its "bgflash" starts; null: the track has none
+const trackFlashes = new WeakMap<ViewerTrack, BgFlash | null>();
+function trackFlashOf(tr: ViewerTrack, t: ColAnimTables): BgFlash | null {
+  let b = trackFlashes.get(tr);
+  if (b === undefined) {
+    b = tr.has("bgflash")
+      ? new BgFlash(t, tr.between("bgflash", -1e9, 1e9).map((e) => [Number(e[0]), Number(e[2]), Number(e[3]) || 0]))
+      : null;
+    trackFlashes.set(tr, b);
+  }
+  return b;
+}
+// (the flash's camera and quad, made once)
+const flashProj = new Float32Array(16), flashGx = new Float32Array(16), flashView = new Float32Array(16);
+const flashData = new Float32Array(4 * 17);
+const flashBatch = [{ sprite: null, additive: false, near: false, zwrite: false, nozcomp: true, first: 0, count: 1 }];
+
 // a fighter coming back down on the angel platform
 const REBIRTH = 12;
 // the reflector's effect file (EfFxData, Fox's and Falco's both: efalt 0x488-0x48A)
@@ -432,6 +458,21 @@ function fallLeanOf(data: ReplayData, fno: number, st: PlayerState, player: numb
   }
   if (taken < 0 || !(amount > 0)) return null;
   return { sub: which, amount: Math.min(1, amount), frame: takenAt + (fno - taken) + 1, first: taken === fno ? takenAt : undefined };
+}
+
+/** the fighters left out of this frame's draw (one set, made once) */
+const offScreenSet = new Set<unknown>();
+
+/** a fighter's camera bone (the camera box's bone_pos): its place in the fighter's bone list (ftLib_800866DC; the
+ *  model's joint past its part list's gaps, parts.ts) and the box's offset on it, world; without the joint, its
+ *  place and the box's lift */
+function cameraBone(fi: Fighter, st: PlayerState): [number, number, number] {
+  const joint = partToModelJoint(st.internalCharacterId, fi.cameraPart);
+  if (joint >= 0 && joint < fi.skeleton.n) {
+    const W = fi.skeleton.world, o = fi.cameraOffset, k = joint * 16;
+    return [0, 1, 2].map((i) => W[k + i] * o[0] + W[k + 4 + i] * o[1] + W[k + 8 + i] * o[2] + W[k + 12 + i]) as [number, number, number];
+  }
+  return [st.xPosition, st.yPosition + (fi.cameraBox?.lift ?? 8) * fi.modelScale, 0];
 }
 
 /** how far off the stage's plane a fighter stands, from the viewer track
@@ -570,13 +611,24 @@ const KB_HELD: { kind: number; states: [number, number]; slot: number; part: num
   { kind: 18, states: [492, 499], slot: 0, part: 49, sized: true },  // Shield Breaker (Marth's): the sword on his RThumbNb
   { kind: 26, states: [530, 537], slot: 0, part: 49, sized: true },  // and Roy's
 ];
-/** who holds a fighter held or thrown: the nearest of the others */
+/** a grab's holder from its catch to its throw (Catch to ThrowLw, 212-222): the one whose victim_gobj the held
+ *  one is, from ftCo_Catch_Enter until ftCo_800DDDE4 lets go; and the held one's states of such a grab
+ *  (CapturePulledHi to CaptureWaitLw, ThrownF to ThrownLw) */
+const CATCHING_FIRST = 212, CATCHING_LAST = 222;
+const catching = (st: PlayerState) => st.actionStateId >= CATCHING_FIRST && st.actionStateId <= CATCHING_LAST;
+const caughtByCatch = (s: number) => (s >= 223 && s <= 228) || (s >= 239 && s <= 242);
+/** who holds a fighter held or thrown: the nearest of the others, of those holding a grab when any does */
 function captorOf(a: Actor, actors: Actor[]): Actor | null {
   const s = a.st.actionStateId;
   if (!CAPTURED.has(s) && !THROWN.has(s)) return null;
+  // (of the Ice Climbers, the one in the grab: Nana walking on while Popo throws can be the nearer, and the one
+  // thrown was hung on her hand and went along with her where the game holds it on Popo's - Ness, thrown
+  // forward, 12 to 16 off on frames 1064-1066 of bot-throws_ness_ics-1065)
+  const holding = caughtByCatch(s) && actors.some((o) => o.player !== a.player && !gone(o.st) && catching(o.st));
   let best: Actor | null = null, dist = Infinity;
   for (const o of actors) {
     if (o.player === a.player || gone(o.st)) continue;
+    if (holding && !catching(o.st)) continue;
     // (a star's thrower is a Kirby: the nearest, as kirbyHeld takes him)
     if (KIRBY_STARS.has(s) && o.st.internalCharacterId !== KIRBY) continue;
     const d = Math.hypot(o.st.xPosition - a.st.xPosition, o.st.yPosition - a.st.yPosition);
@@ -723,6 +775,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
                                   retrying?: boolean; source?: string | null; corner?: JSX.Element }) {
   let canvas!: HTMLCanvasElement;
   let renderer: Renderer | undefined;
+  // the pose log (poselog.ts): debug only, null unless asked for
+  let poseLog: PoseLog | null = POSE_LOG ? new PoseLog() : null;
   // what the replay does not record, from the simulator, when a track was given
   // it for this replay (track.ts); asked for again while it is being made
   const [viewerTrack, setViewerTrack] = createSignal<ViewerTrack | null>(null);
@@ -827,16 +881,19 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     for (const fr of data.frames) for (const p of fr.players) if (p) { all.push(p.state); if (p.nanaState) all.push(p.nanaState); }
     return floorHeights(all);
   });
-  /** a fighter's shake this frame (hitlag.ts): a hit's, and a smash attack's
-   *  charge; the viewer track's first offset of a hit says its table and
-   *  floor. Null when it stands still */
+  /** a fighter's shake this frame (hitlag.ts): the viewer track's draw offset when it has one (the game's own
+   *  sum: a hit's shake, a held one's mash wobble, a smash attack's charge); without it, a hit's and a smash
+   *  attack's charge from the replay, the track's first offset of a hit saying its table and floor. Null when
+   *  it stands still */
   const shakeOf = (data: ReplayData, f: number, a: Actor, hf: typeof HIT_FEEL, fi: Fighter,
                    tr: ViewerTrack | null): [number, number] | null => {
+    const key = `${a.player}:${a.nana ? 1 : 0}`;
+    const told = trackShake(tr, key, f - 123);
+    if (told !== undefined) return told;
     const stAt = (g: number) => {
       const p = data.frames[g]?.players[a.player];
       return p ? (a.nana ? p.nanaState ?? undefined : p.state) : undefined;
     };
-    const key = `${a.player}:${a.nana ? 1 : 0}`;
     const hit = hitShakeAt(stAt, f, {
       hf, floorAt: floors(), by: (g, port) => data.frames[g]?.players[port]?.state,
       // (the floor it stands on, from the stage's collision data: its slope)
@@ -962,6 +1019,20 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     return invert(camInvScratch, camViewScratch);
   };
 
+  // the match camera's view-projection at frame f as the frame's own picture has it (the page's zoom and shape),
+  // or null before the camera run has it: for the tags, which the game places with the frame before's (hud.ts)
+  const prevView = mat(), prevProj = mat(), prevVP = mat(), prevGx = new Float32Array(16);
+  const viewProjAt = (f: number, aspect: number): Float32Array | null => {
+    const track = camTrackTo(f);
+    if (f < 0 || !track || (f + 1) * CAM_STRIDE > track.length) return null;
+    const t = f * CAM_STRIDE, z = Math.max(0.05, replayStore.zoom);
+    const at = [track[t + 3], track[t + 4], track[t + 5]];
+    const eye = [0, 1, 2].map((i) => at[i] + (track[t + i] - at[i]) / z);
+    gameView(prevView, eye, at);
+    gameProjection(prevProj, prevGx, track[t + 6], Math.abs(aspect - CAM_ASPECT) < 0.01 ? CAM_ASPECT : aspect, ...camPlanes);
+    return mul(prevVP, prevProj, prevView);
+  };
+
   // stats: when each frame was drawn, and how long it took
   const drawnAt: number[] = [];
   const frameLog: number[] = [];
@@ -1051,7 +1122,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     if (!data || !mayLoad()) return;
     files.stage(data.settings.stageId).then((s) => {
       if (renderer) for (const sk of s.allSkeletons) renderer.warm(sk);
-      if (renderer && s.shyGuy) renderer.warm(s.shyGuy.prop.skeleton);
+      if (renderer && s.shyGuy) { renderer.warm(s.shyGuy.prop.skeleton); if (s.shyGuy.prop2) renderer.warm(s.shyGuy.prop2.skeleton); }
       // Stadium's forms, ahead of the first transformation
       if (renderer) for (const parts of s.forms.values()) for (const p of parts) renderer.warm(p.skeleton);
       setStage(s);
@@ -1061,6 +1132,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   const [hudKit, setHudKit] = createSignal<HudKit>();
   const [hudDone, setHudDone] = createSignal(false);
   const [magColors, setMagColors] = createSignal<[number, number, number][] | null>(null);
+  // (the screen flash's color animations, LbBf.dat: fx/bgflash.ts)
+  const [flashTables, setFlashTables] = createSignal<ColAnimTables | null>(null);
+  files.bgFlash().then(setFlashTables);
   createEffect(() => {
     if (!replayStore.replayData || hudKit() || !mayLoad()) return;
     files.hud().then(setHudKit).catch((e) => console.warn("3D replay viewer: no HUD art:", e)).finally(() => setHudDone(true));
@@ -1076,6 +1150,38 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   // (the plates' and nametags' words as the page last gave them: a HUD made again - the stage's colors for its
   // magnifier coming in after it - takes them at once, as Hud3D gives them only when they change)
   let hudWords: { data: unknown; w: Map<string, string> } | null = null;
+  // Each port's edge arrow kind at frame g as its magnifier would give it (ifMagnify_802FB8C0, if_2FD9.c), worked
+  // out without drawing: the game camera of that frame, the camera bone taken as the fighter's place and its camera
+  // box's lift (the HUD's own, posed, on the frames it draws). For the arrows' table after a jump (hud.ts).
+  const edgeView = mat(), edgeProj = mat(), edgeVP = mat(), edgeGx = new Float32Array(16);
+  const edgeEye = [0, 0, 0], edgeAt = [0, 0, 0], edgeKinds = [0, 0, 0, 0, 0, 0];
+  const edgeKindsOf = (data: ReplayData, g: number): number[] | null => {
+    // (only frames the camera run has done: a jump doesn't run it ahead - the idle time does)
+    const track = camTrack(), fs = ready();
+    if (!track || !fs || !camRun || camRun.out !== track || g >= camRun.done || (g + 1) * CAM_STRIDE > track.length) return null;
+    const t = g * CAM_STRIDE;
+    for (let i = 0; i < 3; i++) { edgeEye[i] = track[t + i]; edgeAt[i] = track[t + 3 + i]; }
+    gameView(edgeView, edgeEye, edgeAt);
+    gameProjection(edgeProj, edgeGx, track[t + 6], CAM_ASPECT);
+    mul(edgeVP, edgeProj, edgeView);
+    edgeKinds.fill(0);
+    for (const p of data.frames[g]?.players ?? []) {
+      if (!p || p.playerIndex >= 6) continue;
+      const st = p.state;
+      // (not one KO'd, asleep or coming back: ftLib_80086ED0; nor one its move hides)
+      if (gone(st) || st.actionStateId <= 13 || hidden(st)) continue;
+      const fi = fs.get(`${st.internalCharacterId}:${data.settings.playerSettings[p.playerIndex]?.costumeIndex ?? 0}`);
+      const lift = (fi?.cameraBox?.lift ?? 8) * (fi?.modelScale ?? 1);
+      const [sx, sy, w] = toScreen(edgeVP, [st.xPosition, st.yPosition + lift, 0], 1);
+      if (w <= 0) continue;
+      const px = Math.trunc(sx), py = Math.trunc(sy);
+      if (px >= 0 && px < 640 && py >= 0 && py < 480) continue;
+      // (by the whole pixels ifMagnify_802FB8C0 has: the fighter's x2188, ftLib_GetScreenPos)
+      const [ex] = edgePoint(px - 320, -(py - 240), EDGE_W);
+      if (Math.abs(ex) >= EDGE_W - 1e-4) edgeKinds[p.playerIndex] = ex < 0 ? 1 : 2;
+    }
+    return edgeKinds;
+  };
   const hudOf = createMemo(() => {
     const k = hudKit(), data = rawData(), st = stage();
     if (!k || !data) return null;
@@ -1084,6 +1190,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       if (hudWords && hudWords.data === data) h.setWords(hudWords.w);
       // (the percent's shake and scatter from the game's own random numbers, when a viewer track has them:
       // the effect world's state at the end of the frame's particles - hud.ts shakeDraws)
+      h.edgeKindsAt = (g) => edgeKindsOf(data, g);
       h.rngAt = (i) => {
         if (hudRng === "off") return null;
         if (hudRng === "ps") return fxw?.rngAfter.get(i) ?? null;
@@ -1411,7 +1518,11 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     if (!inSight() && !SNAP && benchFrame === null) return;
     if (!drawEvery && replayStore.running && (drawTick++ & 1)) return;
     const frame = data.frames[fno];
+    itemPoseLog = null;
     if (!frame) return;
+    // (the pose log, when on: this frame's joints, if it is one it logs)
+    const plog = poseLog && poseLog.begin(fno - 123, data) ? poseLog : null;
+    itemPoseLog = plog;
     const t0 = performance.now();
     prof.start();
     let mirrorMs = 0;
@@ -1473,7 +1584,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       perspective(proj, FOVY, aspect, Math.max(1, cam.dist * 0.05), cam.dist * 40, 0, -f * lift / cam.dist);
     }
     mul(viewProj, proj, view);
-    setBillboardView(view);
+    const frameBB = setBillboardView(view);
 
     prof.mark("camera");
     const st = stage();
@@ -1498,6 +1609,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       if (scene.screen && st.screen) {
         scene.screen.draw(fno);
         r.liveImage(st.screen.image, scene.screen.canvas, scene.screen.version);
+        // (for the draw log: the description the game binds in this mode)
+        const gm = scene.screen.mode;
+        setLiveGame(st.screen.image, 4, gm === 7 ? 640 : gm === 8 ? 124 : 250, gm === 7 ? 406 : gm === 8 ? 80 : 160);
         // (the match's copy is the frame before's, whatever the number of draws of this frame)
         if (r.liveAdvance(st.screen.image, fno, scene.screen.mode === 7 || scene.screen.mode === 8, scene.screen.size[0], scene.screen.size[1])) screenAgain = true;
         // (a copy of the match is shown in the screen's constant green, the rest in its vertex colors)
@@ -1519,6 +1633,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const fs = ready();
     const ek = kit();
     const posed: { f: Fighter; a: Actor }[] = [];
+    // (posed but not drawn - a fighter its move hides: still placed at its captor's hold, as the game animates it)
+    const posedHidden: { f: Fighter; a: Actor }[] = [];
     drawnKirbyHats = [];
 
     // stage and fighters, opaque parts first, then the see-through ones; the
@@ -1526,13 +1642,38 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // the game makes them before it draws the stage (lbShadow_8000F38C)
     const drawStage = () => {
       if (st) {
-        // (the back layers whole, first: the game draws them before the rest)
+        // (the back layers whole, first: the game draws them before the rest - fn_800301D0 draws layer 2,
+        // then 1, each with HSD_GObj_80390ED0(gobj, 7): OPA, TEXEDGE, then XLU, each pass over all its parts)
         r.setLighting(stageLit);
-        for (const sk of st.skeletons) {
-          if (layersOff[st.layerOf(sk) > 0 ? "back" : "stage"]) continue;
-          r.setTint(st.tintOf(sk));
-          r.drawSkeleton(sk, "opa");
-          if (st.layerOf(sk) > 0) r.drawSkeleton(sk, "xlu");
+        const sks = st.skeletons;
+        if (!layersOff.back) {
+          for (let layer = 2; layer > 0; layer--) {
+            for (const trsp of PASSES) {
+              for (const sk of sks) {
+                if (st.layerOf(sk) !== layer) continue;
+                r.setTint(st.tintOf(sk));
+                r.drawSkeletonTrsp(sk, trsp);
+              }
+            }
+          }
+        }
+        if (!layersOff.stage) {
+          for (const sk of sks) {
+            if (st.layerOf(sk) > 0) continue;
+            r.setTint(st.tintOf(sk));
+            r.drawSkeletonTrsp(sk, 1);
+          }
+        }
+        // (then the rest of the stage's cut-out meshes, all its parts' opaque ones first: fn_800301D0 draws
+        // layer 0's link 3 with HSD_GObj_80390ED0(gobj, 3), each pass over all its GObjs - HSD_GObj_804085F0
+        // takes pass 0 to HSD_TRSP_OPA, 1 to TEXEDGE - before the fighters' and items' (Camera_800311EC); its
+        // see-through ones (XLU) only after those, in the pass with mask 4, below)
+        if (!layersOff.stage) {
+          for (const sk of sks) {
+            if (st.layerOf(sk) > 0) continue;
+            r.setTint(st.tintOf(sk));
+            r.drawSkeletonTrsp(sk, 4);
+          }
         }
         r.setTint(null);
       }
@@ -1579,10 +1720,25 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         dy.d.apply(fi.skeleton.rot, fi.skeleton.trans, fi.skeleton.scale);
         fi.skeleton.update();
       }
+      // (the joints as the game left them - its animation, the blend into it, what its code set after - when
+      // the track has them: "fj", every part gameplay keeps live; the presentation-only ones keep the
+      // viewer's pose)
+      const owner = `${a.player}:${a.nana ? 1 : 0}:${a.st.internalCharacterId}`;
+      const posedBy = trackAt?.pose("fj", owner, fno - 123);
+      // (while the game blends into a new animation - the track's blend not yet through on this frame - its
+      // joints from TransN down are turned through quaternions, lb_8000C490 under ftAnim_8006FE9C, and the
+      // track leaves a joint so turned out: its last values are the ones from before the blend, which held the
+      // fighter still in that pose until the blend was over. Only the parts this frame's line has, then; the
+      // others keep the viewer's own blend)
+      const blend = posedBy ? trackAt!.animAt(a.player, a.nana ? 1 : 0, fno - 123) : null;
+      const fresh = blend && blend.blendFrames > 0 && blend.blendAt < blend.blendFrames
+        ? trackAt!.poseSent("fj", owner, fno - 123) : null;
+      let laid = posedBy ? layTrackSwing(fi, a.st.internalCharacterId, posedBy.joints, true, fresh) : false;
       // (and the ones the simulator runs - the chains a hurtbox sits on - as the game swung them, when the
       // track has them: "fp")
-      const swungBy = trackAt?.pose("fp", `${a.player}:${a.nana ? 1 : 0}:${a.st.internalCharacterId}`, fno - 123);
-      if (swungBy && layTrackSwing(fi, a.st.internalCharacterId, swungBy.joints, true)) fi.skeleton.update();
+      const swungBy = trackAt?.pose("fp", owner, fno - 123);
+      if (swungBy && layTrackSwing(fi, a.st.internalCharacterId, swungBy.joints, true)) laid = true;
+      if (laid) fi.skeleton.update();
     };
     for (const a of actors) {
       const fi = fs.get(`${a.st.internalCharacterId}:${a.costume}`);
@@ -1605,6 +1761,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // (Sheik's Vanish bursts where she was)
       if (vanished(a.st) || trackHidden(a)) {
         frameActors.push({ key: actorKey(a.player, a.nana), st: a.st, fighter: fi, world: worldByPart(a.st.internalCharacterId, fi.skeleton.world) });
+        if (a.captor) posedHidden.push({ f: fi, a });
         continue;
       }
       const an = fi.animFor(a.st.actionStateId);
@@ -1622,9 +1779,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       skins.push(fi);
       posed.push({ f: fi, a });
     }
-    for (const { f: fi, a } of posed) {
+    for (const { f: fi, a } of [...posed, ...posedHidden]) {
       const c = a.captor ? posed.find((q) => q.a === a.captor) : undefined;
       if (!c || !ek) continue;
+      // (hung on the captor's hand only while the game has it so, when the track says: ftCo_800DB368's
+      // constraint, x2226_b2, from when the pull brings it in until the throw lets go)
+      if (trackAt?.has("cns") && Number(trackAt.at("cns", `${a.player}:${a.nana ? 1 : 0}`, fno - 123)?.[0] ?? 0) !== 1) continue;
       const cc = c.a.st.internalCharacterId, vc = a.st.internalCharacterId;
       const tj = partToModelJoint(cc, ek.partToJoint(cc, TRANSN2)), vj = partToModelJoint(vc, ek.partToJoint(vc, XROTN));
       if (tj < 0 || vj < 0) continue;
@@ -1793,11 +1953,22 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         if (p) {
           const look = lookOf(fi, a, actorKey(a.player, a.nana));
           // (its low-detail model, as in a mirror: ftDrawCommon_80081200 switches every fighter to it first)
-          const low = look.kh?.skin ? null : fi.mirrorPassHidden();
+          const kh = look.kh;
+          const low = kh?.skin ? null : fi.mirrorPassHidden();
           if (low) { fi.skeleton.posePass(low); fi.skeleton.passHidden = low; }
-          else if (look.kh?.skin) fi.skeleton.passHidden = fi.hiddenUnderHat();
+          else if (kh?.skin) fi.skeleton.passHidden = fi.hiddenUnderHat();
           r.drawSkeleton(fi.skeleton, "opa");
           fi.skeleton.passHidden = null;
+          // (a colored hat's meshes are on his joints, so they are in it too, in their low-detail look:
+          // ftKb_UnkIntBoolFunc0 under ftDrawCommon_80081200's switch)
+          if (kh?.skin && kh.lowHidden) {
+            const owner = `${a.player}:${a.nana ? 1 : 0}:${a.st.internalCharacterId}`;
+            poseSkin(kh, fi.skeleton, trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
+            kh.skin.posePass(kh.lowHidden);
+            kh.skin.passHidden = kh.lowHidden;
+            r.drawSkeleton(kh.skin, "opa");
+            kh.skin.passHidden = null;
+          }
         } else r.drawSkeleton(star!.star.skeleton, "opa");
         r.endShadow();
         // (made for every fighter, laid by none of Nana's materials: ftLib_800872BC keeps a sub fighter's inactive)
@@ -1807,14 +1978,29 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     r.setShadows(shadowMaps.reverse());
     prof.mark("shadows");
     drawStage();
+    // (the pose log: the stage's parts drawn this frame, by the numbers the track gives them - TrackJoints's)
+    if (plog && st) logStage(plog, st);
     // (a fighter's hats are posed on it once a frame, or for each pass when it is shared)
     const hatsPosed = new Set<string>();
     // (`under`: the lights current while they are drawn, when not their own -
     // the pond's first draw, under the stage's)
+    // (the fighters the game's camera draws: ftDrawCommon_80080E18 leaves out one ftLib_UpdateScreenVisibility
+    // finds well off the screen; the mirror's and the shadows' draws, ftDrawCommon_80080C28, ask nothing)
+    const offScreen = offScreenSet;
+    offScreen.clear();
+    {
+      const sc = playerScales(data.settings.playerSettings), k = w / Math.max(1, h) / CAM_ASPECT;
+      for (const { f: fi, a } of posed) {
+        if (a.ko) continue;
+        const r = (fi.cameraBox?.v[2] ?? 8) * (sc[a.player] ?? 1) + 15;
+        if (!fighterShown(viewProj, view, cameraBone(fi, a.st), r, Math.abs(k - 1) < 0.01 ? 1 : k)) offScreen.add(a);
+      }
+    }
     const drawFighters = (pass: "opa" | "xlu", mirror = false, under: Lighting | null = null) => {
       if (layersOff.fighters) return;
       for (const { f: fi, a } of posed) {
         if (mirror && hideBits(a) & 4) continue;
+        if (!mirror && offScreen.has(a)) continue;
         const again = shared.has(fi);
         if (again) poseActor(fi, a);
         const akey = actorKey(a.player, a.nana);
@@ -1855,6 +2041,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         }
         // its face's textures on their frames (face.ts)
         fi.faceTex?.apply(a.face?.tex ?? null);
+        // (the pose log: its joints as its main pass draws them)
+        if (plog && pass === "opa" && !mirror) plog.fighter(a.player, a.nana ? 1 : 0, a.st.internalCharacterId, fi.skeleton.world);
         r.drawSkeleton(fi.skeleton, pass);
         fi.skeleton.passHidden = null;
         // then the outline's shells again, in depth only (ftDrawCommon_80080E18's second draw: x2223_b3,
@@ -1888,7 +2076,13 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           if (poseHats) hp.poseMatrix(fi.skeleton.world.subarray(HAT_JOINT * 16, HAT_JOINT * 16 + 16), ya?.frame);
           r.drawSkeleton(hp.skeleton, pass);
         } else if (kh?.skin) {
-          if (poseHats) poseSkin(kh, fi.skeleton);
+          if (poseHats) {
+            const owner = `${a.player}:${a.nana ? 1 : 0}:${a.st.internalCharacterId}`;
+            poseSkin(kh, fi.skeleton, trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
+          }
+          // (in a mirror, its low-detail look, as his own model's: ftDrawCommon_80080C28)
+          const hatLow = mirror ? kh.lowHidden ?? null : null;
+          if (hatLow) kh.skin.posePass(hatLow);
           kh.face?.apply(a.face?.tex ?? null);
           // (Mr. Game & Watch's copy: its outline first, as his is drawn)
           if (kh.outline && pass === "opa") {
@@ -1902,7 +2096,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
             r.setTint(look.tint);
             kh.skin.passHidden = null;
           }
+          kh.skin.passHidden = hatLow;
           r.drawSkeleton(kh.skin, pass);
+          kh.skin.passHidden = null;
           if (kh.outline && pass === "opa") {
             kh.skin.passHidden = kh.outline.hidden;
             r.setTint(null);
@@ -1955,12 +2151,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // fighters', and their see-through parts once (Camera_80031328); the items' own it_8026EECC draws in one of
     // the two only. `note`: the glow's place for the checks, once a frame
     const drawChains = (pass: "opa" | "xlu", note = false) => {
-      for (const it of frame.items ?? []) {
-        if (!trackChains.has(it.spawnId)) continue;
-        const links = trNow!.pose("lm", String(it.spawnId), fno - 123);
-        const f = articleFighter(data, fs, it, fno);
-        if (links && f) drawTrackChain(r, f, it, links, trackArticles.get(data)?.get(it.typeId), itemLife(data, fno, it), pass);
-      }
+      // (the glows first: the item's own GObj is made before its links' - it_802B7C18)
       for (const a of actors) {
         const c = CHAINS[a.st.internalCharacterId];
         const costume = data.settings.playerSettings[a.player]?.costumeIndex ?? 0;
@@ -1987,6 +2178,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           r.endPass();
         }
       }
+      for (const it of frame.items ?? []) {
+        if (!trackChains.has(it.spawnId)) continue;
+        const links = trNow!.pose("lm", String(it.spawnId), fno - 123);
+        const f = articleFighter(data, fs, it, fno);
+        if (links && f) drawTrackChain(r, f, it, links, trackArticles.get(data)?.get(it.typeId), itemLife(data, fno, it), pass);
+      }
     };
     // (their first opaque copy, under the stage's lights, then the second, under the fighters')
     if (st) r.setLighting(stageLit);
@@ -1997,10 +2194,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // fighters, the items, the effects - seen from below the floor into the
     // stage's mirror image, before the pond is drawn with it (grizumi.c)
     // (not drawn while no part of the pond is in view: nothing would show it)
-    let mirrorDrawn = false;
     if (st?.mirror && st.mirrorSurfaces.some(({ sk, d }) => sk.isVisible(d) && r.inView(d))) {
       const m0 = performance.now(), d0 = r.draws;
-      mirrorDrawn = true;
       const axesM = r.beginMirror();
       // (grIzumi_801CCEA0: the mirror's camera draws links 0, 2 and 5 - the
       // scenery under the stage's lights, and the fighters - in their opaque
@@ -2027,8 +2222,20 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       drawChains("xlu");
       drawnArticles = [];
       r.setFog(null);
+      // (the effects' pass has the stage's own particles too - Fountain's sparkles - behind the rest, as the
+      // picture's has them, when they are not the effect world's already)
+      const stagePsM = scene?.st === st && !layersOff.stage ? scene.particles.particles : [];
+      if (stagePsM.length) {
+        const built = buildParticles(stagePsM, axesM);
+        r.drawParticles(built.data, built.batches);
+      }
       if (ek?.bank && fxw && !layersOff.effects) {
+        // (posed facing the mirror's camera: a billboard's matrix is made under the camera that draws it,
+        // HSD_JObjMakePositionMtx in HSD_JObjDisp, so grIzumi_801CCEA0's camera turns them to itself; the main
+        // camera's pass poses them again)
+        setBillboardView(axesM.view);
         drawFxModels(r, fxw);
+        setBillboardView(view, frameBB);
         const mine = fxw.particlesOf(false);
         if (mine.length) {
           const built = buildParticles(mine, axesM);
@@ -2040,12 +2247,15 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       mirrorMs = performance.now() - m0;
       lastMirrorDraws = r.draws - d0;
     }
+    // Yoshi's Story's Shy Guys (stage items): with the fighters' and items' first pass (Camera_800311EC), before
+    // the stage's see-through meshes
+    if (st?.shyGuy) { r.setLighting(lighting); drawShyGuys(r, st.shyGuy, data, frame.items ?? [], fno); }
     if (st) {
       r.setLighting(stageLit);
       for (const sk of st.skeletons) {
         if (st.layerOf(sk) || layersOff.stage) continue;
         r.setTint(st.tintOf(sk));
-        r.drawSkeleton(sk, "xlu");
+        r.drawSkeletonTrsp(sk, 2);
       }
       r.setTint(null);
     }
@@ -2054,8 +2264,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     drawFighters("xlu");
     prof.mark("fightersXlu");
     r.endPass();
-    // the angel platform under a fighter coming back, Yoshi's Story's Shy
-    // Guys, then the effects over everything
+    // the angel platform under a fighter coming back, then the effects over everything
     for (const a of actors) if (onAngelPlatform(a.st)) drawPlatform(r, ek, a, fno);
     // the stands the fighters enter the match on (the leader's only: ftCo_800C6408)
     for (const a of actors) {
@@ -2069,7 +2278,6 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const ps = playerScales(data.settings.playerSettings)[a.player] ?? 1;
       drawStand(r, ek.entryStand, a.st, standScale(ps, fi.trophyScale), en.stand, fi.entryGap * ps);
     }
-    if (st?.shyGuy) drawShyGuys(r, st.shyGuy, data, frame.items ?? [], fno);
     prof.mark("fighters2");
     let projectiles = 0;
     // (a chain's item is drawn as its own model too - the hookshot in Link's hand - its links from "lm" below)
@@ -2157,7 +2365,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       r.drawParticles(built.data, built.batches);
     }
     if (ek?.bank && fxw && !layersOff.effects) {
-      models = drawFxModels(r, fxw, !mirrorDrawn);
+      models = drawFxModels(r, fxw);
       // (every list but the HUD's: that one is drawn in the HUD's pass, in its space)
       const mine = fxw.particlesOf(false);
       particles = mine.length;
@@ -2229,6 +2437,22 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       if (rect) r.captureLive(img, sc.size[0], sc.size[1], rect, [255, 255, 255], fno);
     }
     prof.mark("ghosts");
+    // the screen flash of a strong hit (fx/bgflash.ts): from the match's first on, fn_8001FEC4's quad under its own
+    // camera (lbl_803BB028), three times - HSD_GObj_803910D8 runs its link in all three passes - before the HUD
+    {
+      const tr = viewerTrack(), ft = flashTables();
+      const bf = tr && ft && tr.valid(fno - 123) ? trackFlashOf(tr, ft) : null;
+      const flash = bf ? bf.stateAt(fno - 123) : null;
+      if (flash?.drawn) {
+        const c = FLASH_CAMERA, k0 = (w / Math.max(1, h)) / c.aspect, k = Math.abs(k0 - 1) < 0.01 ? 1 : k0;
+        gameProjection(flashProj, flashGx, c.fovy, c.aspect * k, c.near, c.far);
+        gameView(flashView, c.eye, c.interest);
+        flashQuad(flashData, flash.color, k);
+        r.overlay(flashProj, flashView, null, null, false, flashGx);
+        for (let i = 0; i < 3; i++) r.drawParticles(flashData, flashBatch);
+        r.endOverlay();
+      }
+    }
     // the game's HUD over it all (hud.ts)
     let hudMs = 0;
     const hud = NO_HUD || layersOff.hud ? null : hudOf();
@@ -2244,14 +2468,13 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const magnify = drawn || (trackHidden(a) && !(hideBits(a) & 1) && !hidden(a.st));
         // (the camera bone: its place in the fighter's bone list, ftLib_800866DC; the model's joint past its
         // part list's gaps, parts.ts)
-        const joint = partToModelJoint(a.st.internalCharacterId, fi.cameraPart);
-        let bone: [number, number, number] | null = null;
-        if (magnify && joint >= 0 && joint < fi.skeleton.n) {
-          const W = fi.skeleton.world, o = fi.cameraOffset, k = joint * 16;
-          bone = [0, 1, 2].map((i) => W[k + i] * o[0] + W[k + 4 + i] * o[1] + W[k + 8 + i] * o[2] + W[k + 12 + i]) as [number, number, number];
-        } else if (magnify) bone = [a.st.xPosition, a.st.yPosition + (fi.cameraBox?.lift ?? 8) * fi.modelScale, 0];
+        const bone = magnify ? cameraBone(fi, a.st) : null;
+        // (where the player's record has it when the tag is placed: the frame before's place, hud.ts)
+        const pst = data.frames[fno - 1]?.players[a.player]?.state;
+        const pko = pst && gone(pst) ? koAt(data, fno - 1, a.player, false, pst, camInvAt(fno - 1)) : null;
         hudActors.push({
           player: a.player, st: a.st, drawn, magnify, at: a.ko ? [a.ko.x, a.ko.y, a.ko.z] : undefined,
+          tagAt: pko ? [pko.x, pko.y, pko.z] : pst ? [pst.xPosition, pst.yPosition, 0] : undefined,
           // (the magnifier's size: the camera box's target_ext.v.z, ftData +0x3C's last float times fp->x34_scale.y
           // - the player's scale, not the model's (ftCamera_80076064, ftLib_80086B80) - over 8)
           nameTagHeight: fi.nameTagHeight, bone,
@@ -2277,7 +2500,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // (with a track that has the HUD's own generators, the bursts are the effect world's)
       const bursts = fxw && fxw.trackHud && fno < fxw.trackUntil
         ? { particles: fxw.particlesOf(true), places: fxw.hudPlaces } : null;
-      hud.draw(r, fno, viewProj, hudActors, ek?.bank ?? null, w / Math.max(1, h), bursts);
+      hud.draw(r, fno, viewProj, hudActors, ek?.bank ?? null, w / Math.max(1, h), bursts,
+               viewProjAt(fno - 1, w / Math.max(1, h)) ?? viewProj);
       hudMs = performance.now() - h0;
     }
     const had = runTags();
@@ -3713,10 +3937,23 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       return [((m[0] * X + m[4] * Y + m[8] * Z + m[12]) / cw + 1) / 2, (1 - (m[1] * X + m[5] * Y + m[9] * Z + m[13]) / cw) / 2,
               (m[2] * X + m[6] * Y + m[10] * Z + m[14]) / cw];
     },
+    /** the screen flash (fx/bgflash.ts) at a replay frame: whether LbBf.dat's table was read, the track's
+     *  "bgflash" starts ([game frame, type, duration]), and whether fn_8001FEC4's quad is drawn there, in what color */
+    flash: (frame: number) => {
+      const tr = viewerTrack(), ft = flashTables();
+      const starts = tr ? tr.between("bgflash", -1e9, 1e9).map((e) => [Number(e[0]), Number(e[2]), Number(e[3]) || 0]) : [];
+      const bf = tr && ft && tr.valid(frame - 123) ? trackFlashOf(tr, ft) : null;
+      const s = bf ? bf.stateAt(frame - 123) : null;
+      return { tables: ft !== null, track: !!tr, starts, drawn: s?.drawn ?? false, color: s ? [...s.color] : null };
+    },
     /** the stage mirror's image and matrices (Fountain's pond) */
     mirror: () => renderer?.mirrorDebug() ?? null,
     /** the draw log (drawlog.ts): debug only, attached by { start: true } and never otherwise */
     drawLog: (cmd: Parameters<typeof drawLogCommand>[1]) => drawLogCommand(renderer, cmd),
+    /** the pose log (poselog.ts): debug only, made by { start: true } (or ?poselog) and never otherwise; { take:
+     *  true } hands over its lines since the last take (string[], JSON text lines: <game>.poselog.jsonl for
+     *  tools/pose_check.py), { stop: true } drops it */
+    poseLog: (cmd: Parameters<typeof poseLogCommand>[2]) => poseLogCommand(() => poseLog, (l) => { poseLog = l; }, cmd),
     /** a pixel comparison: leave these groups out of the draws from now on (null:
      *  draw everything again), and draw now */
     setLayers: (off: Partial<Record<Layer, boolean>> | null) => { layersOff = { ...(off ?? {}) }; draw(); return true; },
@@ -3945,12 +4182,16 @@ function drawPlatform(r: Renderer, ek: EffectKit | undefined, a: Actor, frame: n
 // Yoshi's Story's Shy Guys: the stage file's own Shy Guy (a card whose
 // texture animation is it flying) where the replay says each one is, facing
 // the way it flies
-function drawShyGuys(r: Renderer, sg: { prop: Prop; scale: number }, data: ReplayData, items: ReplayItem[], frame: number) {
+function drawShyGuys(r: Renderer, sg: { prop: Prop; prop2: Prop | null; scale: number }, data: ReplayData, items: ReplayItem[],
+                     frame: number) {
   for (const it of items) {
     if (it.typeId !== SHY_GUY) continue;
-    sg.prop.pose(shyGuyClock(data, frame, it), it.xPosition, it.yPosition, 2, sg.scale, it.facingDirection < 0 ? Math.PI : 0, true);
-    r.drawSkeleton(sg.prop.skeleton, "opa");
-    r.drawSkeleton(sg.prop.skeleton, "xlu");
+    const t = shyGuyClock(data, frame, it);
+    // (animation 2's in state 4, and on through the states that keep the animation playing: it_803F83F0's -1)
+    const prop = shyClocks.get(data)?.get(it.spawnId)?.anim === 2 && sg.prop2 ? sg.prop2 : sg.prop;
+    prop.pose(t, it.xPosition, it.yPosition, 2, sg.scale, it.facingDirection < 0 ? Math.PI : 0, true);
+    r.drawSkeleton(prop.skeleton, "opa");
+    r.drawSkeleton(prop.skeleton, "xlu");
     r.endPass();
   }
 }
@@ -3967,7 +4208,9 @@ type HeldBy = number | "item" | { joint: number };
 /** held on this joint in all its states */
 const heldAll = (by: HeldBy): Record<number, HeldBy> => Object.fromEntries(Array.from({ length: 10 }, (_, i) => [i, by]));
 const HOOK_HELD = heldAll(RTHUMB);
-const ARTICLES: Record<number, { art: number; tilt?: boolean | "z"; charge?: boolean; joint?: number; from?: Record<number, number>;
+const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
+                                 /** its tilt measured from the way it faces, not from straight ahead (a missile) */
+                                 tiltFromFacing?: boolean; charge?: boolean; joint?: number; from?: Record<number, number>;
                                  held?: Record<number, HeldBy>; ownerSize?: boolean; gone?: number[];
                                  trail?: { state: number; at: number[] };
                                  /** held still at a frame of its animation its owner's state says */
@@ -3980,7 +4223,10 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z"; charge?: boo
                                  lifeIn?: { state: number; attr: number };
                                  /** shown only between these frames of its animation, by state
                                   *  (its code hides and shows it as the frame passes them) */
-                                 shownIn?: Record<number, [number, number]> }> = {
+                                 shownIn?: Record<number, [number, number]>;
+                                 /** picked up by its owner as it is made (Item_8026AB54): its file's hidden joints
+                                  *  under the root's first child shown (it_802742F4) */
+                                 pickedUp?: boolean }> = {
   0x30: { art: 0 },                // Mario's fireball
   0x31: { art: 1, colorPick: true }, // Dr. Mario's pill (his article 1: ftdrmario.c)
   0x36: { art: 0 },                // Fox's laser
@@ -3988,16 +4234,38 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z"; charge?: boo
   // Fox's and Falco's blasters, held in the hand (on the right thumb's joint) in all their states
   0x4a: { art: 1, held: heldAll(RTHUMB) },
   0x4b: { art: 1, held: heldAll(RTHUMB) },
-  0x4f: { art: 0, tilt: true },    // Sheik's needles, thrown
+  // Sheik's needles, thrown: tilted on the root's child, the root turned only to face (itseakneedlethrown.c:
+  // HSD_JObjSetRotationX on HSD_JObjGetChild, HSD_JObjSetRotationY on the root)
+  0x4f: { art: 0, tilt: "child" },
+  // Dr. Mario's sheet (side-B), held on his right thumb in both its states: picked up as it is made
+  // (it_802B2560: Item_8026AB54 with ftMr_SpecialS's FtPart_RThumbNb), its attach joint tied to the thumb
+  // in place and turn (it_802742F4: it_80274F48, lb_8000C2F8's position and orientation constraints)
+  0x54: { art: 0, held: heldAll(RTHUMB) },
+  // Mario's cape, the same way (ftMr_SpecialS makes either with it_802B2560 on FtPart_RThumbNb). (Which of
+  // his articles it is comes from the viewer track's "art" when it has one; without, his fireball is 0 and
+  // the cape is taken as the next, not confirmed against his file)
+  0x53: { art: 1, held: heldAll(RTHUMB) },
   0x59: { art: 1 },                // Pikachu's Thunder Jolt (his articles 1 and 2: ftpikachu.c)
-  0x5a: { art: 2 },
+  // (its bolt, the item its carrier makes as it lands: made, it_802B43D0 and then it_802B3F88 each start its
+  // state 0 and step its animation once more - Item_80268E5C, Item_802694CC - so it runs a frame ahead)
+  0x5a: { art: 2, from: { 0: 1 } },
   0x5b: { art: 1 },                // Pichu's, the same way
-  0x5c: { art: 2 },
+  // Pikachu's and Pichu's Thunder (their article 0): hidden while it waits for its turn to fall (state 0:
+  // it_802B2080's it_8026BB44 sets every joint JOBJ_HIDDEN; it_802B211C's it_8026BB20 shows it as it falls)
+  0x51: { art: 0, gone: [0] },
+  0x52: { art: 0, gone: [0] },
+  0x5c: { art: 2, from: { 0: 1 } },
   0x56: { art: 0, gone: [2] },     // Yoshi's egg, thrown (state 2: broken, its pieces are effects)
   0x5d: { art: 0, gone: [3] },     // Samus's bomb (state 3: going off)
   0x5e: { art: 1, charge: true },  // Samus's charge shot
-  0x5f: { art: 2, tilt: true, gone: [2, 3] }, // Samus's missile (states 2 and 3: bursting)
-  0x63: { art: 1 },                // Peach's turnip
+  // Samus's missile (states 2 and 3: bursting), tilted on the root's child as the needle is (itsamusmissile.c:
+  // itSamusmissile_SetRotationX), by its turn x8 from the way it faces: inlineA0 flies it at its speed that way
+  // turned x8 * -facing about z (lbVector_Rotate), so x8 is -facing * atan2(facing * vy, facing * vx)
+  0x5f: { art: 2, tilt: "child", tiltFromFacing: true, gone: [2, 3] },
+  // Peach's turnip, in her hand where she holds items while she pulls it and when she has it again (its states 0
+  // and 4: itemhold.ts): it_802BD4AC picks it up with Item_8026AB54 on her ftData x8 +0x10 part, its attach
+  // joint tied to it in place and turn (it_80274F48: lb_8000C2F8) - the replay's place has no depth, the hand's has
+  0x63: { art: 1, held: { 0: "item", 4: "item" }, pickedUp: true },
   // Peach's parasol: the game ties it to her joint 109 (ftpeachspecialhi.c
   // hands the joint list's 109th straight to Item_AttachToParent), so it
   // swings with her hand
@@ -4008,7 +4276,13 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z"; charge?: boo
   // Mewtwo's Shadow Ball (his article 1: ftmewtwo.c), held at his right
   // shoulder while it grows (joint 35, which his code names by number), and
   // Disable (article 0). States 10 to 17: the ball bursting, at each charge (item-effects.ts)
-  0x70: { art: 1, held: { 0: { joint: 35 } }, gone: [10, 11, 12, 13, 14, 15, 16, 17] },
+  // (held and fired, states 0 to 8, its animation runs a frame ahead of the frames it has been in the state:
+  // both start in its owner's step - it_802C5000's pickup, it_2725_Logic101_PickedUp, and it_802C53F0's
+  // it_802C5B18, each with Item_80268E5C - and the ball's own Item_802694CC steps it later that frame; the
+  // recordings have its texture animation and shown joints a frame on from the viewer's count, Mewtwo's ball
+  // and Kirby's copy alike)
+  0x70: { art: 1, held: { 0: { joint: 35 } }, gone: [10, 11, 12, 13, 14, 15, 16, 17],
+          from: { 0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1 } },
   0x6e: { art: 0 },
   // Mr. Game & Watch's props (his articles 0 to 9: ftgamewatch.c), each tied
   // to his joint for as long as it lasts (Item_AttachGameWatchArticle; the
@@ -4096,7 +4370,7 @@ type ReplayItem = NonNullable<ReplayData["frames"][number]["items"]>[number];
 // from the last one it was asked for (a seek walks it again from the item's
 // first frame).
 const SHY_FLY = new Set([1, 4]);
-const shyClocks = new WeakMap<ReplayData, Map<number, { at: number; state: number; t: number }>>();
+const shyClocks = new WeakMap<ReplayData, Map<number, { at: number; state: number; t: number; anim: number }>>();
 function shyGuyClock(data: ReplayData, frame: number, it: ReplayItem): number {
   let clocks = shyClocks.get(data);
   if (!clocks) shyClocks.set(data, (clocks = new Map()));
@@ -4104,14 +4378,19 @@ function shyGuyClock(data: ReplayData, frame: number, it: ReplayItem): number {
   if (!c || c.at > frame || frame - c.at > 1) {
     let f = frame;
     while (f > 0 && data.frames[f - 1]?.items?.some((q) => q.spawnId === it.spawnId)) f--;
-    c = { at: f - 1, state: -1, t: 0 };
+    c = { at: f - 1, state: -1, t: 0, anim: 0 };
     clocks.set(it.spawnId, c);
   }
   for (let f = c.at + 1; f <= frame; f++) {
     const q = f === frame ? it : data.frames[f]?.items?.find((x) => x.spawnId === it.spawnId);
     if (!q) continue;
     const rate = q.state === 4 ? 2 : 1;
-    if (q.state !== c.state) { if (SHY_FLY.has(q.state)) c.t = 0; }
+    if (q.state !== c.state) {
+      if (SHY_FLY.has(q.state)) c.t = 0;
+      // (states 1 and 4 start their animations, 0 and 2; the others keep the one playing)
+      if (q.state === 1) c.anim = 0;
+      else if (q.state === 4) c.anim = 2;
+    }
     else if (SHY_FLY.has(q.state)) {
       if (Math.abs(q.xVelocity) < 1e-6) c.t = 0;
       else { c.t += rate; if (c.t >= 256) c.t = 0; }
@@ -4299,11 +4578,13 @@ function loadLearned(): Promise<Learned | null> {
 const trackArticles = new WeakMap<ReplayData, Map<number, number>>();
 
 /** a fighter's swinging joints as the track has them ("fp": by part, rot, scale, translate) laid on its
- *  pose; whether any was */
-function layTrackSwing(fi: Fighter, char: number, joints: Map<number, Float32Array>, all: boolean): boolean {
+ *  pose; whether any was. `only`: the parts from TransN (part 1) down are laid only when in it */
+function layTrackSwing(fi: Fighter, char: number, joints: Map<number, Float32Array>, all: boolean,
+                       only: ReadonlySet<number> | null = null): boolean {
   const sk = fi.skeleton;
   let laid = false;
   for (const [part, v] of joints) {
+    if (only && part >= 1 && !only.has(part)) continue;
     const j = partToModelJoint(char, part);
     if (j < 0 || j >= sk.n) continue;
     for (let k = 0; k < 3; k++) {
@@ -4359,7 +4640,11 @@ function drawTrackChain(r: Renderer, f: Fighter, it: ReplayItem, links: TrackPos
   const art = said ?? c.art;
   if (art < 0) return;
   const n = links.links;
-  for (const [k, v] of links.joints) {
+  // (in the order the item's code made them, each its own GObj after the one before: from the chain's start
+  // to its end - it_802B75FC, it_802A2568 and their kin make the start first - so the track's last link first)
+  for (let k = n - 1; k >= 0; k--) {
+    const v = links.joints.get(k);
+    if (!v) continue;
     const out = links.out?.get(k) ?? 0;
     const i = n - 1 - k;
     // (the end is drawn whatever its flag says - all but the grapple's claw, whose x2C_b0 it_802B743C
@@ -4374,7 +4659,8 @@ function drawTrackChain(r: Renderer, f: Fighter, it: ReplayItem, links: TrackPos
     for (let row = 0; row < 3; row++) for (let col = 0; col < 4; col++) trackLinkMtx[col * 4 + row] = v[row * 4 + col];
     trackLinkMtx[3] = trackLinkMtx[7] = trackLinkMtx[11] = 0;
     trackLinkMtx[15] = 1;
-    if (anim !== undefined) p.poseMatrix(trackLinkMtx, age);
+    // (a link with animations is its model's root's child, posed by them under the link's matrix)
+    if (anim !== undefined) p.poseUnderMatrix(trackLinkMtx, age);
     else p.poseMatrix(trackLinkMtx);
     r.drawSkeletonTrsp(p.skeleton, TRSP[pass]);
   }
@@ -4385,6 +4671,8 @@ function drawTrackChain(r: Renderer, f: Fighter, it: ReplayItem, links: TrackPos
 /** the game's passes a chain's two kinds of draw take: Camera_800311EC's two calls draw its opaque and cut-out
  *  meshes (HSD_TRSP_OPA, TEXEDGE), Camera_80031328 its see-through ones (XLU) */
 const TRSP = { opa: 1 | 4, xlu: 2 } as const;
+/** HSD_GObj_80390ED0's passes in its order (HSD_GObj_804085F0): HSD_TRSP_OPA, TEXEDGE, XLU */
+const PASSES = [1, 4, 2] as const;
 
 /** the way an item last flew, back through its frames while it was the same
  *  item (an arrow stuck where it hit keeps its angle), or null */
@@ -4398,6 +4686,19 @@ function lastFlight(data: ReplayData, frame: number, it: ReplayItem): [number, n
 }
 
 const PLAIN_ARTICLE: (typeof ARTICLES)[number] = { art: 0 };
+
+/** the pose log's stage parts: each drawn this frame (or in the mirror), by the number the track names it by - the
+ *  part of that index, or the copy `named` has for it, as TrackJoints asks for them (gr/joints.ts) */
+function logStage(log: PoseLog, st: Stage) {
+  const drawn = new Set([...st.skeletons, ...st.mirrorSkeletons]);
+  const numbers = new Set<number>(st.parts.map((p) => p.index));
+  for (const parts of st.forms.values()) for (const p of parts) numbers.add(p.index);
+  for (const n of st.named.keys()) numbers.add(n);
+  for (const n of numbers) {
+    const part = st.named.get(n) ?? st.partOf(n);
+    if (part && drawn.has(part.skeleton)) log.stagePart(n, part.place, part.skeleton);
+  }
+}
 // the items whose look is a rope of links their code moves (the hookshots,
 // the grapple beam, the yo-yo, Sheik's chain, the Ice Climbers' rope: drawn
 // as chains from the track's "lm" where it has them): never drawn plainly as
@@ -4416,7 +4717,13 @@ function drawArticleTracked(r: Renderer, data: ReplayData, fs: Map<string, Fight
   const art = joints ? articleOf(data, fs, it, frame) : null;
   if (art) art.prop.trackPose = joints;
   try {
-    return drawArticle(r, data, fs, it, frame, jointOf, partJoint, turnOf, shakeOf);
+    const drew = drawArticle(r, data, fs, it, frame, jointOf, partJoint, turnOf, shakeOf);
+    // (the pose log: its joints as drawn - the last of its draws this frame, its main pass's)
+    if (drew && itemPoseLog) {
+      const posed = articleOf(data, fs, it, frame);
+      if (posed) itemPoseLog.item(it.spawnId, it.typeId, posed.prop.skeleton);
+    }
+    return drew;
   } finally {
     if (art) art.prop.trackPose = null;
   }
@@ -4439,6 +4746,7 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
     const t = itemAnimAge(data, frame, it) + (a.from?.[it.state] ?? 0);
     if (t < win[0] || t >= win[1]) return false;
   }
+  art.prop.pickedUp = !!a.pickedUp;
   const owner = a.ownerSize || a.held ? ownerOf(data, fs, it, frame) : null;
   // one the game hangs on its owner's joint: under that joint
   const by = a.held?.[it.state];
@@ -4457,7 +4765,8 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
     shadowScale = shadowBallScale(it.state, it.chargeShotChargeLevel, most, art.special(0x18), art.special(0x1c));
   }
   if (on) {
-    art.prop.poseUnder(still ?? itemAnimAge(data, frame, it) + (a.from?.[it.state] ?? 0), on, size, false, art.attach);
+    const age = it.typeId === GW_TORCH && owner ? torchAge(data, owner, frame, it) : itemAnimAge(data, frame, it);
+    art.prop.poseUnder(still ?? age + (a.from?.[it.state] ?? 0), on, size, false, art.attach);
     // (held: its place kept against Mewtwo's hand at his size)
     if (shadowScale !== null) art.prop.setGrandchildScale(shadowScale, shadowOwner?.modelScale);
     const w = art.prop.skeleton.world;
@@ -4478,16 +4787,17 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
   let scale = size;
   const pk = pkFlashScale(data, frame, it, art.special);
   if (pk !== null && pk > 0) scale *= pk;
-  // the charge shot grows with its charge (itsamuschargeshot: between its
-  // attributes' +0x18 and +0x1C)
-  if (a.charge && art.special) {
-    const lo = art.special(0x18), hi = art.special(0x1c);
-    if (lo > 0 && hi > 0 && hi < 50) scale *= lo + (hi - lo) * Math.min(1, it.chargeShotChargeLevel / 7);
-  }
+  // the charge shot grows with its charge, on its first grandchild (chargeShotScale: between its attributes'
+  // +0x18 and +0x1C, by Samus's most charge, her attributes' +0x18; Kirby's copy's taken as 7)
+  const maker = a.charge && art.special ? articleFighter(data, fs, it, frame) : null;
+  const chargeScale = a.charge && art.special
+    ? chargeShotScale(it.chargeShotChargeLevel, it.typeId === SAMUS_CHARGE && maker ? maker.specialAttr(0x18) : 7,
+                      art.special(0x18), art.special(0x1c))
+    : null;
   // a needle (or missile) tilts along the way it flies
   const way = a.tilt ? (it.xVelocity || it.yVelocity ? [it.xVelocity, it.yVelocity] : lastFlight(data, frame, it)) : null;
   const along = (w: number[] | null) => !w ? 0 : a.tilt === "z" ? facing * Math.atan2(w[1], w[0] * facing)
-    : -facing * Math.atan2(w[1], w[0]);
+    : a.tiltFromFacing ? -facing * Math.atan2(facing * w[1], facing * w[0]) : -facing * Math.atan2(w[1], w[0]);
   const tilt = along(way);
   // an arrow in flight: its trail, two models of its own (its special
   // attributes +0x24, +0x28) where it was one and two frames before, turned
@@ -4503,28 +4813,143 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
       r.drawSkeleton(pr.skeleton, "xlu");
     });
   }
-  const byZ = a.tilt === "z";
+  const byZ = a.tilt === "z", onChild = a.tilt === "child";
   // (Samus's bomb: the way it last rolled, and its joints' faster clock near the end of its fuse, from its
   // special attributes +4 and +8: item-facing.ts)
   const bomb = it.typeId === 0x5d;
-  const rotationY = bomb ? samusBombRotation(data, frame, it) : facing * Math.PI / 2;
+  // (turned to face its way only when its attributes say so: HSD_JObjSetFacingDirItem)
+  const rotationY = bomb ? samusBombRotation(data, frame, it) : art.facingTurn === false ? 0 : facing * Math.PI / 2;
   const clock = bomb && art.special ? samusBombClocks(data, frame, it, art.special(4), art.special(8)) : null;
   // a thrown item's turn, as the game has it (the viewer track's: a
   // tumbling bomb), else the way it faces and flies
   const turn = a.tilt ? null : turnOf?.(it.spawnId) ?? null;
   if (turn) {
-    art.prop.pose(itemAnimAge(data, frame, it), it.xPosition, it.yPosition, 0, scale, turn[1], true, turn[2], turn[0], false,
-                  clock?.joint);
+    // (a root that rolls as it faces the camera - the fireballs' (JOBJ_RBILLBOARD) - takes its turn about z from its
+    // own rotate z, mkRBillBoardMtx: on the joint, not in the matrix it is placed by)
+    const rolls = (art.prop.skeleton.flags[0] & 0xe00) === 0x800;
+    art.prop.pose(itemAnimAge(data, frame, it) + (a.from?.[it.state] ?? 0), it.xPosition, it.yPosition, 0, scale, turn[1], true, rolls ? 0 : turn[2],
+                  turn[0], false, clock?.joint);
+    if (rolls) art.prop.setRootRotationZ(turn[2]);
   }
   else {
-    art.prop.pose(itemAnimAge(data, frame, it), it.xPosition, it.yPosition, 0, scale, rotationY, true, byZ ? tilt : 0,
-                  byZ ? 0 : tilt, false, clock?.joint);
+    art.prop.pose(itemAnimAge(data, frame, it) + (a.from?.[it.state] ?? 0), it.xPosition, it.yPosition, 0, scale, rotationY, true, byZ ? tilt : 0,
+                  byZ || onChild ? 0 : tilt, false, clock?.joint);
+    // (the child's tilt: the track's own when it has the item's joints - "jp", the game's turn of it, the
+    // random spins of a needle knocked down included)
+    if (onChild && !art.prop.trackPose) art.prop.setChildRotationX(tilt);
   }
   if (shadowScale !== null) art.prop.setGrandchildScale(shadowScale);
+  if (chargeScale !== null) art.prop.setGrandchildScale(chargeScale);
+  // (a laser stretched along its flight: Item_UpdateRayAnimation, up to its special attributes' +4)
+  if (RAYS.has(it.typeId) && art.special) art.prop.setRootScaleZ(rayScale(data, frame, it, art.special(4)));
+  // (Thunder's bolt shrinking where it struck: itPikachuthunder_UnkMotion2_Anim, by its length, its special
+  // attributes' +4)
+  if (THUNDERS.has(it.typeId) && it.state === 2 && art.special) {
+    art.prop.setRootScaleY(thunderScaleY(itemAge(data, frame, it), it.yVelocity, art.special(4)));
+  }
   drawnArticles.push({ type: it.typeId, state: it.state, x: it.xPosition, y: it.yPosition, tilt, scale,
                        shown: Array.from(art.prop.skeleton.shown) });
-  drawProp(r, art);
+  // (Fox's and Falco's Illusion: its own model hidden in its state 2 - it_8029D798's it_80272A3C - and its copy
+  // drawn after it, itfoxillusion.c it_8029CD18)
+  const illusion = ILLUSIONS.has(it.typeId);
+  if (!illusion || it.state !== 2) drawProp(r, art);
+  const copy = illusion ? illusionCopyAt(data, fs, it, frame) : null;
+  if (copy) {
+    art.prop.poseScaled(copy[0], copy[1], 0, [scale, scale, scale], turn ? turn[1] : rotationY);
+    drawProp(r, art);
+  }
   return true;
+}
+
+/** Fox's Illusion and Falco's Phantasm (itfoxillusion.c) */
+const ILLUSIONS = new Set([0x38, 0x39]);
+/** Fox's (and Falco's) SpecialSStart, SpecialS, SpecialSEnd, SpecialAirSStart, SpecialAirS, SpecialAirSEnd */
+const FOX_S_START = 347, FOX_S = 348, FOX_S_AIR_START = 350, FOX_S_AIR = 351, FOX_S_LAST = 352;
+
+/** where the Illusion's copy stands, or null before it is made. Its anim callback (itFoxillusion_UnkMotion0_Anim,
+ *  states 0 and 1) makes it once its owner's move variable 2 is 2 (it_8029CD78: the model again, at rest, the
+ *  item's turn and scl), and each frame's phys puts it at the owner's ghostEffectPos[3] - his place after each
+ *  dash frame's phys (ftFox_SpecialS_SetPhys: SpecialS, SpecialAirS) four places back, all four his place as
+ *  the start began (ftFox_SpecialS_SetVars) */
+function illusionCopyAt(data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number): [number, number] | null {
+  const fi = ownerOf(data, fs, it, frame);
+  if (!fi) return null;
+  const stAt = (g: number) => data.frames[g]?.players[it.owner]?.state;
+  const itemAt = (g: number) => data.frames[g]?.items?.find((q) => q.spawnId === it.spawnId);
+  // (made: the first frame of its life its owner's script has set variable 2 to 2 by his state's counter)
+  let made = false;
+  for (let g = frame; g >= 0 && frame - g < 120; g--) {
+    const q = g === frame ? it : itemAt(g);
+    if (!q) break;
+    const st = stAt(g);
+    if (!st || q.state > 1 || (st.actionStateId !== FOX_S && st.actionStateId !== FOX_S_AIR)) continue;
+    let v = 0;
+    for (const e of fi.scriptFor(st.actionStateId)) {
+      if (e.kind === "cmdVar" && e.index === 2 && e.frame <= st.actionStateFrameCounter + 0.001) v = e.value;
+    }
+    if (v === 2) { made = true; break; }
+  }
+  if (!made) return null;
+  // (the dash frames' places, the latest first, back to the start)
+  const back: [number, number][] = [];
+  for (let g = frame; g >= 0 && frame - g < 120 && back.length < 4; g--) {
+    const st = stAt(g);
+    if (!st || st.actionStateId < FOX_S_START || st.actionStateId > FOX_S_LAST) break;
+    if (st.actionStateId === FOX_S || st.actionStateId === FOX_S_AIR) back.push([st.xPosition, st.yPosition]);
+    else if (st.actionStateId === FOX_S_START || st.actionStateId === FOX_S_AIR_START) {
+      // (the start's first frame)
+      let e = g;
+      while (e > 0 && stAt(e - 1)?.actionStateId === st.actionStateId) e--;
+      const s0 = stAt(e)!;
+      while (back.length < 4) back.push([s0.xPosition, s0.yPosition]);
+    }
+  }
+  return back.length >= 4 ? back[3] : null;
+}
+
+/** Mr. Game & Watch's torch (forward smash, itgamewatchfire.c) */
+const GW_TORCH = 0x74;
+
+/** the torch's animation clock: its callback (itGamewatchFire_Motion0_Anim) sets its rate to 0 while its owner
+ *  charges the smash (ftLib_IsChargingSmash) and back to 1 after, and the rate a frame's callback sets is the one
+ *  the next frame's step (Item_802694CC, before the callback) runs at - so a frame after one its owner ended
+ *  charging stands still */
+function torchAge(data: ReplayData, owner: Fighter, frame: number, it: ReplayItem): number {
+  const base = itemAnimAge(data, frame, it);
+  const stAt = (g: number) => data.frames[g]?.players[it.owner]?.state;
+  const chargeAt = (s: number) => owner.scriptFor(s).find((e) => e.kind === "smashCharge")?.frame ?? null;
+  let held = 0;
+  for (let n = frame - itemAge(data, frame, it) + 1; n <= frame; n++) if (smashCharging(stAt, n - 1, chargeAt)) held++;
+  return Math.max(0, base - held);
+}
+
+/** Samus's charge shot (Kirby's copy: 0x97) */
+const SAMUS_CHARGE = 0x5e;
+
+/** Fox's and Falco's lasers, and Kirby's copies of them (itfoxlaser.c) */
+const RAYS = new Set([0x36, 0x37, 0x88, 0x89]);
+
+/** a laser's length (Item_UpdateRayAnimation): 0 when made (it_8029C504), then each frame its speed over 11.25
+ *  more, in float32, up to `max`; a reflection (its flight turned round) starts it again at 1e-3
+ *  (Item_ResetRayAfterReflection, Item_BounceRayOffShield) */
+function rayScale(data: ReplayData, frame: number, it: ReplayItem, max: number): number {
+  let f = frame;
+  while (f > 0 && frame - f < 600 && data.frames[f - 1]?.items?.some((q) => q.spawnId === it.spawnId)) f--;
+  const lim = Math.fround(max);
+  let s = 0, lastVx = NaN;
+  for (let g = f; g <= frame; g++) {
+    const q = g === frame ? it : data.frames[g]?.items?.find((x) => x.spawnId === it.spawnId);
+    if (!q) continue;
+    if (!Number.isNaN(lastVx) && q.xVelocity !== 0 && lastVx !== 0 && Math.sign(q.xVelocity) !== Math.sign(lastVx)) {
+      s = Math.fround(1e-3);
+    }
+    const speed = Math.fround(Math.hypot(q.xVelocity, q.yVelocity));
+    s = Math.fround(s + Math.fround(speed / 11.25));
+    if (s > lim) s = lim;
+    if (s < 1e-5) s = Math.fround(1e-3);
+    lastVx = q.xVelocity;
+  }
+  return s;
 }
 
 /** an article, posed: with its outline first when it has one (Mr. Game &
@@ -4572,7 +4997,7 @@ function pictureHash(gl: WebGL2RenderingContext): number {
 }
 
 // The game's effect models where the world has them, each at its own frame
-function drawFxModels(r: Renderer, w: FxWorld, pose = true): number {
+function drawFxModels(r: Renderer, w: FxWorld): number {
   const slots = new Map<number, number>();
   let n = 0;
   for (const m of w.models) {
@@ -4582,8 +5007,8 @@ function drawFxModels(r: Renderer, w: FxWorld, pose = true): number {
     slots.set(k, slot + 1);
     const pr = m.bank.prop(m.index, slot, true);
     if (!pr) continue;
-    // (posed once a frame: a second pass - the main one after a mirror's - draws them as they are)
-    if (pose) w.poseModel(m, pr, m.age);
+    // (posed in each camera's pass: its billboards face that camera)
+    w.poseModel(m, pr, m.age);
     if (m.tint) {
       // the colors the game sets (efLib_SetTevKonstColor): on one material
       // only, the first mesh of the root's first child, its first texture's

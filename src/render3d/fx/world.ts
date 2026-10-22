@@ -186,6 +186,8 @@ export interface ModelFx {
   index: number;
   x: number; y: number; z: number;
   rotY: number; rotZ: number; scale: number;
+  /** its turn about x, when the dispatch gives it one (HSD_JObjSetRotationX: an egg's shell pieces, efSync 0x4CF) */
+  rotX?: number;
   age: number;
   life: number;
   follow: (() => Float32Array | null) | null;
@@ -239,6 +241,9 @@ export interface ModelFx {
   rootRotationZ?: boolean;
   /** held to the joint it is under by place and turn constraints (Prop.poseConstrained), not made its child */
   constrained?: boolean;
+  /** the root's first child's next joint and everything under it hidden, as its update callback last set
+   *  them (efLib_Cb_ftMr_SpecialLw, efLib_Cb_ftLg_SpecialLw) */
+  secondChildOff?: boolean;
 }
 
 /** The effects whose model the game's dispatch marks with state bit 0x80
@@ -830,7 +835,7 @@ export class FxWorld {
     }
     const events = clocked ?? a.fighter.scriptFor(st.actionStateId);
     // (a new move turns the trail off; one picked up under way has its script's say from its start)
-    this.swordStep(a, events, picked ? -1 : prev, now, t.entry === frame);
+    this.swordStep(a, frame, events, picked ? -1 : prev, now, t.entry === frame);
     let charge = -1;
     for (const e of events) {
       if (e.frame > now) break;
@@ -1273,9 +1278,12 @@ export class FxWorld {
     const mark = own ? e[o + 8] : undefined;
     if (mark === "kept") this.stageKept = g;
     if (own && !w) {
-      const s = file === 30 ? this.stageScale : 1;
-      const srt = { tx: x, ty: y, tz: z, rx: 0, ry: 0, rz: 0, sx: s, sy: s, sz: s, follow: false };
-      if (g.srt) Object.assign(g.srt, { tx: x, ty: y, tz: z, sx: g.srt.sx * s, sy: g.srt.sy * s, sz: g.srt.sz * s });
+      // (grLib_801C96F8: a transform made ONCE, or the generator's own (kind 0x20000) no longer only following -
+      // its xA2 cleared, so its particles are placed through its matrix; at the place, times the stage's scale,
+      // Ground_801C0498, whatever bank the generator is of: Zebes' and Mute City's of bank 0 too)
+      const s = this.stageScale;
+      const srt: AppSRT = { tx: x, ty: y, tz: z, rx: 0, ry: 0, rz: 0, sx: s, sy: s, sz: s, follow: false, status: APP_ONCE };
+      if (g.srt) Object.assign(g.srt, { tx: x, ty: y, tz: z, sx: g.srt.sx * s, sy: g.srt.sy * s, sz: g.srt.sz * s, view: false });
       else g.srt = srt;
       g.px = g.py = g.pz = 0;
       return g;
@@ -1492,7 +1500,12 @@ export class FxWorld {
         m.rotY = f * Math.PI / 2;
         m.rotZ = f < 0 ? Math.PI / 2 - way : -(Math.PI / 2 - way);
       };
-    } else if (FACING_CALLBACKS.has(callback)) turn = (m) => { m.rotY = facing() * Math.PI / 2; };
+    } else if (FACING_CALLBACKS.has(callback) || (callback === "SetRotYAndTransition" && how !== "child")) {
+      // (efLib_Cb_SetRotYAndTransition too, on the two of Final Cutter's three that efalt.c 0x494 gives the fighter
+      // as their user data - the ones it attaches, not its child: the root's turn about y set to the side faced
+      // after each step of the animation)
+      turn = (m) => { m.rotY = facing() * Math.PI / 2; };
+    }
     else if (callback === "SetOffset_FromParams") {
       // flung by its parameters, falling 0.1 a frame faster each frame (an egg's shell)
       turn = (m) => { m.fall = (m.fall ?? p1) - 0.1; m.x += p0; m.y += m.fall; m.z += p2; };
@@ -1502,17 +1515,32 @@ export class FxWorld {
       onJoint = null;
       turn = (m) => { const w = on(); if (w) { m.x = w[12]; m.y = w[13] + p1; m.z = w[14]; } };
     } else if (callback === "SetScale_FromParamX") turn = (m) => { m.scale *= p0 || 1; };
+    else if (callback === "ftMr_SpecialLw" || callback === "ftLg_SpecialLw") {
+      // (efLib_Cb_ftMr_SpecialLw, efLib_Cb_ftLg_SpecialLw: the root's first child's next and all under it
+      // shown while the fighter is in motion 349 (Mario's) or 357 (Luigi's), HSD_JObjSetFlagsAll HIDDEN
+      // on it otherwise)
+      const motion = callback === "ftMr_SpecialLw" ? 349 : 357;
+      turn = (m) => {
+        const st = a ? this.sts.get(a.key) : undefined;
+        if (st) m.secondChildOff = st.actionStateId !== motion;
+      };
+    }
     else if (callback && !KNOWN_CALLBACKS.has(callback)) this.unknownCallbacks.add(callback);
     // (a model made at a place stays there; one on a joint goes with it, a
     // child of it turned as it turns)
     const placed = how === "place" || how === "create" || !onJoint;
     const m: ModelFx = {
       bank, index, x: placed ? t[0] : here[0], y: placed ? t[1] : here[1], z: placed ? t[2] : here[2],
-      rotY: ry, rotZ: rz, scale: sx || 1, age: 0, life, follow: placed ? null : onJoint, owner: null, turn,
+      rotY: ry, rotZ: rz, rotX: v[13] || undefined, scale: sx || 1, age: 0, life, follow: placed ? null : onJoint, owner: null, turn,
       by: a?.key, whose: key, under: how === "child" ? onJoint : null, steady: NEVER_PAUSED.has(Number(e[2])),
       rootSet: how !== "child" && !(how === "create" && t[0] === 0 && t[1] === 0 && t[2] === 0),
     };
-    if (FACING_CALLBACKS.has(callback) || callback === "SetRotYZ_FromParamZ_FighterDir") turn?.(m);
+    if (callback === "SetRotYAndTransition" && turn) m.rootRotationY = true;
+    if (FACING_CALLBACKS.has(callback) || callback === "SetRotYZ_FromParamZ_FighterDir" || m.rootRotationY) turn?.(m);
+    // (efLib_Cb_SetScaleRotY_FromFighter: after each animation step the root's scale times the fighter's root
+    // joint's, its model scale (Fighter_UpdateModelScale) - the root's own being its animation's that step, the
+    // product is the same each frame)
+    if (callback === "SetScaleRotY_FromFighter" && a) m.scale *= a.fighter.modelScale;
     const endPart = LIFETIME_END_PART[Number(e[2])];
     if (callback === "LifetimeEndSpawn" && lifetime > 0 && a && key && endPart !== undefined && e.length >= 29) {
       // (the game counts the lifetime down once each frame the model runs, from the frame it is made)
@@ -1695,7 +1723,7 @@ export class FxWorld {
         const vy = 2 * Math.sin(rx);
         const vz = 2 * Math.cos(rx) * Math.cos(ry);
         const m: ModelFx = {
-          bank: this.common, index, x: ctx.pos[0], y: ctx.pos[1], z: ctx.pos[2], rotY: ry, rotZ: rx,
+          bank: this.common, index, x: ctx.pos[0], y: ctx.pos[1], z: ctx.pos[2], rotY: ry, rotZ: 0, rotX: rx,
           scale: ctx.scale, age: 0, life: s.life, follow: null, owner: null, by: ctx.by,
           turn: (p) => { p.fall = (p.fall ?? vy) - 0.1; p.x += vx; p.y += p.fall; p.z += vz; }, steady: NEVER_PAUSED.has(this.spawning),
         };
@@ -1931,7 +1959,7 @@ export class FxWorld {
           const pr = m.bank.prop(m.index, 0, true);
           if (!pr) return null;
           const [x, y, z] = this.modelPlace(m);
-          pr.pose(m.age, x, y, z, m.scale, m.rotY, false, m.rotZ);
+          pr.pose(m.age, x, y, z, m.scale, m.rotY, false, m.rotZ, m.rotX ?? 0);
           const ww = pr.skeleton.world;
           return (joint + 1) * 16 <= ww.length ? ww.subarray(joint * 16, joint * 16 + 16) : null;
         };
@@ -1973,14 +2001,16 @@ export class FxWorld {
     if (parent) {
       if (m.constrained) pr.poseConstrained(age, parent, m.scale, false);
       else pr.poseChild(age, parent, m.scale, false);
+      if (m.secondChildOff) pr.hideSecondChild();
       return;
     }
     const [x, y, z] = this.modelPlace(m);
-    pr.pose(age, x, y, z, m.scale, m.rootRotationY ? 0 : m.rotY, false, m.rootRotationZ ? 0 : m.rotZ, 0, m.rootSet);
+    pr.pose(age, x, y, z, m.scale, m.rootRotationY ? 0 : m.rotY, false, m.rootRotationZ ? 0 : m.rotZ, m.rotX ?? 0, m.rootSet);
     // (what its update callback sets after the animation: the root's turn, a joint's place)
     if (m.rootRotationY) pr.setRootRotationY(m.rotY);
     if (m.rootRotationZ) pr.setRootRotationZ(m.rotZ);
     if (m.jabZ) pr.setJointTranslationZ(1, m.z - 6 + 2 * age);
+    if (m.secondChildOff) pr.hideSecondChild();
   }
 
   private own(key: string) {
@@ -2058,13 +2088,17 @@ export class FxWorld {
     });
   }
 
-  private swordStep(a: ActorFrame, events: readonly ScriptEvent[], prev: number, now: number, entered: boolean) {
+  private swordStep(a: ActorFrame, frame: number, events: readonly ScriptEvent[], prev: number, now: number, entered: boolean) {
     const at = this.swordOf(a.fighter);
     if (!at) return;
     // (the sword's number is one of the game's parts: fp->parts, the model's joints in order)
     const j = partToModelJoint(a.st.internalCharacterId, at.part);
     const blade = j >= 0 && (j + 1) * 16 <= a.world.length ? a.world.subarray(j * 16, j * 16 + 16) : null;
-    this.swords.step(a.key, events, prev, now, entered, (a.st.hitlagRemaining ?? 0) > 0, blade);
+    // (held still by hitlag as the game reads it: Fighter_procCollResolve notes the blade unless x2219_b6, which
+    // Fighter_procHitlag copies from x2219_b5 after counting the frame before's hitlag down - before this frame's
+    // hits - so the frame a hit lands still notes it, and the frame its hitlag runs out too)
+    const held = this.stateAt ? (this.stateAt(a.key, frame - 1)?.hitlagRemaining ?? 0) - 1 > 0 : (a.st.hitlagRemaining ?? 0) > 0;
+    this.swords.step(a.key, events, prev, now, entered, held, blade);
   }
 
   private itemEvents(list: FxItem[]) {

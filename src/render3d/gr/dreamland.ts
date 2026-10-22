@@ -186,12 +186,15 @@ export class Birds implements StageLogic {
     for (const f of this.flights) {
       if (f.from > frame) break;
       for (let i = 0; i < f.count; i++) {
-        // each bird of a flight is 40 frames further along its path than the one before
-        const from = f.from - 40 * i;
+        // each bird of a flight is 40 frames further along its path than the one before. Made by part 8's
+        // proc (grOldPupupu_80210D10, on link 4), a bird's own animation proc (Ground_801C1CD0, link 1) has
+        // run for the frame already: it stands as the file has it on the frame it is made, and plays its
+        // animation from the next (grAnime_801C7FF8 only requests it)
+        const from = f.from + 1 - 40 * i;
         if (frame - from >= this.end || k >= this.pool.length) continue;
         const e = this.pool[k++];
         const run: Run = { anim: 0, joint: 0, deep: true, from, rate: 1 };
-        st.extraRuns.set(e, [run]);
+        st.extraRuns.set(e, frame === f.from ? [] : [run]);
         this.placed.set(e, { f, i });
       }
     }

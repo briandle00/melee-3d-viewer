@@ -37,3 +37,18 @@ test("the renderer loads a billboard's own modelview only under the view it was 
   other[14] = -99;
   assertNode.equal(billboardViewOf(other), -1);
 });
+
+test("a view set back keeps its number; a view set anew never takes one already given", () => {
+  const view = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -5, -100, 1]);
+  const mirror = new Float32Array([1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 5, -100, 1]);
+  const main = setBillboardView(view);
+  const under = setBillboardView(mirror);
+  assertNode.notEqual(under, main);
+  assertNode.equal(billboardViewOf(mirror), under);
+  assertNode.equal(billboardViewOf(view), -1);
+  // (the main camera's again: what was posed under it before is still its own)
+  assertNode.equal(setBillboardView(view, main), main);
+  assertNode.equal(billboardViewOf(view), main);
+  const next = setBillboardView(view);
+  assertNode.ok(next !== main && next !== under);
+});

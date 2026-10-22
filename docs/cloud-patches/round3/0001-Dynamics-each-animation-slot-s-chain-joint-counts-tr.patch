@@ -1,0 +1,287 @@
+From efd6f6a9b71d4289e7426a470dd815749136d10a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 06:49:57 +0000
+Subject: [PATCH 1/4] Dynamics: each animation slot's chain-joint counts
+ translated as the file's words, not as null pointers
+
+ftDynamics.x10 is declared FigaTree***, but each relocated slot of its
+table points at plain 32-bit counts: how many leading chain joints the
+animation drives. ftCo_8009E4A8 and ftCo_8009E7B4 hand tree[i] to
+ftCo_8009CB40, which compares it as (s32) arg3 against the chain index.
+The counts are not relocated, so the hosted native-DAT translation, which
+follows the declared pointer type, made every one NULL (0) and every chain
+joint was solved by physics (Peach, Zelda, Donkey Kong, Marth, Roy).
+
+The translation now keeps the declared host shape (pointer-sized slots)
+and carries each count in its slot as the PPC word; a slot without a
+relocation stays NULL. Kirby's hats keep x10 raw (MslDatKirbyHatDynamics).
+PPC builds are unchanged. This changes hosted gameplay wherever an
+animation drives part of a chain, so the replay gate and output locks need
+a run with game data.
+
+dynamics-counts-smoke translates a synthetic ftDataCaptain (no game data)
+and checks the counts; it fails without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ Makefile                                 |   8 +-
+ src/platform/native_dat.c                |  61 +++++++++++
+ src/upstream_delta_ledger.tsv            |   1 +
+ tests/melee_core/dynamics_counts_smoke.c | 123 +++++++++++++++++++++++
+ 4 files changed, 192 insertions(+), 1 deletion(-)
+ create mode 100644 tests/melee_core/dynamics_counts_smoke.c
+
+diff --git a/Makefile b/Makefile
+index 740e0adf..50457c39 100644
+--- a/Makefile
++++ b/Makefile
+@@ -215,6 +215,7 @@ NATIVE_SMOKE_SRCS := \
+ 	$(ROOT)/tests/melee_core/kirby_moves_smoke.c \
+ 	$(ROOT)/tests/melee_core/cpu_replay_smoke.c \
+ 	$(ROOT)/tests/melee_core/fnmsubs_smoke.c \
++	$(ROOT)/tests/melee_core/dynamics_counts_smoke.c \
+ 	$(ROOT)/tests/melee_core/batch_api_smoke.c \
+ 	$(ROOT)/tests/melee_core/public_api_smoke.c \
+ 	$(ROOT)/tests/melee_core/context_smoke.c \
+@@ -807,6 +808,7 @@ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/pichu-moves-smoke,$(NATIVE_OBJ_D
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/kirby-moves-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/kirby_moves_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/cpu-replay-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/cpu_replay_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/fnmsubs-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/fnmsubs_smoke.o))
++$(eval $(call link_native_smoke,$(NATIVE_BUILD)/dynamics-counts-smoke,$(NATIVE_OBJ_DIR)/tests/melee_core/dynamics_counts_smoke.o))
+ $(eval $(call link_native_smoke,$(NATIVE_BUILD)/pool-chaos-soak,$(NATIVE_OBJ_DIR)/tests/melee_core/pool_chaos_soak.o))
+ $(eval $(call link_native_smoke,$(NATIVE_WASM_PARITY),$(NATIVE_OBJ_DIR)/tests/melee_core/wasm_parity.o))
+ $(eval $(call link_native_smoke,$(NATIVE_LIFECYCLE_BENCH),$(NATIVE_OBJ_DIR)/tests/melee_core/lifecycle_bench.o))
+@@ -848,7 +850,7 @@ ifeq ($(UNAME_S)/$(HOST_TARGET_ARCH),Linux/x86_64)
+ thread-smoke: $(NATIVE_SHARED_WRITE_AUDIT)
+ endif
+ 
+-native-smoke: thread-smoke fnmsubs-smoke mewtwo-smoke gamewatch-smoke roy-smoke pichu-smoke kirby-smoke data-check $(NATIVE_BUILD)/cpu-replay-smoke $(NATIVE_DATA_SMOKE) $(NATIVE_MAP_SMOKE) $(NATIVE_MODEL_SMOKE) $(NATIVE_SCHEDULER_SMOKE) $(NATIVE_SCALAR_API_SMOKE) $(NATIVE_CONTEXT_SMOKE) $(NATIVE_BATCH_API_SMOKE) $(NATIVE_PUBLIC_API_SMOKE) $(NATIVE_GAMEPLAY_PARTS_SMOKE) $(NATIVE_ARTICLE_POOL_SMOKE) $(NATIVE_STAGE_LIFECYCLE_SMOKE) $(NATIVE_RUNTIME_CENSUS)
++native-smoke: thread-smoke fnmsubs-smoke dynamics-counts-smoke mewtwo-smoke gamewatch-smoke roy-smoke pichu-smoke kirby-smoke data-check $(NATIVE_BUILD)/cpu-replay-smoke $(NATIVE_DATA_SMOKE) $(NATIVE_MAP_SMOKE) $(NATIVE_MODEL_SMOKE) $(NATIVE_SCHEDULER_SMOKE) $(NATIVE_SCALAR_API_SMOKE) $(NATIVE_CONTEXT_SMOKE) $(NATIVE_BATCH_API_SMOKE) $(NATIVE_PUBLIC_API_SMOKE) $(NATIVE_GAMEPLAY_PARTS_SMOKE) $(NATIVE_ARTICLE_POOL_SMOKE) $(NATIVE_STAGE_LIFECYCLE_SMOKE) $(NATIVE_RUNTIME_CENSUS)
+ 	@$(TIMEOUT) 5s "$(NATIVE_DATA_SMOKE)" "$(DATA)"
+ 	@$(TIMEOUT) 5s "$(NATIVE_MODEL_SMOKE)" "$(DATA)"
+ 	@$(TIMEOUT) 5s "$(NATIVE_MAP_SMOKE)" "$(DATA)"
+@@ -984,6 +986,10 @@ gamewatch-smoke: data-check $(NATIVE_BUILD)/gamewatch-moves-smoke
+ fnmsubs-smoke: $(NATIVE_BUILD)/fnmsubs-smoke
+ 	@$(TIMEOUT) 10s "$(NATIVE_BUILD)/fnmsubs-smoke"
+ 
++.PHONY: dynamics-counts-smoke
++dynamics-counts-smoke: $(NATIVE_BUILD)/dynamics-counts-smoke
++	@$(TIMEOUT) 10s "$(NATIVE_BUILD)/dynamics-counts-smoke"
++
+ .PHONY: roy-smoke
+ roy-smoke: data-check $(NATIVE_BUILD)/roy-moves-smoke
+ 	@$(TIMEOUT) 10s "$(NATIVE_BUILD)/roy-moves-smoke" "$(DATA)"
+diff --git a/src/platform/native_dat.c b/src/platform/native_dat.c
+index 7edc9d8a..b17520c2 100644
+--- a/src/platform/native_dat.c
++++ b/src/platform/native_dat.c
+@@ -756,6 +756,67 @@ static void translate_value(MslNativeArchive* context,
+             }
+             return;
+         }
++        if (strcmp(type->name, "ftDynamics") == 0) {
++            // ftDynamics::x10 is declared FigaTree***, but the archive's
++            // table holds, per animation blend slot, a pointer to plain
++            // 32-bit counts: how many leading chain joints the animation
++            // drives. ftCo_8009E4A8 and ftCo_8009E7B4 pass tree[i] to
++            // ftCo_8009CB40, which compares it as (s32) arg3 against the
++            // chain index. The counts are not relocated, so following the
++            // declared pointer type turned every one into NULL (0): each
++            // chain joint was then left to the physics. Keep the declared
++            // host shape (pointer-sized slots) and carry each count in its
++            // slot, as the PPC word it is; a slot without a relocation stays
++            // NULL, as ftCo_8009E7B4's checks expect.
++            // refs/melee/src/melee/ft/ftdynamics.c::{ftCo_8009CB40,
++            //   ftCo_8009E4A8,ftCo_8009E7B4}
++            for (i = 0; i < type->field_count; ++i) {
++                const MslDatField* field = &type->fields[i];
++                uint32_t field_source = source_offset + field->source_offset;
++                if (field->source_offset == 0x10 &&
++                    field->type->kind == MSL_DAT_POINTER)
++                {
++                    uint32_t table = raw_pointer(context, field_source);
++                    void** slots = NULL;
++                    if (table != UINT32_MAX) {
++                        uint32_t slot_count =
++                            (next_boundary(context, table) - table) / 4;
++                        uint32_t s;
++                        if (slot_count == 0) {
++                            slot_count = 1;
++                        }
++                        slots = native_alloc((size_t) slot_count *
++                                             sizeof(*slots));
++                        for (s = 0; s < slot_count; ++s) {
++                            uint32_t counts =
++                                raw_pointer(context, table + s * 4);
++                            uintptr_t* words;
++                            uint32_t n;
++                            uint32_t k;
++                            if (counts == UINT32_MAX) {
++                                continue;
++                            }
++                            n = (next_boundary(context, counts) - counts) / 4;
++                            if (n == 0) {
++                                n = 1;
++                            }
++                            words = native_alloc((size_t) n * sizeof(*words));
++                            for (k = 0; k < n; ++k) {
++                                words[k] = read_be32(context->data + counts +
++                                                     k * 4);
++                            }
++                            slots[s] = words;
++                        }
++                    }
++                    memcpy((uint8_t*) native + field->native_offset, &slots,
++                           sizeof(slots));
++                    continue;
++                }
++                translate_value(context, field->type, field_source,
++                                (uint8_t*) native + field->native_offset);
++            }
++            return;
++        }
+         if (strcmp(type->name, "DynamicsDesc") == 0) {
+             const MslDatType* source_element = NULL;
+             uint32_t count;
+diff --git a/src/upstream_delta_ledger.tsv b/src/upstream_delta_ledger.tsv
+index 035cff59..8c96f7d8 100644
+--- a/src/upstream_delta_ledger.tsv
++++ b/src/upstream_delta_ledger.tsv
+@@ -237,3 +237,4 @@ canonical:ef-dispatch-recorder-only	hosted-visual	melee/ef/{efsync.c,efasync.c,e
+ canonical:viewer-track-stage-events	hosted-visual	melee/gr/{grlib.c,granime.c,grizumi.c,groldpupupu.c,grpstadium.c};runtime/effects.c::msl_effect_match_dptcl	grLib_801C96F8/801C97DC/801C9808 makers and 801C9834..801C9908 enders, efLib_Cb_DPtcl, grAnime_801C8138, grStadium_801D2528, grOldPupupu_80210D10, grIzumi_801CBE64; GALE01 0x804D48E0 { 1, 0 }	Stage generators, their ends, joint-animation particle keys, stage animations, Stadium screens and Dream Land's birds as track events. With the track on, Dream Land's background runs its whole animation and Whispy's blow effect GALE01's table; gameplay's draws are the same.
+ canonical:viewer-track-random-state	hosted-visual	runtime/{effects.c,scalar.c,viewer_track.c,main.c}	efAsync_DatEntries (every file), each effect model's first animation step, hsd_8039F05C's count gate	msl_core_game_data_init_visual loads the effect files gameplay leaves out and counts each model's first-step draws, so the track's seeds and rng are the game's random state; msl_core_game_data_init does none of it.
+ canonical:viewer-track-hud-burst	hosted-visual	runtime/viewer_track.c	ifStock_802F8298, ifStock_802F98E8; IfAll ScInfDmg and Stc_scemdls joint places	The HUD's burst at a lost stock (efSync 0x474, generator 0xF7) as a track event; read only.
++canonical:dynamics-animated-chain-counts	hosted-portability	platform/native_dat.c::translate_value(ftDynamics);melee/ft/ftdynamics.c::{ftCo_8009CB40,ftCo_8009E4A8,ftCo_8009E7B4}	ftDynamics.x10 is declared FigaTree*** but each relocated slot points at unrelocated u32 counts; ftCo_8009CB40 compares the slot as (s32) arg3 against the chain index	Carry each count in its pointer-sized slot as the PPC word it is; following the declared pointer type made every count NULL, so every chain joint was solved by physics (Peach, Zelda, Donkey Kong, Marth, Roy). Kirby hats keep x10 raw (MslDatKirbyHatDynamics). tests/melee_core/dynamics_counts_smoke.c translates a synthetic ftDataCaptain.
+diff --git a/tests/melee_core/dynamics_counts_smoke.c b/tests/melee_core/dynamics_counts_smoke.c
+new file mode 100644
+index 00000000..1d86e97f
+--- /dev/null
++++ b/tests/melee_core/dynamics_counts_smoke.c
+@@ -0,0 +1,123 @@
++// ftDynamics::x10 from a synthetic archive (no game data): the per-slot
++// tables of chain-joint counts ftCo_8009E4A8 and ftCo_8009E7B4 hand to
++// ftCo_8009CB40 come through the native-DAT translation as the counts the
++// file holds, not as NULL pointers. The archive is a minimal ftDataCaptain:
++// zeroed special attributes and animation tables, and an ftDynamics whose
++// x10 points at three slots (two count tables and one empty slot).
++// refs/melee/src/melee/ft/ftdynamics.c::{ftCo_8009CB40,ftCo_8009E4A8}
++#include "ft/types.h"
++#include "platform/native_dat.h"
++#include "runtime/context.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++enum {
++    DATA_FTDATA = 0x0000,
++    DATA_ATTRS = 0x0080,
++    DATA_ANIMS = 0x0200,
++    DATA_ANIM_META = 0x2000,
++    DATA_DYNAMICS = 0x2280,
++    DATA_TABLE = 0x22A0,
++    DATA_COUNTS_A = 0x22B0,
++    DATA_COUNTS_B = 0x22C0,
++    DATA_SIZE = 0x22D0,
++};
++
++static void put32(uint8_t* p, uint32_t v)
++{
++    p[0] = (uint8_t) (v >> 24);
++    p[1] = (uint8_t) (v >> 16);
++    p[2] = (uint8_t) (v >> 8);
++    p[3] = (uint8_t) v;
++}
++
++int main(void)
++{
++    static const uint32_t relocs[] = {
++        DATA_FTDATA + 0x04, DATA_FTDATA + 0x0C, DATA_FTDATA + 0x10,
++        DATA_FTDATA + 0x2C, DATA_DYNAMICS + 0x10, DATA_TABLE + 0x00,
++        DATA_TABLE + 0x04,
++    };
++    static const char symbol[] = "ftDataCaptain";
++    const uint32_t nreloc = sizeof(relocs) / sizeof(relocs[0]);
++    const uint32_t file_size =
++        0x20 + DATA_SIZE + nreloc * 4 + 8 + (uint32_t) sizeof(symbol);
++    uint8_t* file = calloc(1, file_size);
++    uint8_t* data = file + 0x20;
++    uint8_t* meta = data + DATA_SIZE;
++    static MslNativeDatContext native_dat;
++    HSD_Archive archive;
++    ftData* ft;
++    uint32_t i;
++
++    if (file == NULL) {
++        return 1;
++    }
++    msl_core_context_native_dat = &native_dat;
++    put32(file + 0x00, file_size);
++    put32(file + 0x04, DATA_SIZE);
++    put32(file + 0x08, nreloc);
++    put32(file + 0x0C, 1);
++    put32(file + 0x10, 0);
++    put32(data + DATA_FTDATA + 0x04, DATA_ATTRS);
++    put32(data + DATA_FTDATA + 0x0C, DATA_ANIMS);
++    put32(data + DATA_FTDATA + 0x10, DATA_ANIM_META);
++    put32(data + DATA_FTDATA + 0x2C, DATA_DYNAMICS);
++    put32(data + DATA_DYNAMICS + 0x00, 2);
++    put32(data + DATA_DYNAMICS + 0x10, DATA_TABLE);
++    put32(data + DATA_TABLE + 0x00, DATA_COUNTS_A);
++    put32(data + DATA_TABLE + 0x04, DATA_COUNTS_B);
++    // (slot 2: no relocation, a null table)
++    put32(data + DATA_COUNTS_A + 0x00, 3);
++    put32(data + DATA_COUNTS_A + 0x04, 1);
++    put32(data + DATA_COUNTS_B + 0x00, 0);
++    put32(data + DATA_COUNTS_B + 0x04, 5);
++    for (i = 0; i < nreloc; ++i) {
++        put32(meta + i * 4, relocs[i]);
++    }
++    put32(meta + nreloc * 4 + 0, DATA_FTDATA);
++    put32(meta + nreloc * 4 + 4, 0);
++    memcpy(meta + nreloc * 4 + 8, symbol, sizeof(symbol));
++
++    if (msl_native_archive_parse(&archive, file, file_size) != 0) {
++        fprintf(stderr, "dynamics-counts-smoke: parse failed\n");
++        return 1;
++    }
++    ft = msl_native_archive_get_public(&archive, symbol);
++    if (ft == NULL || ft->x2C == NULL || ft->x2C->dynamicsNum != 2 ||
++        ft->x2C->x10 == NULL)
++    {
++        fprintf(stderr, "dynamics-counts-smoke: no dynamics table\n");
++        return 1;
++    }
++    {
++        FigaTree*** x10 = ft->x2C->x10;
++        static const intptr_t want[2][2] = { { 3, 1 }, { 0, 5 } };
++        uint32_t s;
++        for (s = 0; s < 2; ++s) {
++            if (x10[s] == NULL) {
++                fprintf(stderr, "dynamics-counts-smoke: slot %u is NULL\n", s);
++                return 1;
++            }
++            for (i = 0; i < 2; ++i) {
++                // (as ftCo_8009CB40 reads it: the FigaTree* slot as a count)
++                if ((s32) (ssize_t) x10[s][i] != want[s][i]) {
++                    fprintf(stderr,
++                            "dynamics-counts-smoke: slot %u count %u is %ld, "
++                            "want %ld\n",
++                            s, i, (long) (ssize_t) x10[s][i], (long) want[s][i]);
++                    return 1;
++                }
++            }
++        }
++        if (x10[2] != NULL) {
++            fprintf(stderr, "dynamics-counts-smoke: empty slot not NULL\n");
++            return 1;
++        }
++    }
++    puts("dynamics-counts-smoke: ok");
++    return 0;
++}
+-- 
+2.43.0
+

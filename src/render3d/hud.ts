@@ -23,14 +23,17 @@
  */
 import { AObj, Archive, Image, JObj, MatAnim, loadAnimJoint, loadJoint, loadMatAnimJoint, parseArchive, ptr } from "./hsd";
 import { applyMatAnim, Skeleton } from "./skeleton";
-import { ident, lookAt, Mat, mul, perspective, srt } from "./math";
+import { ident, lookAt, Mat, mul } from "./math";
+import { gameProjection, gameView } from "./camera";
+import { gameSrt } from "./prop";
 import type { PlayerState, ReplayData } from "../common/types";
 import type { EffectBank } from "./fx/bank";
 import { hsdFloat, hsdNext, type Particle, ParticleSystem } from "./fx/particles";
 import { buildParticles } from "./fx/draw";
 import {
   FIRST_FRAME, GO_FRAME, HUNDREDS, markFrame, ONES, PlayerHud, portColor, portColorIndex, SIGN, TAG_IDLE, TAG_LAUNCH, TAG_LAUNCH_SPEED,
-  TENS, timerAt, edgePoint, edgeWidth, tagFrame, nametagFrame, chevronFrame,
+  TENS, timerAt, edgePoint, edgeWidth, tagFrame, nametagFrame, chevronFrame, type ArrowTable, arrowTable, copyArrowTable,
+  arrowsAssign, arrowsPlace,
 } from "./hudlogic";
 import { PLATE_FONT, quad, tagText, texQuad, textPicture } from "./hudtext";
 import { glyphAtlas, PLATE_FULL, plateText, rawBytes, type PlateFont, type PlateText } from "./plates";
@@ -47,10 +50,11 @@ const PLATE_TEXT = { dx: 0.8, top: -0.525 };
 
 // what it asks of the renderer (renderer.ts), by shape: that is a browser
 // module, which the checks, run outside a browser, cannot type
-interface RenderTarget { tex: unknown }
+interface RenderTarget { tex: unknown; erase?: boolean }
 interface Renderer {
   drawSkeleton(sk: Skeleton, pass: "opa" | "xlu"): void;
-  overlay(proj: Mat, view: Mat, target?: unknown, clear?: [number, number, number, number] | null, mirrored?: boolean): void;
+  overlay(proj: Mat, view: Mat, target?: unknown, clear?: [number, number, number, number] | null, mirrored?: boolean,
+          gx?: Float32Array | null): void;
   endOverlay(): void;
   target(w: number, h: number): RenderTarget;
   bindImage(image: Image, tex: unknown): void;
@@ -109,6 +113,7 @@ export class HudModel {
   begin() {
     this.sk.resetPose();
     this.sk.resetMaterials();
+    this.sk.hidden.clear();
   }
 
   /** joint animation `set` at `frame` (held at its end), on one joint or all */
@@ -152,6 +157,18 @@ export class HudModel {
     if (d) { const st = this.sk.states[d.index]; st.diffuse.set(rgb); st.dirty = true; }
   }
 
+  /** a material's alpha (the game writes its mat->alpha) */
+  alpha(joint: number, a: number, dobj = 0) {
+    const d = this.joints[joint]?.dobjs[dobj];
+    if (d) { const st = this.sk.states[d.index]; st.alpha = a; st.dirty = true; }
+  }
+
+  /** of all the model's meshes, this one alone drawn (the rest hidden till the next begin) */
+  solo(joint: number, dobj: number) {
+    const keep = this.joints[joint]?.dobjs[dobj]?.index;
+    for (const j of this.joints) for (const d of j?.dobjs ?? []) if (d.index !== keep) this.sk.hidden.add(d.index);
+  }
+
   /** HSD_JObjSetFlagsAll(HIDDEN): the joint and everything under it */
   hide(joint: number) {
     const sk = this.sk;
@@ -166,8 +183,8 @@ export class HudModel {
   }
 
   /** the root placed (and scaled, turned), then the world matrices */
-  finish(x: number, y: number, z = 0, scale = 1, rotZ = 0) {
-    srt(this.place, scale, scale, scale, 0, 0, rotZ, x, y, z);
+  finish(x: number, y: number, z = 0, scale = 1, rotZ = 0, scaleY = scale, scaleZ = scale) {
+    gameSrt(this.place, scale, scaleY, scaleZ, 0, 0, rotZ, x, y, z);
     this.sk.update(this.place);
   }
 
@@ -304,6 +321,9 @@ export interface HudActor {
   magnify?: boolean;
   /** where it is drawn, when not where the replay says (a star KO) */
   at?: [number, number, number];
+  /** where the player's record has it when its tag is placed (fn_802FCC44, Player_LoadPlayerCoords): the frame
+   *  before's place, as Fighter_procPlayer writes it after the HUD's procs; `at` (or the replay's) if unset */
+  tagAt?: [number, number, number];
   nameTagHeight: number;
   /** the point the match camera frames it by (its camera bone), world */
   bone: [number, number, number] | null;
@@ -313,13 +333,16 @@ export interface HudActor {
   draw: () => void;
 }
 
+const ORIGIN = [0, 0, 0];
 const PIC = 64; // the magnifier's picture, texels a side (the game's image)
 
 /** One replay's HUD: its players' displays, made once, posed each frame. */
 export class Hud {
   private players: {
     slot: number; life: PlayerHud; num: HudModel | null; mark: HudModel | null; stock: HudModel | null;
-    tag: HudModel | null; lupe: HudModel | null; arrow: HudModel | null; pic: RenderTarget | null; place: [number, number];
+    tag: HudModel | null; lupe: HudModel | null; pic: RenderTarget | null; place: [number, number];
+    /** Slippi's name plate: the tag model's box (its joint 1's third mesh), alone */
+    plateBox: HudModel | null;
     /** where it sits by the HUD Slots option (hudslots.ts): the outer slots of four for two players, or as in
      *  the game, its port's slot by the match's number of places (ifAll_802F343C) */
     places: Record<HudSlots, [number, number]>;
@@ -397,6 +420,7 @@ export class Hud {
   private timer: HudModel | null;
   private proj = new Float32Array(16);
   private view = new Float32Array(16);
+  private gxProj = new Float32Array(16);
   private flatProj = new Float32Array(16);
   private flatView = ident(new Float32Array(16));
   private picProj = new Float32Array(16);
@@ -430,13 +454,15 @@ export class Hud {
         slot, life: new PlayerHud(data, slot, { ...kit.tags }, this.goAt + FIRST_FRAME, nametag.length > 0), nametag,
         plate: { text: ps.displayName ?? "", raw: ps.displayNameRaw ? rawBytes(ps.displayNameRaw) : null },
         num: kit.model(kit.num, "hud:num"), mark: kit.model(kit.mark, "hud:mark"),
-        stock: kit.model(kit.stock, "hud:stock"), tag: kit.model(kit.tag, "hud:tag"), lupe: kit.model(kit.lupe, "hud:lupe"),
-        arrow: kit.model(kit.arrow, "hud:arrow"), human: ps.playerType === 0,
+        stock: kit.model(kit.stock, "hud:stock"), tag: kit.model(kit.tag, "hud:tag"), plateBox: kit.model(kit.tag, "hud:tag"), lupe: kit.model(kit.lupe, "hud:lupe"),
+        human: ps.playerType === 0,
         pic: null, place: at[hudSlotsMode()], places: at, colorIdx,
         external: ps.externalCharacterId, costume: ps.costumeIndex,
         tagFrame: nametag ? nametagFrame(tf) : tf,
       });
     }
+    // un_802FE260: the four edge arrows, whoever plays
+    for (let i = 0; i < 4 && kit.arrow; i++) { const m = kit.model(kit.arrow, "hud:arrow"); if (m) this.arrows.push(m); }
     for (const p of this.players) {
       p.life.shakeDraws = (i) => this.shakeDraws(i, p.slot, "shake");
       p.life.scatterDraws = (i) => this.shakeDraws(i, p.slot, "scatter");
@@ -491,7 +517,8 @@ export class Hud {
 
   /** every model's textures, ahead of the first frame */
   warm(r: Renderer) {
-    for (const p of this.players) for (const m of [p.num, p.mark, p.stock, p.tag, p.lupe, p.arrow]) if (m) r.warm(m.sk);
+    for (const p of this.players) for (const m of [p.num, p.mark, p.stock, p.tag, p.plateBox, p.lupe]) if (m) r.warm(m.sk);
+    for (const m of this.arrows) r.warm(m.sk);
     for (const m of [this.ready, this.go, this.countdown]) if (m) r.warm(m.sk);
     if (this.timer) r.warm(this.timer.sk);
   }
@@ -504,9 +531,10 @@ export class Hud {
    *  every page; should one ever be wider or narrower, the HUD keeps its
    *  proportions (the HUD camera's height, the picture's width), its layout
    *  in the middle as a widescreen Melee shows it, the bubbles and chevrons
-   *  on the picture's own edges. */
+   *  on the picture's own edges. `tagViewProj` is the match camera as the frame before left it (the tags': see
+   *  below), `viewProj` without it. */
   draw(r: Renderer, f: number, viewProj: Mat, actors: HudActor[], bank: EffectBank | null = null,
-       aspect = this.kit.cam.aspect, tracked: TrackedBursts | null = null) {
+       aspect = this.kit.cam.aspect, tracked: TrackedBursts | null = null, tagViewProj: Mat = viewProj) {
     const gameFrame = f + FIRST_FRAME;
     // the picture's width over the game's
     // (a picture of the game's own shape takes the game's cameras as they are: within a part in a hundred, 1)
@@ -524,28 +552,39 @@ export class Hud {
         // (not for one KO'd, asleep or coming back on the angel platform: ftLib_80086ED0)
         if (!a || !(a.magnify ?? a.drawn) || !a.bone || !p.lupe || a.st.actionStateId <= 13) continue;
         const [sx, sy, w] = toScreen(viewProj, a.bone, k);
-        if (w > 0 && sx >= 320 - 320 * k && sx < 320 + 320 * k && sy >= 0 && sy < 480) continue;
+        // (Camera_80030BBC: the point in whole pixels, cut toward zero, inside the scissor)
+        const px = Math.trunc(sx), py = Math.trunc(sy);
+        if (w > 0 && px >= 320 - 320 * k && px < 320 + 320 * k && py >= 0 && py < 480) continue;
         if (w <= 0) continue;
         if (!p.pic) {
           p.pic = r.target(PIC, PIC);
+          // (ifMagnify_802FBBDC erases it with a quad, HSD_CObjEraseScreen(cobj, 1, 0, 1): the draw log says so)
+          p.pic.erase = true;
           const img = p.lupe.image(2, 1);
           if (img) r.bindImage(img, p.pic.tex);
         }
         this.picture(r, p.pic, a);
-        magnified.push({ p, sx, sy });
+        // (the bubble and its arrow go by the same whole pixels: ftLib_GetScreenPos hands ifMagnify_802FB8C0 the
+        // fighter's x2188, which Camera_80030BBC set from the point cut toward zero)
+        magnified.push({ p, sx: px, sy: py });
         out.magnified.push(p.slot);
       }
     }
-    // --- the tags over the fighters: a flat 640 x 480 camera, pixel units
+    // --- the tags over the fighters: a flat 640 x 480 camera, pixel units. fn_802FCC44 places each in the HUD's
+    // procs (17), before Fighter_procPlayer (22) writes the frame's place to the player's record and before the
+    // frame's render makes the camera's matrices again (lbVector_WorldToScreen reads the cobj's): the place and
+    // the camera of the frame before
     ortho(this.flatProj, 320 - 320 * k, 320 + 320 * k, -480, 0, 0.1, 32768);
     lookAt(this.flatView, [0, 0, 300], [0, 0, 0]);
     let tagsBegun = false;
     for (const p of this.players) {
       if (!p.tag || !p.life.tag[f]) continue;
       const a = actors.find((x) => x.player === p.slot);
-      if (!a || (!a.drawn && !a.at)) continue;
-      const pos = a.at ?? [a.st.xPosition, a.st.yPosition, 0];
-      const [sx, sy, w] = toScreen(viewProj, [pos[0], pos[1] + a.nameTagHeight - 2.5, pos[2]], k);
+      // (whether the fighter is drawn or not: fn_802FCC44 asks only its slot, its state and its stocks - one its
+      // move hides, a Kirby's swallowed one, keeps its tag)
+      if (!a) continue;
+      const pos = a.tagAt ?? a.at ?? [a.st.xPosition, a.st.yPosition, 0];
+      const [sx, sy, w] = toScreen(tagViewProj, [pos[0], pos[1] + a.nameTagHeight - 2.5, pos[2]], k);
       if (w <= 0) continue;
       const m = p.tag;
       m.begin();
@@ -567,9 +606,10 @@ export class Hud {
     // --- the HUD camera's pieces
     const c = this.kit.cam;
     // (its own height of view, the picture's shape: never stretched)
-    perspective(this.proj, (c.fovy * Math.PI) / 180, c.aspect * k, c.near, c.far);
-    lookAt(this.view, c.eye, [0, 0, 0]);
-    r.overlay(this.proj, this.view);
+    // (in float32 as the game makes them: C_MTXPerspective, HSD_CObjSetupViewingMtx)
+    gameProjection(this.proj, this.gxProj, c.fovy, c.aspect * k, c.near, c.far);
+    gameView(this.view, c.eye, ORIGIN);
+    r.overlay(this.proj, this.view, null, null, false, this.gxProj);
     // the picture's pixels a HUD unit (the camera's view of its z = 0 plane)
     const hudPpu = r.pictureHeight / (2 * Math.abs(c.eye[2]) * Math.tan((c.fovy * Math.PI) / 360));
     for (const { p, sx, sy } of magnified) this.drawLupe(r, p, sx, sy);
@@ -628,8 +668,23 @@ export class Hud {
         // (the bytes the replay holds for the name, while the page's text is still the replay's)
         const text = font ? plateText(font, name, name === p.plate.text ? p.plate.raw : null, this.players[0] === p) : null;
         // the plate is as wide as its name wants, up to the plate at its widest
-        const half = PLATE.hx * (text ? text.width : PLATE_FULL);
-        this.box(cx - half, oy + PLATE.sy * PLATE.y0, cx + half, oy + PLATE.sy * PLATE.y1, [0, 0, 0, PLATE.fill]);
+        const sx = text ? text.width : PLATE_FULL, b = p.plateBox;
+        if (b) {
+          // (the tag model's box, in black at 84/255, x scaled by the name, y by 0.62)
+          b.begin();
+          b.solo(1, 2);
+          b.color(1, [0, 0, 0], 2);
+          b.alpha(1, PLATE.fill, 2);
+          // (the box's own joint at the plate's place, as the game's draws have it: its rest offset - 2.5 up and 10
+          // back in the tag model - not added, so the root goes where that cancels it)
+          const [rx, ry, rz] = b.rest(1);
+          b.finish(cx - rx * sx, oy - ry * PLATE.sy, -rz, sx, 0, PLATE.sy, 1);
+          r.drawSkeleton(b.sk, "opa");
+          r.drawSkeleton(b.sk, "xlu");
+        } else {
+          const half = PLATE.hx * sx;
+          this.box(cx - half, oy + PLATE.sy * PLATE.y0, cx + half, oy + PLATE.sy * PLATE.y1, [0, 0, 0, PLATE.fill]);
+        }
         if (text) {
           this.lettered.push(text);
           this.letteredAt.push(px + PLATE_TEXT.dx, py + PLATE_TEXT.top);
@@ -806,36 +861,91 @@ export class Hud {
     return [0, 1, 2].map((ch) => (c[0][ch] * w[0] + c[1][ch] * w[1] + c[2][ch] * w[2] + c[3][ch] * w[3]) / 255) as [number, number, number];
   }
 
-  /** if_2FD9.c: a player whose bubble sits on the screen's left or right
-   *  edge also gets the running chevrons at that edge's middle, in the
-   *  port's color, stacked 2.6 apart when several share an edge (humans in
-   *  the first four ports only) */
+  /** if_2FD9.c: a human in ports 1-4 whose bubble sits on the screen's left or right edge gets the running
+   *  chevrons at that edge's middle, in the port's color, stacked 2.6 apart when several share an edge. The game
+   *  draws its four arrows every frame, each placed (fn_802FDA78) by the table the magnifiers' draws of the frame
+   *  before left (ifMagnify_802FB8C0): an unused one 10000 back, where and in the color it last had. Returns
+   *  the ports whose arrows show. */
   private drawArrows(r: Renderer, f: number, magnified: { p: Hud["players"][number]; sx: number; sy: number }[]): number[] {
-    const side = new Map<number, number>();
+    if (this.arrows.length < 4) return [];
     const W = edgeWidth(this.k);
+    const kinds = new Map<number, number>();
     for (const { p, sx, sy } of magnified) {
-      if (!p.arrow || !p.human || p.slot >= 4) continue;
       const [ex] = edgePoint(sx - 320, -(sy - 240), W);
-      if (Math.abs(ex) >= W - 1e-4) side.set(p.slot, ex < 0 ? 1 : 2);
+      if (Math.abs(ex) >= W - 1e-4) kinds.set(p.slot, ex < 0 ? 1 : 2);
     }
+    const assign = (t: ArrowTable) => {
+      for (let port = 0; port < 6; port++) {
+        const p = this.players.find((q) => q.slot === port);
+        arrowsAssign(t, port, kinds.get(port) ?? 0, !p?.human, p ? portColor(p.colorIdx) : [0, 0, 0]);
+      }
+    };
+    // (after a jump: the table as the magnifiers left it, played from the HUD's start (arrowHistory); without
+    // that, this frame's own magnifiers stand in for the frame before)
+    let before = this.arrowAfter.get(f - 1) ?? this.arrowHistory(f - 1);
+    if (!before) { before = arrowTable(); assign(before); }
+    const t = copyArrowTable(before);
+    const z = arrowsPlace(t);
     // (at x 25 in the game's picture: as far in from a wider picture's own edges)
-    const x = 25 + this.halfWidth() * (this.k - 1);
-    const STACK = [0, -1.3, -2.6, -3.9];
-    for (const [slot, kind] of side) {
-      const p = this.players.find((q) => q.slot === slot)!;
-      const below = [...side].filter(([s, k]) => k === kind && s < slot).length;
-      const all = [...side].filter(([, k]) => k === kind).length;
-      const m = p.arrow!;
+    const X = 25 + this.halfWidth() * (this.k - 1);
+    for (let i = 0; i < 4; i++) {
+      const m = this.arrows[i];
       m.begin();
-      const col = portColor(p.colorIdx);
       // (its blink: hudlogic.ts chevronFrame)
-      for (let d = 0; d < 3; d++) { m.mat(1, 0, chevronFrame(f), 1, d, d, true); m.color(1, col, d); }
-      m.finish(kind === 1 ? -x : x, 2.6 * below + STACK[Math.max(0, all - 1)], 0, 1, kind === 1 ? 0 : Math.PI);
+      for (let d = 0; d < 3; d++) { m.mat(1, 0, chevronFrame(f), 1, d, d, true); m.color(1, t.color[i], d); }
+      m.finish(t.x[i] === 0 ? 0 : Math.sign(t.x[i]) * X, t.y[i], z[i], 1, t.rot[i]);
       r.drawSkeleton(m.sk, "opa");
       r.drawSkeleton(m.sk, "xlu");
     }
-    return [...side.keys()];
+    // (redrawn, a frame finds the table it began from as it was)
+    assign(t);
+    this.arrowAfter = new Map([[f - 1, before], [f, t]]);
+    return before.kind.flatMap((k, i) => (k ? [before!.port[i]] : []));
   }
+  private arrows: HudModel[] = [];
+  /** the arrow kind of each port (0-5: 0 none, 1 left, 2 right) its magnifier gives at frame g, worked out without
+   *  drawing (the player's: Viewer3D), or null when it can't be; for the table after a jump */
+  edgeKindsAt: ((g: number) => ArrayLike<number> | null) | null = null;
+  /** the table after frame f's magnifiers, every 256 frames from the HUD's start (arrowHistory) */
+  private arrowChecks: ArrowTable[] = [];
+  /** if_2FD9.c's table after frame f's magnifiers, played from the HUD's start (game frame 0) a frame at a time:
+   *  fn_802FDA78 placing the arrows, then each port's magnifier (ifMagnify_802FB8C0). An unused arrow keeps
+   *  where it last was and its color for the rest of the game, so a jump needs the whole of it. Null when the
+   *  player gives no edgeKindsAt. */
+  private arrowHistory(f: number): ArrowTable | null {
+    const kindsAt = this.edgeKindsAt;
+    if (!kindsAt) return null;
+    const f0 = -FIRST_FRAME, STEP = 256;
+    if (f < f0) return arrowTable();
+    // (false when a frame's kinds can't be had yet - its camera not worked out: nothing is kept then)
+    const step = (t: ArrowTable, g: number): boolean => {
+      const kinds = kindsAt(g);
+      if (!kinds) return false;
+      arrowsPlace(t);
+      for (let port = 0; port < 6; port++) {
+        const p = this.players.find((q) => q.slot === port);
+        arrowsAssign(t, port, kinds[port] ?? 0, !p?.human, p ? portColor(p.colorIdx) : [0, 0, 0]);
+      }
+      return true;
+    };
+    const want = Math.floor((f - f0) / STEP);
+    // (checkpoint k: the table after frame f0 + k * STEP)
+    if (!this.arrowChecks.length) {
+      const t = arrowTable();
+      if (!step(t, f0)) return null;
+      this.arrowChecks.push(t);
+    }
+    while (this.arrowChecks.length <= want) {
+      const k = this.arrowChecks.length, t = copyArrowTable(this.arrowChecks[k - 1]);
+      for (let g = f0 + (k - 1) * STEP + 1; g <= f0 + k * STEP; g++) if (!step(t, g)) return null;
+      this.arrowChecks.push(t);
+    }
+    const t = copyArrowTable(this.arrowChecks[want]);
+    for (let g = f0 + want * STEP + 1; g <= f; g++) if (!step(t, g)) return null;
+    return t;
+  }
+  /** the arrows' table after a frame's magnifiers, for the frame drawn and the one before it */
+  private arrowAfter = new Map<number, ArrowTable>();
 
   /** the bubble at the screen's edge toward the fighter, its pointer turned to it */
   private drawLupe(r: Renderer, p: Hud["players"][number], sx: number, sy: number) {
@@ -862,6 +972,29 @@ const CORNERS: number[][] = [
   [3, 3, 6, 6], [3, 4, 6, 7], [4, 5, 7, 8], [5, 5, 8, 8],
   [6, 6, 6, 6], [6, 7, 6, 7], [7, 8, 7, 8], [8, 8, 8, 8],
 ];
+
+/** ftLib_UpdateScreenVisibility, as ftDrawCommon_80080E18 asks it whether to draw a fighter: its camera bone on
+ *  the screen (Camera_80030BBC: in whole pixels, cut toward zero, inside the scissor), or else the point `r` from
+ *  the bone nearest the camera's line of sight (Camera_80030CFC: the camera box's size and 15), the line passing
+ *  within `r` counting too. `view` is the camera's (world to eye), `vp` its view-projection, k as toScreen's. */
+export function fighterShown(vp: Mat, view: Mat, bone: [number, number, number], r: number, k = 1): boolean {
+  const inside = (p: [number, number, number]) => {
+    const [sx, sy, w] = toScreen(vp, p, k);
+    if (w <= 0) return false;
+    const px = Math.trunc(sx), py = Math.trunc(sy);
+    return px >= 320 - 320 * k && px < 320 + 320 * k && py >= 0 && py < 480;
+  };
+  if (inside(bone)) return true;
+  // (the eye, and the way it looks: the view's rows are the eye's axes)
+  const eye = [0, 1, 2].map((c) => -(view[c * 4] * view[12] + view[c * 4 + 1] * view[13] + view[c * 4 + 2] * view[14]));
+  const dir = [-view[2], -view[6], -view[10]];
+  const len = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+  const t = ((bone[0] - eye[0]) * dir[0] + (bone[1] - eye[1]) * dir[1] + (bone[2] - eye[2]) * dir[2]) / (len * len);
+  const d = [0, 1, 2].map((c) => eye[c] + dir[c] * t);
+  const dist = Math.hypot(bone[0] - d[0], bone[1] - d[1], bone[2] - d[2]);
+  if (dist < r) return true;
+  return inside([0, 1, 2].map((c) => bone[c] + ((d[c] - bone[c]) / dist) * r) as [number, number, number]);
+}
 
 /** a point of the world on the game's 640 x 480 screen (x right, y down), and its w */
 export function toScreen(vp: Mat, p: [number, number, number], k = 1): [number, number, number] {

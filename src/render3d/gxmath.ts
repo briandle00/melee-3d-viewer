@@ -264,8 +264,10 @@ export function PSMTXIdentity(m: Mtx): Mtx {
 const tmpC = new Float32Array(12);
 
 /** PSMTXConcat: ab = a b (ab may be a or b). Each entry a row of a down a
- *  column of b: ps_muls0 then ps_madds1 and ps_madds0 in turn, the
- *  translation's last a ps_madds1 by the constant 1 (the others by 0) */
+ *  column of b: ps_muls0 then ps_madds1 and ps_madds0 in turn; the columns
+ *  go in pairs, and the second pair's (2 and 3) last a ps_madds1 by Unit01,
+ *  (0, 1): the translation's a3 times 1, column 2's a3 times 0 (a zero's
+ *  sign: -0 + a positive a3's +0 is +0). Columns 0 and 1 have no such step */
 export function PSMTXConcat(a: Mtx, b: Mtx, ab: Mtx): Mtx {
   const m = tmpC;
   for (let r = 0; r < 3; r++) {
@@ -274,7 +276,7 @@ export function PSMTXConcat(a: Mtx, b: Mtx, ab: Mtx): Mtx {
       let v = f32(a0 * b[c]);
       v = madd(a1, b[4 + c], v);
       v = madd(a2, b[8 + c], v);
-      v = madd(c === 3 ? 1 : 0, a3, v);
+      if (c >= 2) v = madd(c === 3 ? 1 : 0, a3, v);
       m[r * 4 + c] = v;
     }
   }
@@ -559,7 +561,7 @@ const itC = new Float32Array(12);
  *  entry's p * q - r * s with the left product fused (this build's contraction), then times 1 / det */
 export function HSD_MtxInverseTranspose(src: Mtx, dest: Mtx): Mtx {
   const det0 = det3x4(src);
-  if (Math.abs(det0) < f32(1e-10)) { if (src !== dest) dest.set(src); return dest; }
+  if (!(Math.abs(det0) >= f32(1e-10))) { if (src !== dest) dest.set(src); return dest; }
   const m = src, det = f32(1 / det0), o = itC;
   o[0] = f32(msub(m[5], m[10], f32(m[9] * m[6])) * det);
   o[4] = f32(-msub(m[1], m[10], f32(m[9] * m[2])) * det);
@@ -584,12 +586,16 @@ export function mtxToGL3(m: Mtx, out: Float32Array, o = 0): Float32Array {
 const invC = new Float32Array(12);
 
 /** HSD_MtxInverseConcat: out = inverse(inv) src (src copied when inv cannot
- *  be inverted). Its contractions are the ones the game's matched code shows
- *  for this build's expressions (HSD_MtxSRT, the determinant above): in
- *  p * q +- r the left product is fused, the right one rounded first */
+ *  be inverted). Each step as the game's code does it (the old disassembly,
+ *  asm/sysdolphin/baselib/mtx.s before the relink 8e5068d3): the determinant
+ *  as above, each cofactor fmsubs or fnmsubs on one rounded product, times
+ *  1 / det (fdivs); each translation's inner part fmsubs, then fnmsubs; each
+ *  entry an fmuls and two fmadds, the translation's then an fadds. A
+ *  determinant whose size is not at least 1e-10 - NaN too (fcmpo, bge) -
+ *  copies src */
 export function HSD_MtxInverseConcat(inv: Mtx, src: Mtx, out: Mtx): Mtx {
   const det0 = det3x4(inv);
-  if (Math.abs(det0) < f32(1e-10)) { if (src !== out) out.set(src); return out; }
+  if (!(Math.abs(det0) >= f32(1e-10))) { if (src !== out) out.set(src); return out; }
   const det = f32(1 / det0);
   const i = inv;
   const t1 = f32(msub(i[5], i[10], f32(i[9] * i[6])) * det);

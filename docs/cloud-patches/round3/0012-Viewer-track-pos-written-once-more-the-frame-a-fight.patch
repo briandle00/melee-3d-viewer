@@ -1,0 +1,67 @@
+From ad4d109647fc83cf4ea5da2806e8b52a20ee7985 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 01:43:44 +0000
+Subject: [PATCH 12/12] Viewer track: pos written once more the frame a fighter
+ is back on the plane
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ agent_docs/VIEWER_TRACK.md |  2 +-
+ src/runtime/viewer_track.c | 18 +++++++++++++++---
+ 2 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/agent_docs/VIEWER_TRACK.md b/agent_docs/VIEWER_TRACK.md
+index 61eab1fb..91d38f8a 100644
+--- a/agent_docs/VIEWER_TRACK.md
++++ b/agent_docs/VIEWER_TRACK.md
+@@ -92,7 +92,7 @@ fighter's port (0-3) and `sub` 0 for the leader, 1 for Nana.
+ | `charge` | state | port, sub, field, value | stored charges: `dk`, `ss`, `mt`, `sk`, `gw`, Kirby's `kb.kind`, `kb.dk`, `kb.ss` |
+ | `part` | state | port, sub, model part, variant | `Fighter.x5F4_arr[i].idx` |
+ | `anim` | state | port, sub, animation index, source kind, frame, rate, blend frames, blend frame | the animation the game plays, and whose table it is |
+-| `pos` | state | port, sub, x, y, z, rot x, y, z, scale | the top joint, while in DeadUp states (4-10) or off the plane |
++| `pos` | state | port, sub, x, y, z, rot x, y, z, scale | the top joint, while in DeadUp states (4-10) or off the plane, and once more the frame it is back |
+ | `shake` | state | port, sub, x, y, z (0 when it stops) | the draw offset `ftCommon_8008021C` sums: hit shake, the held-mash wobble, the smash-charge shake |
+ | `hide` | state | port, sub, bits (1 invisible, 2 `x221E_b5`, 4 `x2226_b5`) | written once something is hidden |
+ | `cns` | state | port, sub, 1 or 0 | `x2226_b2`: the fighter's XRotN hung on its captor's TransN2 (`ftCo_800DB368`) until the throw lets go (`ftCo_800DDDE4`) or the grab breaks; written at the fighter's first frame and on every change |
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index 78b8c096..b0261b17 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -101,6 +101,9 @@ struct MslViewerTrack {
+     // owners, allocated with the track, else NULL.
+     MslTrackPose* world;
+     size_t pose_used;
++    // Which fighters (port * 2 + sub) had a "pos" line the frame before:
++    // the frame one comes back to the plane writes one more.
++    unsigned char pos_off[12];
+     // The HUD's stock icons per port (track_hud_step).
+     struct {
+         unsigned char seen;
+@@ -1015,11 +1018,20 @@ static void track_fighter(MslViewerTrack* track, int frame,
+     emit_state(track, frame, key, value);
+ 
+     // DeadUpStar/DeadUpFall (Slippi action states 4-10) or off the plane:
+-    // the top joint's place, turn and size.
+-    if ((fp->motion_id >= 4 && fp->motion_id <= 10) || fp->cur_pos.z != 0.0F) {
++    // the top joint's place, turn and size; and once more the frame it is
++    // back (the state over, or on the plane again), so a reader sees it come
++    // back.
++    {
++        int off = (fp->motion_id >= 4 && fp->motion_id <= 10) ||
++                  fp->cur_pos.z != 0.0F;
++        int at = port * 2 + sub;
++        int was = at >= 0 && at < 12 ? track->pos_off[at] : 0;
+         HSD_JObj* top = fp->parts != NULL ? fp->parts[FtPart_TopN].joint
+                                           : NULL;
+-        if (top != NULL) {
++        if (at >= 0 && at < 12) {
++            track->pos_off[at] = (unsigned char) off;
++        }
++        if (top != NULL && (off || was)) {
+             snprintf(key, sizeof(key), "\"pos\",%d,%d", port, sub);
+             snprintf(value, sizeof(value),
+                      ",\"0x%08x\",\"0x%08x\",\"0x%08x\",\"0x%08x\","
+-- 
+2.43.0
+

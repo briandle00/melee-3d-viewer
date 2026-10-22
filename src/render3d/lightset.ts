@@ -16,13 +16,17 @@ import { pickShadowLight } from "./shadow";
 export interface Lighting {
   /** the ambient light's color (black when it does not light the diffuse channel) */
   ambient: [number, number, number];
+  /** the ambient light's alpha when it lights the alpha channel (its LOBJ_ALPHA: HSD_SetupChannelMode's
+   *  ambient alpha, HSD_LObjGetActiveByID(0x100)->color.a), else null */
+  ambientAlpha: number | null;
   n: number;
   /** per light (8 x vec4): where it is (w 1) or the way to it (w 0) */
   pos: Float32Array;
   /** its axis, toward the light (spot lights) */
   axis: Float32Array;
   color: Float32Array;
-  /** a0, a1, a2, and w: 1 lights the diffuse channel, 2 the specular one */
+  /** a0, a1, a2, and w: 1 lights the diffuse channel, 2 the specular one, 4 the alpha one (LOBJ_ALPHA:
+   *  setup_diffuse_lightobj puts it in lightmask_alpha) */
   attnA: Float32Array;
   /** k0, k1, k2 */
   attnK: Float32Array;
@@ -38,9 +42,10 @@ export interface Lighting {
 
 let versions = 0;
 
-export function packLighting(ambient: [number, number, number], lights: GxLight[]): Lighting {
+export function packLighting(ambient: [number, number, number], lights: GxLight[],
+                             ambientAlpha: number | null = null): Lighting {
   const out: Lighting = {
-    ambient, n: Math.min(8, lights.length), pos: new Float32Array(32), axis: new Float32Array(32),
+    ambient, ambientAlpha, n: Math.min(8, lights.length), pos: new Float32Array(32), axis: new Float32Array(32),
     color: new Float32Array(32), attnA: new Float32Array(32), attnK: new Float32Array(32), lights, version: ++versions,
     place: new Float32Array(32), interest: new Float32Array(32),
   };
@@ -48,7 +53,7 @@ export function packLighting(ambient: [number, number, number], lights: GxLight[
     out.pos.set(l.pos, i * 4);
     out.axis.set(l.axis, i * 4);
     out.color.set(l.color, i * 4);
-    out.attnA.set([l.attn[0], l.attn[1], l.attn[2], (l.diffuse ? 1 : 0) + (l.specular ? 2 : 0)], i * 4);
+    out.attnA.set([l.attn[0], l.attn[1], l.attn[2], (l.diffuse ? 1 : 0) + (l.specular ? 2 : 0) + (l.diffuse && l.alpha ? 4 : 0)], i * 4);
     out.attnK.set([l.attn[3], l.attn[4], l.attn[5], 0], i * 4);
     const pl = l.place ?? [l.pos[0], l.pos[1], l.pos[2]];
     out.place.set([pl[0], pl[1], pl[2], 1], i * 4);
@@ -129,17 +134,21 @@ export class LightSet {
   }
 
   private build(frame: number): Lighting {
-    let ambient: [number, number, number] | null = null;
+    let ambient: [number, number, number] | null = null, ambientAlpha: number | null = null;
     const out: GxLight[] = [];
     const s = this.scale;
     for (const l0 of this.lights) {
       const l = this.animate(l0, frame);
       if (l.flags & LOBJ.HIDDEN) continue;
       if (l.kind === "ambient") {
-        if (!ambient) ambient = l.flags & LOBJ.DIFFUSE ? [l.color[0], l.color[1], l.color[2]] : [0, 0, 0];
+        if (!ambient) {
+          ambient = l.flags & LOBJ.DIFFUSE ? [l.color[0], l.color[1], l.color[2]] : [0, 0, 0];
+          if (l.flags & LOBJ.ALPHA) ambientAlpha = l.color[3];
+        }
         continue;
       }
       const diffuse = (l.flags & LOBJ.DIFFUSE) !== 0, specular = (l.flags & LOBJ.SPECULAR) !== 0;
+      const alpha = (l.flags & LOBJ.ALPHA) !== 0;
       if ((!diffuse && !specular) || out.length >= 8 || !l.position) continue;
       // (an animated place is the animation's own, not at the stage's scale:
       // the game's ground code scales only the ones the file starts with)
@@ -161,13 +170,13 @@ export class LightSet {
           const t = (l.interest ?? [0, 0, 0]).map((v) => v * k);
           const d = [p[0] - t[0], p[1] - t[1], p[2] - t[2]], n = Math.hypot(d[0], d[1], d[2]) || 1;
           axis = [d[0] / n, d[1] / n, d[2] / n];
-          out.push({ pos, axis, color: [...l.color], attn, diffuse, specular, place: p, interest: t as [number, number, number] });
+          out.push({ pos, axis, color: [...l.color], attn, diffuse, specular, alpha, place: p, interest: t as [number, number, number] });
           continue;
         }
       }
-      out.push({ pos, axis, color: [...l.color], attn, diffuse, specular, place: p });
+      out.push({ pos, axis, color: [...l.color], attn, diffuse, specular, alpha, place: p });
     }
-    return packLighting(ambient ?? [0, 0, 0], out);
+    return packLighting(ambient ?? [0, 0, 0], out, ambientAlpha);
   }
 
   /** a light as its animation leaves it at a frame */

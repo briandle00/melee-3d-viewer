@@ -1,0 +1,94 @@
+From 6a44d7fd4e94bf7f28a99c77f3dfd7626dc5a0f6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 12:12:58 +0000
+Subject: [PATCH] Viewer track: sp leaves out joints that stand where a stopped
+ animation left them
+
+The hosted build stops the animation of every stage part outside its
+stage's runtime_animation_mask (Fountain of Dreams animates only the water
+columns), so those parts' joints stay where their animation was when it
+stopped. sp wrote such a joint once, as it differed from the file's rest,
+and that pose stood over the viewer's animation for the whole match (a
+Fountain part-1 joint at about 1/940 of the game's scale). On a part whose
+animation was stopped, a joint is now written only once it leaves the pose
+it first had, so the game's code moving it is still written.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ src/runtime/viewer_track.c | 39 ++++++++++++++++++++++++++++++++------
+ 1 file changed, 33 insertions(+), 6 deletions(-)
+
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index c8ee847d..eb47c0ac 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -1607,24 +1607,50 @@ static void track_item_poses(MslViewerTrack* track, int frame,
+     }
+ }
+ 
++// Whether the hosted build stopped this stage part's animation
++// (configure_headless_ground_schedule: a part outside its stage's
++// runtime_animation_mask has its animation removed and the headless proc in
++// Ground_801C1CD0's place). Its joints then stand where the animation was
++// when it stopped, which is not the game's pose.
++static int stage_animation_stopped(const HSD_GObj* gobj)
++{
++    const HSD_GObjProc* proc;
++    for (proc = gobj->proc; proc != NULL; proc = proc->child) {
++        if (proc->on_invoke == msl_ground_headless_epoch_proc) {
++            return 1;
++        }
++    }
++    return 0;
++}
++
+ // A stage part's model and its file's joints together, as joint_walk counts
+ // them (an instance's children left out of both). A joint the file has and
+-// the model does not, or the other way, ends that branch.
++// the model does not, or the other way, ends that branch. A joint is written
++// once it leaves its file's rest pose; on a part whose animation the hosted
++// build stopped, once it leaves the pose it first had here instead (where
++// the stopped animation left it), so a joint only the game's code moves is
++// still written and one only its animation moves is left to the viewer.
+ static void pose_stage_walk(MslViewerTrack* track, MslTrackPose* o,
+-                            HSD_JObj* j, const HSD_Joint* d, int* index)
++                            HSD_JObj* j, const HSD_Joint* d, int* index,
++                            int stopped)
+ {
+     for (; d != NULL && j != NULL; d = d->next, j = j->next) {
+         int at = (*index)++;
+         if (at < TRACK_POSE_JOINTS && !(j->flags & JOBJ_USE_QUATERNION)) {
+             float v[9];
++            joint_values(j, v);
+             if (!o->known[at]) {
+-                pose_rest(o, at, d);
++                if (stopped) {
++                    memcpy(o->last[at], v, sizeof(v));
++                    o->known[at] = 1;
++                } else {
++                    pose_rest(o, at, d);
++                }
+             }
+-            joint_values(j, v);
+             pose_joint(track, o, at, -1, v, 9);
+         }
+         if (!(j->flags & JOBJ_INSTANCE)) {
+-            pose_stage_walk(track, o, j->child, d->child, index);
++            pose_stage_walk(track, o, j->child, d->child, index, stopped);
+         }
+     }
+ }
+@@ -1688,7 +1714,8 @@ static void track_stage_poses(MslViewerTrack* track, int frame,
+             joint_values(root, v);
+             pose_joint(track, o, 0, -1, v, 9);
+         }
+-        pose_stage_walk(track, o, root->child, desc, &index);
++        pose_stage_walk(track, o, root->child, desc, &index,
++                        stage_animation_stopped(gobj));
+         snprintf(head, sizeof(head), "[%d,\"sp\",%d", frame, id);
+         pose_flush(track, head);
+     }
+-- 
+2.43.0
+

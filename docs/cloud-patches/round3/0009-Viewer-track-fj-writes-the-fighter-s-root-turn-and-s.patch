@@ -1,0 +1,65 @@
+From fe7495fb5504a950c04baec7642a0e90dfef6fcc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 14:11:58 +0000
+Subject: [PATCH] Viewer track: fj writes the fighter's root turn and size
+
+Part 0 was left out of fj as the place and facing the replay gives, but
+its turn also carries what the state's code sets (a tumble's spin, a
+lean), and its scale the model's size. fj now writes part 0's rotation
+and scale (values 0 to 5); its translation stays pos's and the replay's.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ agent_docs/VIEWER_TRACK.md |  2 +-
+ src/runtime/viewer_track.c | 14 ++++++++++++--
+ 2 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/agent_docs/VIEWER_TRACK.md b/agent_docs/VIEWER_TRACK.md
+index d0a27cec..f372a723 100644
+--- a/agent_docs/VIEWER_TRACK.md
++++ b/agent_docs/VIEWER_TRACK.md
+@@ -107,7 +107,7 @@ fighter's port (0-3) and `sub` 0 for the leader, 1 for Nana.
+ | `irot` | state | item id, rot x, y, z | an item's root joint turn, once it turns |
+ | `jp` | event | item id, then per joint that changed: joint, mask, values | an item's joints below its root as its code and animation left them (rot x, y, z, scale x, y, z, translate x, y, z; mask bit k says value k follows); joint = preorder index in the item's model file; a joint is written once it leaves the file's rest pose, then on change |
+ | `fp` | event | port, sub, character, then per part that changed: part, mask, values | a fighter's swinging joints (`ftdynamics.c`), the same nine values: the chains a hurtbox sits on, which gameplay solves, and, with the track, the capes, caps and hair the gameplay build drops, kept as copies the game's solver goes on with (`msl_viewer_track_keep_dynamics`; not yet Peach's, Zelda's and Donkey Kong's); a fighter's first line (and its first as another character) has all of them |
+-| `fj` | event | port, sub, character, then per part that changed: part, mask, values | a fighter's joints as the game left them at the frame's end (its animation, the blend into it, and whatever its own code set after: `ftParts`, the state's code, the swinging chains), the same nine values as `jp`, by part: every part with a live joint of its own, not part 0 (the place and facing), not the presentation-only parts the hosted build leaves cold (`ftParts_HeadlessGameplayMask`), not a quaternion joint; a fighter's first line (and its first as another character) has all of them, then each value only on change |
++| `fj` | event | port, sub, character, then per part that changed: part, mask, values | a fighter's joints as the game left them at the frame's end (its animation, the blend into it, and whatever its own code set after: `ftParts`, the state's code, the swinging chains), the same nine values as `jp`, by part: every part with a live joint of its own, not part 0's place (only its turn and size, values 0 to 5: facing, the state's tilts and spins, model scale), not the presentation-only parts the hosted build leaves cold (`ftParts_HeadlessGameplayMask`), not a quaternion joint; a fighter's first line (and its first as another character) has all of them, then each value only on change |
+ | `lm` | event | item id, link count, then per link that changed: link, out, mask, values | a chain's links (hookshots, Samus's grapple, Sheik's chain, Ness's yo-yo, the Ice Climbers' belay): each link's matrix as the item's code set it (rows 0-2 of the 3x4, mask bits 0-11); link 0 is the end with no `prev`; out is `x2C_b0` (a link is drawn only then); a link that comes out or goes back is written whole |
+ | `sp` | event | stage part, then per joint that changed: joint, mask, values | a stage part's joints as its animations and code left them (the moving parts: Fountain of Dreams', Yoshi's Story's and Pokemon Stadium's platforms and the rest), the same nine values as `jp`; the part is numbered as `gjoint` numbers it (its `map_id`, an extra copy's `map_id + 1000 * k`), the joint by preorder index in its tree as `stage_joint` counts it (0 the part's scale root from `Ground_801C14D0`, at rest rot 0, scale the stage's, translate 0; the file's tree from 1, an instance's children left out); a joint is written once it leaves the file's rest pose, then on change |
+ | `ij` | state | item id, joint, offset x, y, z, 3x3 matrix | an item joint a generator was made on: place from the item's and its turn, at the frame's end |
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index fb9a380a..c3b0f190 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -1354,8 +1354,10 @@ static void track_items(MslViewerTrack* track, int frame,
+ //       not work any of it out. Every part with a joint of its own that
+ //       gameplay keeps live: the presentation-only parts the hosted build
+ //       leaves cold (ftParts_HeadlessGameplayMask: fingers, faces) are not
+-//       animated there and are not written, nor is part 0 (the fighter's
+-//       place and facing, which "pos" and the replay give), nor a joint
++//       animated there and are not written; of part 0 (the fighter's
++//       root) only its turn and size are (values 0 to 5: its facing, the
++//       tilts and spins the state's code sets, its model scale), its place
++//       being "pos"'s and the replay's; nor is a joint
+ //       turned by a quaternion, nor a swinging chain's joints when the
+ //       track build does not solve that chain (its links pruned, no copy
+ //       kept: msl_viewer_track_keep_dynamics), which stand unsolved here and
+@@ -1835,6 +1837,14 @@ static void track_fighter_joints(MslViewerTrack* track, int frame,
+         count = TRACK_POSE_JOINTS;
+     }
+     unsolved_chain_parts(fp, count, track->chain_parts);
++    // (the root: its turn and size, not its place)
++    if (count > 0 && fp->parts[0].joint != NULL &&
++        !(fp->parts[0].joint->flags & JOBJ_USE_QUATERNION))
++    {
++        float v[9];
++        joint_values(fp->parts[0].joint, v);
++        pose_joint(track, o, 0, -1, v, 6);
++    }
+     for (part = 1; part < count; ++part) {
+         HSD_JObj* j = fp->parts[part].joint;
+         float v[9];
+-- 
+2.43.0
+

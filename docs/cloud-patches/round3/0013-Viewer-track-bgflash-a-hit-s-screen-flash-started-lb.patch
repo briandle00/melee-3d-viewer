@@ -1,0 +1,94 @@
+From 3429f628dd278a01786bc4c63aae961c44532133 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 05:35:15 +0000
+Subject: [PATCH] Viewer track: bgflash, a hit's screen flash started
+ (lbBgFlash_80021C48)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ agent_docs/VIEWER_TRACK.md       | 1 +
+ src/runtime/viewer_track.c       | 9 +++++++++
+ src/runtime/viewer_track.h       | 2 ++
+ src/stubs/headless_exclusions.c  | 7 +++++++
+ tools/validation/visual_state.py | 1 +
+ 5 files changed, 20 insertions(+)
+
+diff --git a/agent_docs/VIEWER_TRACK.md b/agent_docs/VIEWER_TRACK.md
+index 91d38f8a..535f5e5f 100644
+--- a/agent_docs/VIEWER_TRACK.md
++++ b/agent_docs/VIEWER_TRACK.md
+@@ -96,6 +96,7 @@ fighter's port (0-3) and `sub` 0 for the leader, 1 for Nana.
+ | `shake` | state | port, sub, x, y, z (0 when it stops) | the draw offset `ftCommon_8008021C` sums: hit shake, the held-mash wobble, the smash-charge shake |
+ | `hide` | state | port, sub, bits (1 invisible, 2 `x221E_b5`, 4 `x2226_b5`) | written once something is hidden |
+ | `cns` | state | port, sub, 1 or 0 | `x2226_b2`: the fighter's XRotN hung on its captor's TransN2 (`ftCo_800DB368`) until the throw lets go (`ftCo_800DDDE4`) or the grab breaks; written at the fighter's first frame and on every change |
++| `bgflash` | event | type, duration | `lbBgFlash_80021C48`: a hit's screen flash started (`ftCo_8008DB10` by element, `ft_0C8C` type 0xE); the hosted build draws nothing, so the call is a stub that writes this |
+ | `bg` | state | state, current, previous | Battlefield's background (map part 3) |
+ | `fd` | state | phase, x, y, z, frames | Final Destination's background (map part 3) |
+ | `fdrot` | state | rot x, y, z | Final Destination part 7's turn in phases 9 and 10 |
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index b0261b17..047e0198 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -769,6 +769,15 @@ void msl_viewer_track_stadscreen(int mode, int player)
+         mode == 8 ? player : -1);
+ }
+ 
++void msl_viewer_track_bgflash(int type, int duration)
++{
++    MslViewerTrack* track = msl_core_context_viewer_track;
++    if (track == NULL) {
++        return;
++    }
++    put(track, "[%d,\"bgflash\",%d,%d]\n", hook_frame(), type, duration);
++}
++
+ void msl_viewer_track_bird(int kind, int count, const Vec3* pos)
+ {
+     MslViewerTrack* track = msl_core_context_viewer_track;
+diff --git a/src/runtime/viewer_track.h b/src/runtime/viewer_track.h
+index 865aadf3..f25913ad 100644
+--- a/src/runtime/viewer_track.h
++++ b/src/runtime/viewer_track.h
+@@ -69,6 +69,8 @@ void msl_viewer_track_ganim(HSD_GObj* gobj, int anim_set, int anim_index,
+ // A Pokemon Stadium screen change (grStadium_801D2528): the screen shown
+ // and, for a close-up (8), the followed player; -1 otherwise.
+ void msl_viewer_track_stadscreen(int mode, int player);
++// A screen flash started (lbBgFlash_80021C48: its type and duration).
++void msl_viewer_track_bgflash(int type, int duration);
+ // Dream Land's background birds (grOldPupupu_80210D10): the row of the bird
+ // table, how many fly, and where the first starts.
+ void msl_viewer_track_bird(int kind, int count, const Vec3* pos);
+diff --git a/src/stubs/headless_exclusions.c b/src/stubs/headless_exclusions.c
+index c24e31bf..2ada2f9d 100644
+--- a/src/stubs/headless_exclusions.c
++++ b/src/stubs/headless_exclusions.c
+@@ -230,6 +230,13 @@ void grDisplay_801C5DB0(HSD_GObj* gobj, int render_pass)
+ }
+ void lbBgFlash_80021C48(u32 type, u32 duration)
+ {
++#if MSL_VISUAL_TRACK_BUILD
++    // The screen flash a hit starts (ftCo_8008DB10, by element) is drawn,
++    // never simulated: the track says when, for a viewer to draw it.
++    if (msl_viewer_track_on()) {
++        msl_viewer_track_bgflash((int) type, (int) duration);
++    }
++#endif
+     (void) type;
+     (void) duration;
+ }
+diff --git a/tools/validation/visual_state.py b/tools/validation/visual_state.py
+index ff924e72..95d7eb46 100644
+--- a/tools/validation/visual_state.py
++++ b/tools/validation/visual_state.py
+@@ -31,6 +31,7 @@ WINDOW_FRAMES = 3600
+ # so a change to them fails nothing (agent_docs/VIEWER_TRACK.md, "Unlocked
+ # kinds").
+ UNLOCKED_KINDS = frozenset({
++    "bgflash",
+     "cns",
+     "fdrot",
+     "fj",
+-- 
+2.43.0
+

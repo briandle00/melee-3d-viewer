@@ -1,0 +1,108 @@
+From 063aa2d1a6d516566d51ed2cf2b9b1b6b18f34fe Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 11:39:33 +0000
+Subject: [PATCH] Viewer track: fj leaves out the joints of chains the track
+ build does not solve
+
+Peach's and Zelda's dresses and hair and Donkey Kong's tie are pruned in the
+track build (msl_viewer_track_keep_dynamics), so their joints stood at the
+animation's pose, unsolved, and fj wrote that over the viewer's own solve.
+fj now leaves out every joint of a chain whose links were pruned, found as
+ftCo_8009CF84 links them, so the viewer keeps its solve for those.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ src/runtime/viewer_track.c | 53 +++++++++++++++++++++++++++++++++++---
+ 1 file changed, 50 insertions(+), 3 deletions(-)
+
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index eb47c0ac..832320ac 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -92,6 +92,8 @@ struct MslViewerTrack {
+     // made.
+     MslTrackPose pose[TRACK_POSE_OWNERS];
+     char pose_line[256 * 1024];
++    // (track_fighter_joints: the parts on a chain this build leaves unsolved)
++    uint8_t chain_parts[TRACK_POSE_JOINTS];
+     size_t pose_used;
+     // The HUD's stock icons per port (track_hud_step).
+     struct {
+@@ -1354,7 +1356,11 @@ static void track_items(MslViewerTrack* track, int frame,
+ //       leaves cold (ftParts_HeadlessGameplayMask: fingers, faces) are not
+ //       animated there and are not written, nor is part 0 (the fighter's
+ //       place and facing, which "pos" and the replay give), nor a joint
+-//       turned by a quaternion. Each value only as it changes; a fighter's
++//       turned by a quaternion, nor a swinging chain's joints when the
++//       track build does not solve that chain (its links pruned:
++//       msl_viewer_track_keep_dynamics, now Peach's and Zelda's dresses and
++//       hair and Donkey Kong's tie), which stand unsolved here and are the
++//       viewer's to solve. Each value only as it changes; a fighter's
+ //       first line, and its first as another character, has every value.
+ //   [frame,"lm",item,links,(link,out,mask,values)...]
+ //       a chain's links (Link's and Young Link's hookshots, Samus's grapple,
+@@ -1765,6 +1771,43 @@ static void track_fighter_poses(MslViewerTrack* track, int frame,
+     pose_flush(track, head);
+ }
+ 
++// The parts on a swinging chain this build leaves unsolved: the chains whose
++// links the prune took (ftCo_HeadlessPruneDynamics with no copy kept), each
++// the joints ftCo_8009CF84's lb_8000FD48 links, from its bone down its first
++// children.
++// refs/melee/src/melee/ft/ftdynamics.c::ftCo_8009CF84,
++// refs/melee/src/melee/lb/lbspdisplay.c::lb_8000FD48
++static void unsolved_chain_parts(const Fighter* fp, int count, uint8_t* out)
++{
++    const ftData* data = fp->ft_data;
++    int i;
++    memset(out, 0, (size_t) count);
++    if (data == NULL || data->x2C == NULL || data->x2C->ftDynamicBones == NULL) {
++        return;
++    }
++    for (i = 0; i < data->x2C->dynamicsNum && i < Ft_Dynamics_NumMax; ++i) {
++        const BoneDynamicsDesc* bones = &data->x2C->ftDynamicBones->array[i];
++        HSD_JObj* j;
++        unsigned int link;
++        if (fp->dynamic_bone_sets[i].dyn_desc.data != NULL ||
++            bones->bone_id < 0 || bones->bone_id >= count)
++        {
++            continue;
++        }
++        j = fp->parts[bones->bone_id].joint;
++        for (link = 0; j != NULL && link < bones->dyn_desc.count; ++link) {
++            int part;
++            for (part = 0; part < count; ++part) {
++                if (fp->parts[part].joint == j) {
++                    out[part] = 1;
++                    break;
++                }
++            }
++            j = j->child;
++        }
++    }
++}
++
+ // Every live part's joint (the "fj" lines).
+ // refs/melee/src/melee/ft/{ftanim.c::ftAnim_8006EBA4,ftparts.c}
+ static void track_fighter_joints(MslViewerTrack* track, int frame,
+@@ -1789,10 +1832,14 @@ static void track_fighter_joints(MslViewerTrack* track, int frame,
+         o->character = (int) fp->kind + 1;
+     }
+     count = (int) ftPartsTable[fp->kind]->parts_num;
+-    for (part = 1; part < count && part < TRACK_POSE_JOINTS; ++part) {
++    if (count > TRACK_POSE_JOINTS) {
++        count = TRACK_POSE_JOINTS;
++    }
++    unsolved_chain_parts(fp, count, track->chain_parts);
++    for (part = 1; part < count; ++part) {
+         HSD_JObj* j = fp->parts[part].joint;
+         float v[9];
+-        if (j == NULL || !fp->parts[part].flags_b1 ||
++        if (j == NULL || !fp->parts[part].flags_b1 || track->chain_parts[part] ||
+             (j->flags & (JOBJ_MSL_GAMEPLAY_COLD | JOBJ_USE_QUATERNION)))
+         {
+             continue;
+-- 
+2.43.0
+

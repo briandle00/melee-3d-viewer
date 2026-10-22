@@ -1,0 +1,254 @@
+From 78f19f4ab1b66871b60f2e1144920e0844b6bc45 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 08:31:58 +0000
+Subject: [PATCH 2/4] Viewer track: stage joints ("sp")
+
+Each stage part with a joint tree in the stage's file writes its joints as
+its animations and code left them at the frame's end, delta-coded like "jp":
+a joint is written once it leaves the file's rest pose, then on change. The
+part is numbered as "gjoint" numbers it, the joint by preorder index as
+stage_joint counts it (0 the part's scale root from Ground_801C14D0). The
+pose owners and the line buffer grow to fit a stage part's tree. Unlocked
+until a recording is compared against the game's stage poses.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ agent_docs/VIEWER_TRACK.md       |   3 +
+ src/runtime/viewer_track.c       | 136 +++++++++++++++++++++++++++----
+ tools/validation/visual_state.py |   1 +
+ 3 files changed, 126 insertions(+), 14 deletions(-)
+
+diff --git a/agent_docs/VIEWER_TRACK.md b/agent_docs/VIEWER_TRACK.md
+index f4b44751..0d91f2ed 100644
+--- a/agent_docs/VIEWER_TRACK.md
++++ b/agent_docs/VIEWER_TRACK.md
+@@ -108,6 +108,7 @@ fighter's port (0-3) and `sub` 0 for the leader, 1 for Nana.
+ | `jp` | event | item id, then per joint that changed: joint, mask, values | an item's joints below its root as its code and animation left them (rot x, y, z, scale x, y, z, translate x, y, z; mask bit k says value k follows); joint = preorder index in the item's model file; a joint is written once it leaves the file's rest pose, then on change |
+ | `fp` | event | port, sub, character, then per part that changed: part, mask, values | a fighter's swinging joints (`ftdynamics.c`), the same nine values: the chains a hurtbox sits on, which gameplay solves, and, with the track, the capes, caps and hair the gameplay build drops, kept as copies the game's solver goes on with (`msl_viewer_track_keep_dynamics`; not yet Peach's, Zelda's and Donkey Kong's); a fighter's first line (and its first as another character) has all of them |
+ | `lm` | event | item id, link count, then per link that changed: link, out, mask, values | a chain's links (hookshots, Samus's grapple, Sheik's chain, Ness's yo-yo, the Ice Climbers' belay): each link's matrix as the item's code set it (rows 0-2 of the 3x4, mask bits 0-11); link 0 is the end with no `prev`; out is `x2C_b0` (a link is drawn only then); a link that comes out or goes back is written whole |
++| `sp` | event | stage part, then per joint that changed: joint, mask, values | a stage part's joints as its animations and code left them (the moving parts: Fountain of Dreams', Yoshi's Story's and Pokemon Stadium's platforms and the rest), the same nine values as `jp`; the part is numbered as `gjoint` numbers it (its `map_id`, an extra copy's `map_id + 1000 * k`), the joint by preorder index in its tree as `stage_joint` counts it (0 the part's scale root from `Ground_801C14D0`, at rest rot 0, scale the stage's, translate 0; the file's tree from 1, an instance's children left out); a joint is written once it leaves the file's rest pose, then on change |
+ | `ij` | state | item id, joint, offset x, y, z, 3x3 matrix | an item joint a generator was made on: place from the item's and its turn, at the frame's end |
+ | `rng` | state-like, every frame | random state | the state after the frame's gameplay, where the game's particle update starts |
+ | `hgen` | event | bank 0, generator 0xF7, x, y, z, seed, port, icon | the HUD's burst at a lost stock (`ifStock_802F8298`) |
+@@ -188,3 +189,5 @@ dynamics pool's entries, and never on the pool's free list: the pool is as
+ the prune leaves it.
+ - `send` (the stage's own code ending generators) and `stadscreen` (Pokemon
+   Stadium's screen): no recording of the suite checks them.
++- `sp` (stage joints): no recording of the suite has been compared against
++  the game's own stage poses yet.
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index 92f11bf7..e937206f 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -7,6 +7,7 @@
+ #include "ft/ft_0DF0.h"
+ #include "ft/ftlib.h"
+ #include "ft/types.h"
++#include "gr/grdatfiles.h"
+ #include "gr/ground.h"
+ #include "gr/inlines.h"
+ #include "gr/types.h"
+@@ -48,10 +49,12 @@ enum {
+ enum { TRACK_KEYS = 2048, TRACK_KEY_LEN = 48, TRACK_VALUE_LEN = 200 };
+ enum { TRACK_ITEM_JOINTS = 128 };
+ 
+-enum { TRACK_POSE_OWNERS = 64, TRACK_POSE_JOINTS = 128 };
++// (a stage part's tree runs to a few hundred joints: a joint past the last
++// is not written)
++enum { TRACK_POSE_OWNERS = 128, TRACK_POSE_JOINTS = 512 };
+ 
+ // One owner's joints as last written (track_poses): an item, a fighter, a
+-// chain's links.
++// chain's links, a stage part.
+ typedef struct MslTrackPose {
+     unsigned char used;
+     char kind;
+@@ -88,7 +91,7 @@ struct MslViewerTrack {
+     // The poses last written, per owner (track_poses), and the line being
+     // made.
+     MslTrackPose pose[TRACK_POSE_OWNERS];
+-    char pose_line[48 * 1024];
++    char pose_line[256 * 1024];
+     size_t pose_used;
+     // The HUD's stock icons per port (track_hud_step).
+     struct {
+@@ -1338,9 +1341,21 @@ static void track_items(MslViewerTrack* track, int frame,
+ //       Link 0 is the end with no prev, `links` the chain's length; out is
+ //       the link's x2C_b0 (it_802A24A0 draws a link only then). A link
+ //       coming out or going back is written whole.
++//   [frame,"sp",part,(joint,mask,values)...]
++//       a stage part's joints (the moving parts: Fountain of Dreams'
++//       platforms, Yoshi's Story's, Pokemon Stadium's, and whatever else its
++//       animations and code move), by the part's number as "gjoint" counts
++//       it (its map_id, an extra copy's map_id + 1000 * k) and the joint's
++//       preorder index in the part's tree as stage_joint counts it (0 the
++//       part's root - Ground_801C14D0's scale joint, at rest rot 0, scale
++//       the stage's (its parameters' x0, else 1), translate 0 - then the
++//       file's tree from 1, an instance's children left out), the same nine
++//       values as "jp". A joint is written once it differs from the file's
++//       rest pose, and then whenever it changes. A part the stage file has
++//       no joint tree for is not written.
+ // refs/melee/src/melee/{ft/ftdynamics.c,it/items/itlinkhookshot.c,
+ //   it/items/itseakchain.c,it/items/itnessyoyo.c,
+-//   it/items/itclimbersstring.c}
++//   it/items/itclimbersstring.c,gr/ground.c::Ground_801C14D0}
+ 
+ // The owner of a pose, kept while it is there.
+ static MslTrackPose* pose_owner(MslViewerTrack* track, char kind, int id,
+@@ -1442,6 +1457,20 @@ static void joint_values(const HSD_JObj* j, float v[9])
+     v[8] = j->translate.z;
+ }
+ 
++static void pose_rest(MslTrackPose* o, int at, const HSD_Joint* d)
++{
++    o->last[at][0] = d->rotation.x;
++    o->last[at][1] = d->rotation.y;
++    o->last[at][2] = d->rotation.z;
++    o->last[at][3] = d->scale.x;
++    o->last[at][4] = d->scale.y;
++    o->last[at][5] = d->scale.z;
++    o->last[at][6] = d->position.x;
++    o->last[at][7] = d->position.y;
++    o->last[at][8] = d->position.z;
++    o->known[at] = 1;
++}
++
+ // An item's model and its file's joints together, in the file's preorder.
+ // A joint the file has and the model does not (an instance's children) is
+ // counted and left out.
+@@ -1456,16 +1485,7 @@ static void pose_item_walk(MslViewerTrack* track, MslTrackPose* o,
+             float v[9];
+             if (!o->known[at]) {
+                 // (the file's rest pose: what a viewer has without a line)
+-                o->last[at][0] = d->rotation.x;
+-                o->last[at][1] = d->rotation.y;
+-                o->last[at][2] = d->rotation.z;
+-                o->last[at][3] = d->scale.x;
+-                o->last[at][4] = d->scale.y;
+-                o->last[at][5] = d->scale.z;
+-                o->last[at][6] = d->position.x;
+-                o->last[at][7] = d->position.y;
+-                o->last[at][8] = d->position.z;
+-                o->known[at] = 1;
++                pose_rest(o, at, d);
+             }
+             joint_values(j, v);
+             pose_joint(track, o, at, -1, v, 9);
+@@ -1563,6 +1583,93 @@ static void track_item_poses(MslViewerTrack* track, int frame,
+     }
+ }
+ 
++// A stage part's model and its file's joints together, as joint_walk counts
++// them (an instance's children left out of both). A joint the file has and
++// the model does not, or the other way, ends that branch.
++static void pose_stage_walk(MslViewerTrack* track, MslTrackPose* o,
++                            HSD_JObj* j, const HSD_Joint* d, int* index)
++{
++    for (; d != NULL && j != NULL; d = d->next, j = j->next) {
++        int at = (*index)++;
++        if (at < TRACK_POSE_JOINTS && !(j->flags & JOBJ_USE_QUATERNION)) {
++            float v[9];
++            if (!o->known[at]) {
++                pose_rest(o, at, d);
++            }
++            joint_values(j, v);
++            pose_joint(track, o, at, -1, v, 9);
++        }
++        if (!(j->flags & JOBJ_INSTANCE)) {
++            pose_stage_walk(track, o, j->child, d->child, index);
++        }
++    }
++}
++
++// Each stage part with a joint tree in the stage's file, numbered as
++// stage_joint numbers them.
++// refs/melee/src/melee/gr/ground.c::Ground_801C14D0
++static void track_stage_poses(MslViewerTrack* track, int frame,
++                              const MslCoreMatch* match)
++{
++    HSD_GObj* gobj;
++    int others[64];
++    char head[64];
++    float scale = stage_info.param != NULL ? stage_info.param->x0 : 1.0F;
++    memset(others, 0, sizeof(others));
++    for (gobj = (HSD_GObj*) match->gobj.entities->x14; gobj != NULL;
++         gobj = gobj->next)
++    {
++        UnkArchiveStruct* archive;
++        const HSD_Joint* desc;
++        HSD_JObj* root;
++        MslTrackPose* o;
++        int map_id;
++        int id;
++        int index = 1;
++        float v[9];
++        if (gobj->classifier != HSD_GOBJ_CLASS_STAGE ||
++            gobj->user_data == NULL || gobj->hsd_obj == NULL)
++        {
++            continue;
++        }
++        map_id = (int) GET_GROUND(gobj)->map_id;
++        if (map_id < 0 || map_id >= 64) {
++            continue;
++        }
++        id = map_id;
++        if (stage_info.x180[map_id] != gobj) {
++            id = map_id + 1000 * ++others[map_id];
++        }
++        archive = grDatFiles_801C6330(map_id);
++        if (archive == NULL || archive->unk4 == NULL ||
++            map_id >= archive->unk4->unkC)
++        {
++            continue;
++        }
++        desc = archive->unk4->unk8[map_id].unk0;
++        root = gobj->hsd_obj;
++        if (desc == NULL) {
++            continue;
++        }
++        o = pose_owner(track, 's', id, frame);
++        if (o == NULL) {
++            continue;
++        }
++        if (!o->known[0]) {
++            memset(o->last[0], 0, sizeof(o->last[0]));
++            o->last[0][3] = o->last[0][4] = o->last[0][5] = scale;
++            o->known[0] = 1;
++        }
++        if (!(root->flags & JOBJ_USE_QUATERNION)) {
++            joint_values(root, v);
++            pose_joint(track, o, 0, -1, v, 9);
++        }
++        pose_stage_walk(track, o, root->child, desc, &index);
++        snprintf(head, sizeof(head), "[%d,\"sp\",%d", frame, id);
++        pose_flush(track, head);
++    }
++}
++
+ static void track_fighter_poses(MslViewerTrack* track, int frame,
+                                 Fighter_GObj* gobj)
+ {
+@@ -1654,6 +1761,7 @@ static void track_poses(MslViewerTrack* track, int frame,
+         }
+     }
+     track_item_poses(track, frame, match);
++    track_stage_poses(track, frame, match);
+     // (an owner not seen this frame is gone: its place is free)
+     for (i = 0; i < TRACK_POSE_OWNERS; ++i) {
+         if (track->pose[i].used && track->pose[i].frame != frame) {
+diff --git a/tools/validation/visual_state.py b/tools/validation/visual_state.py
+index 22cf5173..73167548 100644
+--- a/tools/validation/visual_state.py
++++ b/tools/validation/visual_state.py
+@@ -33,6 +33,7 @@ WINDOW_FRAMES = 3600
+ UNLOCKED_KINDS = frozenset({
+     "fdrot",
+     "send",
++    "sp",
+     "stadscreen",
+ })
+ 
+-- 
+2.43.0
+

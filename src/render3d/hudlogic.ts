@@ -198,6 +198,9 @@ const DEAD_UP_STAR = 4, DEAD_UP_STAR_ICE = 5, DEAD_UP_FALL = 6, DEAD_UP_FALL_ICE
 const CLIFF_CATCH = 252, DAMAGE_FLY_FIRST = 87, DAMAGE_FLY_LAST = 91;
 /** states entered without clearing the name tag's count (Ft_MF_SkipNametagVis) */
 const KEEPS_TAG = new Set([REBIRTH_WAIT, 253, 183, 184, 185, 191, 192, 193, 247, 248]);
+/** states whose start sets the count to 1 (ThrownKirbyStar, ThrownCopyStar, YoshiEgg, KirbyYoshiEgg, BarrelWait,
+ *  Barrel) */
+const TAG_AT_ONCE = new Set([290, 291, 277, 332, 293, 340]);
 /** ftCommonData +0x5F0, +0x5EC and +0x5E8: standing still (or on the
  *  ledge) this many frames brings the tag up; so does a launch (a DamageFly
  *  state) at a knockback speed of at least 3, this many frames after it
@@ -297,8 +300,7 @@ export class PlayerHud {
       prevStocks = stocks;
     }
     // the percent, and the hits and falls within each life, by the damage the
-    // game holds (a hit lands after Slippi takes the frame's state: the
-    // replay's percent is the frame after's)
+    // game holds when the HUD's procs run (game())
     for (let i = 0; i < n; i++) {
       const s = st(i);
       this.pct[i] = s ? Math.max(0, Math.min(999, Math.trunc(s.percent))) : (i > 0 ? this.pct[i - 1] : 0);
@@ -328,7 +330,12 @@ export class PlayerHud {
         for (let k = this.stocks[i]; k < this.stocks[i - 1] && k < 5; k++) this.losses[k].push(i);
       }
     }
-    // the player tag over the fighter (ifnametag.c): shown while the count is 1
+    // the player tag over the fighter (ifnametag.c): shown while the count is 1.
+    // Fighter_procAnim steps it down only out of hitlag (x2219_b5): not on the
+    // frames after a hit's while its hitlag lasts (hitlag left at the frame
+    // and at the frame before; Fighter_procHitlag, before it, lets go on the
+    // frame the count runs out)
+    const frozen = (i: number) => (st(i)?.hitlagRemaining ?? 0) > 0 && i > 0 && (st(i - 1)?.hitlagRemaining ?? 0) > 0;
     let count = 0;
     prevState = -1;
     for (let i = 0; i < n; i++) {
@@ -336,12 +343,15 @@ export class PlayerHud {
       if (s !== prevState) {
         const kb = Math.hypot(st(i)?.attackBasedXSpeed ?? 0, st(i)?.attackBasedYSpeed ?? 0);
         if (s === WAIT || s === CLIFF_CATCH) count = tagIdle;
-        // (the launch's count from the frame the hit landed, the one before
-        // the replay shows it: see game())
-        else if (s >= DAMAGE_FLY_FIRST && s <= DAMAGE_FLY_LAST && kb >= tags.launchSpeed) count = Math.max(1, tags.launch - 1);
+        // (the launch's count from the frame the hit landed, the frame the
+        // replay shows it: see game())
+        else if (s >= DAMAGE_FLY_FIRST && s <= DAMAGE_FLY_LAST && kb >= tags.launchSpeed) count = tags.launch;
         else if (s === REBIRTH || s === DEAD_UP_STAR || s === DEAD_UP_STAR_ICE || s === DEAD_UP_FALL || s === DEAD_UP_FALL_ICE) count = 1;
+        // (Kirby's stars, Yoshi's eggs and the barrel set it to 1 as they start: ftCo_ThrownKirby.c inlineB2,
+        // ftCo_YoshiEgg.c, ftkirbyyoshiegg.c, ftCo_Barrel_Enter, ftCo_BarrelWait.c)
+        else if (TAG_AT_ONCE.has(s)) count = 1;
         else if (!KEEPS_TAG.has(s)) count = 0;
-      } else if (count > 1 && i + FIRST_FRAME >= goFrame) count--; // (not while the intro holds the players still)
+      } else if (count > 1 && i + FIRST_FRAME >= goFrame && !frozen(i)) count--; // (not while the intro holds the players still)
       const gameFrame = i + FIRST_FRAME;
       // (a player with a nametag has it over the fighter the whole game: fn_802FCC44)
       this.tag[i] = (count === 1 || gameFrame < goFrame || nametag) && this.stocks[i] > 0 ? 1 : 0;
@@ -356,19 +366,24 @@ export class PlayerHud {
     return out;
   }
 
-  /** the damage the game holds at a frame: the replay's percent a frame on */
+  /** the damage the game holds at a frame when the HUD's procs (17) run: the frame's hits are taken in
+   *  Fighter_procCollResolve (14) before them, and Slippi takes the frame's state after both - the replay's percent
+   *  of the frame itself (the game's captures: the percent's color, digits and shake come with the frame whose
+   *  replay percent has the hit, at every hit in their windows) */
   private game(i: number): number {
-    return this.pct[Math.min(i + 1, this.n - 1)] ?? 0;
+    return this.pct[Math.max(0, Math.min(i, this.n - 1))] ?? 0;
   }
 
   /** The percent at a frame (percentAt below). Its color, the narrow-1 spacing, which digits show and the shake
-   *  follow the game's damage at once; the digits' pictures are the replay's percent of the frame before (the game's
-   *  damage two frames back: ifStatus_802F4EDC asks for them after the frame's animation has run, and the pictures
-   *  change a frame after that). */
+   *  follow the game's damage at once; the digits' pictures are the damage of the frame before (ifStatus_802F4EDC
+   *  asks for them after the frame's animation has run, and the pictures change a frame after that). */
   /** whether the digits shake at frame i (and so draw eight random numbers there: ifStatus_802F4B84) */
   shakingAt(i: number): boolean {
     const l = this.lifeAt(i);
-    const at = l.ko !== null && i >= l.ko ? Math.max(l.from, l.ko - 1) : i;
+    // (a percent going off takes no shake's draws: the HUD's proc runs ifStatus_PercentOnDeathAnimationThink and
+    // returns before ifStatus_802F4B84)
+    if (l.ko !== null && i >= l.ko) return false;
+    const at = i;
     const hit = this.hitAt[at];
     return hit >= 0 && at - hit >= 0 && at - hit <= SHAKE_FRAMES - 2;
   }
@@ -395,7 +410,7 @@ export class PlayerHud {
     const animFrame = anim === 1 ? at - drop : at - l.from;
     // (the digits' pictures are the number of the frame before: the game's captures show a new number's digits a frame
     // after the replay's percent has it - the request the HUD makes for them after the frame's animation has run is
-    // taken up by the frame after next)
+    // taken up by the next frame's)
     const layout = { ...digitLayout(now), frame: digitLayout(this.pct[Math.max(l.from, at - 1)] ?? 0).frame };
     const offset: [number, number][] = [[0, 0], [0, 0], [0, 0], [0, 0]];
     const hit = this.hitAt[at];
@@ -480,9 +495,64 @@ export function nametagFrame(tag: number): number {
 }
 
 /** the edge chevrons' blink (Stc_rarwmdls, 16 frames round): the game starts
- *  it with the HUD, two frames before the replay's first frame, and steps it
- *  every frame after (fn_802FDA78) - the reference frames' phase */
+ *  it with the HUD, a frame before the replay's first frame, and steps it
+ *  every frame after (fn_802FDA78) - the phase of the game's captures, all
+ *  sixteen phases over 322 windows */
 export function chevronFrame(f: number): number {
-  return (f + 2) % 16;
+  return (f + 1) % 16;
 }
 
+
+// ---------------------------------------------------------------- the edge arrows' table
+
+/** if_2FD9.c's table of the four edge arrows (un_804A1F10), one model each, all four drawn every frame: each
+ *  arrow's kind (x28: 0 unused, 1 the left edge's, 2 the right's), the port it went to (x2C) and its color
+ *  (x14, zero until it is first given), which of ports 0-3 hold one (x24), and where it was last put
+ *  (fn_802FDA78 leaves an unused arrow where it was and sends it 10000 back) */
+export interface ArrowTable {
+  kind: number[]; port: number[]; color: [number, number, number][]; held: boolean[];
+  x: number[]; y: number[]; rot: number[];
+}
+export function arrowTable(): ArrowTable {
+  return { kind: [0, 0, 0, 0], port: [0, 0, 0, 0], color: [[0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+           held: [false, false, false, false], x: [0, 0, 0, 0], y: [0, 0, 0, 0], rot: [0, 0, 0, 0] };
+}
+export function copyArrowTable(t: ArrowTable): ArrowTable {
+  return { kind: [...t.kind], port: [...t.port], color: t.color.map((c) => [...c] as [number, number, number]),
+           held: [...t.held], x: [...t.x], y: [...t.y], rot: [...t.rot] };
+}
+
+/** one port's magnifier draw (ifMagnify_802FB8C0): `kind` its arrow this frame (1 left, 2 right; 0 none).
+ *  With one, un_802FD928: the first unused arrow, unless the port is a CPU's or already holds one (which
+ *  keeps its kind until it is let go); without, un_802FD9D8: the port's arrows let go. */
+export function arrowsAssign(t: ArrowTable, port: number, kind: number, cpu: boolean, color: [number, number, number]) {
+  if (port >= 4) return;
+  if (kind === 0) {
+    for (let i = 0; i < 4; i++) if (t.port[i] === port) { t.held[port] = false; t.kind[i] = 0; }
+    return;
+  }
+  for (let i = 0; i < 4; i++) {
+    if (cpu || t.kind[i] !== 0 || t.held[port]) continue;
+    t.held[port] = true;
+    t.port[i] = port;
+    t.kind[i] = kind;
+    t.color[i] = [...color];
+    return;
+  }
+}
+
+/** fn_802FDA78, each arrow by the table as the frame before left it: a left one at x -25, a right one at 25
+ *  turned half round, stacked 2.6 apart from the top of those of its kind (y 0, -1.3, -2.6 or -3.9 for one to
+ *  four); returns the z each is drawn at (10000 for an unused one, which stays where it was) */
+export function arrowsPlace(t: ArrowTable): number[] {
+  const V = [0, -1.3, -2.6, -3.9].map(Math.fround);
+  return t.kind.map((kind, i) => {
+    if (kind === 0) return 10000;
+    let j = 0, k = 0;
+    for (let n = 0; n < 4; n++) if (t.kind[n] === kind) { if (n < i) j++; k++; }
+    t.rot[i] = kind === 1 ? 0 : Math.fround(3.1415927);
+    t.y[i] = Math.fround(Math.fround(Math.fround(2.6) * j) + V[k !== 0 ? k - 1 : 0]);
+    t.x[i] = kind === 1 ? -25 : 25;
+    return 0;
+  });
+}

@@ -1,0 +1,56 @@
+From 2c7ffb1b1c9dbc0958cce2555afe75963b216e68 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 13:45:15 +0000
+Subject: [PATCH] Viewer track: Peach's, Zelda's and Donkey Kong's chains
+ solved too
+
+Their dresses, hair and tie were pruned in the track build, left to the
+viewer's solve, because solved here they came out further from the game.
+With the chain-joint counts taken as the file's words (the dynamics-counts
+fix in front), they are now kept and solved as every other fighter's
+chains are, and fp writes them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ src/runtime/viewer_track.c | 17 +++--------------
+ 1 file changed, 3 insertions(+), 14 deletions(-)
+
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index 832320ac..fb9a380a 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -1357,10 +1357,9 @@ static void track_items(MslViewerTrack* track, int frame,
+ //       animated there and are not written, nor is part 0 (the fighter's
+ //       place and facing, which "pos" and the replay give), nor a joint
+ //       turned by a quaternion, nor a swinging chain's joints when the
+-//       track build does not solve that chain (its links pruned:
+-//       msl_viewer_track_keep_dynamics, now Peach's and Zelda's dresses and
+-//       hair and Donkey Kong's tie), which stand unsolved here and are the
+-//       viewer's to solve. Each value only as it changes; a fighter's
++//       track build does not solve that chain (its links pruned, no copy
++//       kept: msl_viewer_track_keep_dynamics), which stand unsolved here and
++//       are the viewer's to solve. Each value only as it changes; a fighter's
+ //       first line, and its first as another character, has every value.
+ //   [frame,"lm",item,links,(link,out,mask,values)...]
+ //       a chain's links (Link's and Young Link's hookshots, Samus's grapple,
+@@ -1861,16 +1860,6 @@ void msl_viewer_track_keep_dynamics(Fighter* fp)
+     int count = fp->dynamics_num < Ft_Dynamics_NumMax ? (int) fp->dynamics_num
+                                                     : Ft_Dynamics_NumMax;
+     int i;
+-    // (not yet for Peach's and Zelda's dresses and hair and Donkey Kong's
+-    // tie: solved this way they came out further from the game's own draws
+-    // than a viewer's solve, the cause not yet found; their chains are pruned
+-    // as without the track)
+-    if (fp->kind == FTKIND_PEACH || fp->kind == FTKIND_ZELDA ||
+-        fp->kind == FTKIND_DONKEY)
+-    {
+-        ftCo_HeadlessPruneDynamics(fp);
+-        return;
+-    }
+     for (i = 0; i < count; ++i) {
+         copies[i] = msl_viewer_track_copy_dynamics(
+             fp->dynamic_bone_sets[i].dyn_desc.data);
+-- 
+2.43.0
+

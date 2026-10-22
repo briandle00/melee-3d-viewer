@@ -1,0 +1,141 @@
+From 9d6413579e6142602dc34faf231e294a9984f5cd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 08:32:40 +0000
+Subject: [PATCH 3/4] Viewer track: fighter joints as the game left them ("fj")
+
+Every live part's joint at the frame's end, by part, the nine values of
+"jp", each only as it changes: the animation, the blend into it and what
+the game's own code set after it, so a viewer draws the game's joint poses
+instead of working them out. Part 0 (the place and facing), quaternion
+joints and the presentation-only parts the hosted build leaves cold
+(ftParts_HeadlessGameplayMask) are not written. Unlocked until a recording
+is compared against the game's joint poses.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017JX71xgnBPBiwucag1mFRr
+---
+ agent_docs/VIEWER_TRACK.md       |  3 ++
+ src/runtime/viewer_track.c       | 55 ++++++++++++++++++++++++++++++++
+ tools/validation/visual_state.py |  1 +
+ 3 files changed, 59 insertions(+)
+
+diff --git a/agent_docs/VIEWER_TRACK.md b/agent_docs/VIEWER_TRACK.md
+index 0d91f2ed..ca9848e3 100644
+--- a/agent_docs/VIEWER_TRACK.md
++++ b/agent_docs/VIEWER_TRACK.md
+@@ -107,6 +107,7 @@ fighter's port (0-3) and `sub` 0 for the leader, 1 for Nana.
+ | `irot` | state | item id, rot x, y, z | an item's root joint turn, once it turns |
+ | `jp` | event | item id, then per joint that changed: joint, mask, values | an item's joints below its root as its code and animation left them (rot x, y, z, scale x, y, z, translate x, y, z; mask bit k says value k follows); joint = preorder index in the item's model file; a joint is written once it leaves the file's rest pose, then on change |
+ | `fp` | event | port, sub, character, then per part that changed: part, mask, values | a fighter's swinging joints (`ftdynamics.c`), the same nine values: the chains a hurtbox sits on, which gameplay solves, and, with the track, the capes, caps and hair the gameplay build drops, kept as copies the game's solver goes on with (`msl_viewer_track_keep_dynamics`; not yet Peach's, Zelda's and Donkey Kong's); a fighter's first line (and its first as another character) has all of them |
++| `fj` | event | port, sub, character, then per part that changed: part, mask, values | a fighter's joints as the game left them at the frame's end (its animation, the blend into it, and whatever its own code set after: `ftParts`, the state's code, the swinging chains), the same nine values as `jp`, by part: every part with a live joint of its own, not part 0 (the place and facing), not the presentation-only parts the hosted build leaves cold (`ftParts_HeadlessGameplayMask`), not a quaternion joint; a fighter's first line (and its first as another character) has all of them, then each value only on change |
+ | `lm` | event | item id, link count, then per link that changed: link, out, mask, values | a chain's links (hookshots, Samus's grapple, Sheik's chain, Ness's yo-yo, the Ice Climbers' belay): each link's matrix as the item's code set it (rows 0-2 of the 3x4, mask bits 0-11); link 0 is the end with no `prev`; out is `x2C_b0` (a link is drawn only then); a link that comes out or goes back is written whole |
+ | `sp` | event | stage part, then per joint that changed: joint, mask, values | a stage part's joints as its animations and code left them (the moving parts: Fountain of Dreams', Yoshi's Story's and Pokemon Stadium's platforms and the rest), the same nine values as `jp`; the part is numbered as `gjoint` numbers it (its `map_id`, an extra copy's `map_id + 1000 * k`), the joint by preorder index in its tree as `stage_joint` counts it (0 the part's scale root from `Ground_801C14D0`, at rest rot 0, scale the stage's, translate 0; the file's tree from 1, an instance's children left out); a joint is written once it leaves the file's rest pose, then on change |
+ | `ij` | state | item id, joint, offset x, y, z, 3x3 matrix | an item joint a generator was made on: place from the item's and its turn, at the frame's end |
+@@ -189,5 +190,7 @@ dynamics pool's entries, and never on the pool's free list: the pool is as
+ the prune leaves it.
+ - `send` (the stage's own code ending generators) and `stadscreen` (Pokemon
+   Stadium's screen): no recording of the suite checks them.
++- `fj` (fighter joints): no recording of the suite has been compared against
++  the game's own joint poses yet.
+ - `sp` (stage joints): no recording of the suite has been compared against
+   the game's own stage poses yet.
+diff --git a/src/runtime/viewer_track.c b/src/runtime/viewer_track.c
+index e937206f..b65932b7 100644
+--- a/src/runtime/viewer_track.c
++++ b/src/runtime/viewer_track.c
+@@ -1332,6 +1332,19 @@ static void track_items(MslViewerTrack* track, int frame,
+ //       (msl_viewer_track_keep_dynamics), by part, the same nine values. A
+ //       fighter's first line, and its first as another character, has every
+ //       value.
++//   [frame,"fj",port,sub,character,(part,mask,values)...]
++//       a fighter's joints as the game left them at the frame's end, by
++//       part, the same nine values: its animation as ftAnim_8006EBA4 and
++//       the interpreter played it, the blend into it (ftAnim_8006FE9C,
++//       ftAnim_80070010), and whatever the game's own code set after
++//       (ftParts, the state's code, the swinging chains), so a viewer need
++//       not work any of it out. Every part with a joint of its own that
++//       gameplay keeps live: the presentation-only parts the hosted build
++//       leaves cold (ftParts_HeadlessGameplayMask: fingers, faces) are not
++//       animated there and are not written, nor is part 0 (the fighter's
++//       place and facing, which "pos" and the replay give), nor a joint
++//       turned by a quaternion. Each value only as it changes; a fighter's
++//       first line, and its first as another character, has every value.
+ //   [frame,"lm",item,links,(link,out,mask,values)...]
+ //       a chain's links (Link's and Young Link's hookshots, Samus's grapple,
+ //       Sheik's chain, Ness's yo-yo, the Ice Climbers' belay): each link's
+@@ -1714,6 +1727,46 @@ static void track_fighter_poses(MslViewerTrack* track, int frame,
+     pose_flush(track, head);
+ }
+ 
++// Every live part's joint (the "fj" lines).
++// refs/melee/src/melee/ft/{ftanim.c::ftAnim_8006EBA4,ftparts.c}
++static void track_fighter_joints(MslViewerTrack* track, int frame,
++                                 Fighter_GObj* gobj)
++{
++    Fighter* fp = GET_FIGHTER(gobj);
++    int port = fp->player_id;
++    int sub = fp->x221F_b4 ? 1 : 0;
++    MslTrackPose* o;
++    char head[64];
++    int part;
++    int count;
++    if (fp->parts == NULL) {
++        return;
++    }
++    o = pose_owner(track, 'j', port * 2 + sub, frame);
++    if (o == NULL) {
++        return;
++    }
++    if (o->character != (int) fp->kind + 1) {
++        memset(o->known, 0, sizeof(o->known));
++        o->character = (int) fp->kind + 1;
++    }
++    count = (int) ftPartsTable[fp->kind]->parts_num;
++    for (part = 1; part < count && part < TRACK_POSE_JOINTS; ++part) {
++        HSD_JObj* j = fp->parts[part].joint;
++        float v[9];
++        if (j == NULL || !fp->parts[part].flags_b1 ||
++            (j->flags & (JOBJ_MSL_GAMEPLAY_COLD | JOBJ_USE_QUATERNION)))
++        {
++            continue;
++        }
++        joint_values(j, v);
++        pose_joint(track, o, part, -1, v, 9);
++    }
++    snprintf(head, sizeof(head), "[%d,\"fj\",%d,%d,%d", frame, port, sub,
++             (int) fp->kind);
++    pose_flush(track, head);
++}
++
+ // The chains are copied before the prune (it puts the dropped ones' links
+ // back on the pool's free list); a copy goes in where the prune left a set
+ // empty. The pool ends as the prune leaves it, as without the track.
+@@ -1752,11 +1805,13 @@ static void track_poses(MslViewerTrack* track, int frame,
+     int i;
+     for (i = 0; i < match->config.num_players; ++i) {
+         if (match->fighters[i] != NULL) {
++            track_fighter_joints(track, frame, match->fighters[i]);
+             track_fighter_poses(track, frame, match->fighters[i]);
+         }
+         if (match->follower_fighters[i] != NULL &&
+             !GET_FIGHTER(match->follower_fighters[i])->x221F_b3)
+         {
++            track_fighter_joints(track, frame, match->follower_fighters[i]);
+             track_fighter_poses(track, frame, match->follower_fighters[i]);
+         }
+     }
+diff --git a/tools/validation/visual_state.py b/tools/validation/visual_state.py
+index 73167548..8deed80f 100644
+--- a/tools/validation/visual_state.py
++++ b/tools/validation/visual_state.py
+@@ -32,6 +32,7 @@ WINDOW_FRAMES = 3600
+ # kinds").
+ UNLOCKED_KINDS = frozenset({
+     "fdrot",
++    "fj",
+     "send",
+     "sp",
+     "stadscreen",
+-- 
+2.43.0
+

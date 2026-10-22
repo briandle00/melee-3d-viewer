@@ -102,6 +102,7 @@ export function colAnimGfx(t: ColAnimTables): Map<number, ColAnimGfx[]> {
 }
 
 const s = (v: number, bits: number) => (v << (32 - bits)) >> (32 - bits);
+const f32 = Math.fround;
 
 /** one running color animation (the game's ColorOverlay) */
 export class Overlay {
@@ -125,6 +126,8 @@ export class Overlay {
   starts = 0;
 
   get running(): boolean { return this.p !== null; }
+  /** a run given frames of its own still counting them down (lb_800144C8's x4_pri) */
+  get limited(): boolean { return this.frames > 0; }
 
   reset() {
     this.p = null; this.frames = 0; this.index = 0;
@@ -198,7 +201,7 @@ export class Overlay {
         }
         case 0xf: {
           const c = rgba(word(1)), n = Math.max(1, v);
-          for (let k = 0; k < 4; k++) this.lightStep[k] = (0.5 + c[k] - (this.light[k] | 0)) / n;
+          for (let k = 0; k < 4; k++) this.lightStep[k] = f32(f32(f32(0.5 + c[k]) - ((this.light[k] | 0) & 0xff)) / n);
           this.p = p + 8;
           break;
         }
@@ -213,7 +216,7 @@ export class Overlay {
         }
         case 0x13: {
           const c = rgba(word(1)), n = Math.max(1, v);
-          for (let k = 0; k < 4; k++) this.colorStep[k] = (0.5 + c[k] - (this.color[k] | 0)) / n;
+          for (let k = 0; k < 4; k++) this.colorStep[k] = f32(f32(f32(0.5 + c[k]) - ((this.color[k] | 0) & 0xff)) / n);
           this.p = p + 8;
           break;
         }
@@ -233,8 +236,9 @@ export class Overlay {
         default: this.p = p + 4; break;
       }
     }
-    if (this.colorOn) for (let k = 0; k < 4; k++) this.color[k] += this.colorStep[k];
-    if (this.lightOn) for (let k = 0; k < 4; k++) this.light[k] += this.lightStep[k];
+    // (each channel a float32 that the step adds to, its byte that float cut to an integer: lb_80014258)
+    if (this.colorOn) for (let k = 0; k < 4; k++) this.color[k] = f32(this.color[k] + this.colorStep[k]);
+    if (this.lightOn) for (let k = 0; k < 4; k++) this.light[k] = f32(this.light[k] + this.lightStep[k]);
     if (this.frames > 0 && --this.frames === 0) { this.reset(); return true; }
     return false;
   }

@@ -49,7 +49,7 @@ import {
 import { SHADOW_SIZE } from "./shadow";
 import type { Lighting } from "./lightset";
 import type { Tint } from "./fx/colanim";
-import type { Mat } from "./math";
+import { invert, type Mat } from "./math";
 
 // ---------------------------------------------------------------- shared with the decoder
 
@@ -135,6 +135,47 @@ export function geoHash(prims: [string, number, string][]): string {
 const TLUT_ENTRIES: Record<number, number> = { 8: 16, 9: 256, 10: 16384 };
 
 /** an image's identity: its first level's bytes in its file */
+/** the format and size the game binds for a picture it makes at run time (lb_800121FC's descriptions: RGB565 at
+ *  the copy's size), which the file's placeholder does not have: set by the caller for Stadium's screen as its
+ *  mode changes (grPStadium: 250 x 160 the text page, 640 x 406 the match, 124 x 80 a close-up) */
+const liveGame = new WeakMap<Image, [number, number, number]>();
+export function setLiveGame(image: Image, format: number, w: number, h: number) {
+  const g = liveGame.get(image);
+  if (g) { g[0] = format; g[1] = w; g[2] = h; } else liveGame.set(image, [format, w, h]);
+}
+/** the mirror's picture as grIzumi makes it (lb_800121FC(refl->image, 80, 60, 4, ...)): RGB565, 80 x 60 */
+const MIRROR_GAME: [number, number, number] = [4, 80, 60];
+
+/** the texture map each of a material's textures is bound to, as HSD_TObjAssignResources numbers them: the
+ *  plain ones in list order (at most 8, less 2 with a bump map and 1 with a toon texture), then the bump map,
+ *  then the toon texture; of several bump maps or toon textures only the last gets one (the rest -1) */
+export function gameTexMaps(flags: number[]): number[] {
+  const coord = (f: number) => f & 0xf, isBump = (f: number) => (f & (1 << 24)) !== 0;
+  let toon = -1, bump = -1;
+  flags.forEach((f, i) => { if (coord(f) === 4) toon = i; else if (isBump(f)) bump = i; });
+  const limit = 8 - (toon >= 0 ? 1 : 0) - (bump >= 0 ? 2 : 0);
+  let no = 0;
+  const out = flags.map((f) => (coord(f) === 4 || isBump(f) ? -1 : no < limit ? no++ : -1));
+  if (bump >= 0) out[bump] = no++;
+  if (toon >= 0) out[toon] = no++;
+  return out;
+}
+
+/** the normal matrix of a column-major modelview (its 3 x 3's inverse, transposed), as rows: N[k * 3 + c] */
+export function normalMatrix(m: ArrayLike<number>): number[] {
+  // (rows of the 3 x 3: a[r][c] = m[c * 4 + r])
+  const a = (r: number, c: number) => m[c * 4 + r];
+  const det = a(0, 0) * (a(1, 1) * a(2, 2) - a(1, 2) * a(2, 1)) - a(0, 1) * (a(1, 0) * a(2, 2) - a(1, 2) * a(2, 0))
+    + a(0, 2) * (a(1, 0) * a(2, 1) - a(1, 1) * a(2, 0));
+  const out: number[] = [];
+  // (the inverse transposed is the cofactor matrix over the determinant)
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+    const r1 = (r + 1) % 3, r2 = (r + 2) % 3, c1 = (c + 1) % 3, c2 = (c + 2) % 3;
+    out.push((a(r1, c1) * a(r2, c2) - a(r1, c2) * a(r2, c1)) / det);
+  }
+  return out;
+}
+
 export function imageId(a: Archive, img: Image): string | null {
   const [bw, bh, bb] = blockOf(img.format);
   const size = Math.ceil(img.width / bw) * Math.ceil(img.height / bh) * bb;
@@ -171,7 +212,15 @@ const ALPHA_OP = ["and", "or", "xor", "xnor"];
 const WRAP = ["clamp", "repeat", "mirror"];
 const MIN = ["near", "linear", "near_mip_near", "linear_mip_near", "near_mip_linear", "linear_mip_linear"];
 const FOG_TYPE: Record<number, string> = { 0: "none", 2: "linear", 4: "exp", 5: "exp2", 6: "revexp", 7: "revexp2" };
-const TEXGEN = ["uv0", "uv1", "reflection", "highlight", "mirror"];
+const TEXGEN = ["uv0", "uv1", "reflection", "highlight", "mirror", "uv2"];
+
+/** a texture matrix row as the game's effective one: a UV set's texgen takes (s, t, 1, 1) (GX_TG_MTX2x4 on
+ *  GX_TG_TEXn, then the post-matrix, HSD_TObjSetupTextureCoordGen), so what the row's third column adds is
+ *  a constant like its fourth: the two as one, in the fourth (the rows of a texture turned out of its plane -
+ *  Fountain of Dreams' water - have one there) */
+export function uvRow(r: ArrayLike<number>, gen: number): number[] {
+  return gen === 0 || gen === 1 || gen === 5 ? [r[0], r[1], 0, r[2] + r[3]] : Array.from(r);
+}
 
 /** a number kept to 6 significant digits (the logs compare with tolerances) */
 export function rnd(x: number, digits = 6): number {
@@ -222,6 +271,8 @@ interface Inner {
   shadowMaps: { mtx: Mat }[];
   shadowMask: number;
   live: WeakMap<Image, unknown>;
+  /** the images drawn from a texture the page draws into (bindImage: the magnifier's picture) */
+  imageTex: WeakMap<Image, unknown>;
   staticsOf(s: Drawable["state"]): { p: MatProgram; I: Int32Array; F: Float32Array };
 }
 
@@ -229,7 +280,7 @@ interface Inner {
 export const RENDERER_NAMES = ["draws", "cs", "camView", "camVP", "camProj", "camGx", "mvBuf", "lightV", "fogRegs", "cullOn", "shiftView", "shiftVP",
                                "shifted", "mirrored",
                                "lighting",
-                               "overlayVP", "viewProj", "shadowMaps", "shadowMask", "live", "staticsOf", "begin", "setFog",
+                               "overlayVP", "viewProj", "shadowMaps", "shadowMask", "live", "imageTex", "staticsOf", "begin", "setFog",
                                "setTint", "setOutline", "beginShadow", "beginMirror", "endMirror", "endShadow", "drawOne",
                                "drawGeometry", "drawParticles", "drawTrail", "drawSphere", "overlay", "endOverlay"] as const;
 
@@ -426,7 +477,12 @@ export class DrawLog {
       alpha_test: [COMPARE[I[3] & 7], rnd(F[20]), ALPHA_OP[(I[3] >> 6) & 3], COMPARE[(I[3] >> 3) & 7], rnd(F[21])],
       fog: safe("fog", () => this.fogRec(), null),
       lights: safe("lights", () => this.lightsRec(view, this.firstOnly(d)), []),
-      tex: safe("tex", () => p.textures.map((ti, n) => this.texRec(d.archive, d.state.tex[ti], p.texGen[n], F, n)), []),
+      tex: safe("tex", () => {
+        // (by the map the game binds each to, its number the map's)
+        const maps = gameTexMaps(d.state.tex.map((t) => t?.tobj.flags ?? 0));
+        return p.textures.map((ti, n) => ({ ...this.texRec(d.archive, d.state.tex[ti], p.texGen[n], F, n, view, s.mvBuf), map: maps[ti] }))
+          .sort((x, y) => x.map - y.map);
+      }, []),
       shade: { channel: p.channel, vertexBase: p.vertexBase, lit: p.lit, specular: p.specular, bump: p.bump,
                stages: p.stages.map((x) => ({ tex: d.state.tex[p.textures[x.tex]]?.tobj.id ?? null, colorMap: x.colorMap,
                                               alphaMap: x.alphaMap, phase: x.phase })),
@@ -481,7 +537,11 @@ export class DrawLog {
     const hx = (v: number) => v.toString(16).padStart(8, "0");
     // (start and end as the registers hold them - worked back from A, B and C with the camera's near, as a reader
     // of the game's registers does - and as they were handed to GXSetFog: set_start, set_end)
-    const dec = r ? fogDecoded(r) : null;
+    // (with the near a reader of the captures takes: worked back, in double precision, from the GX projection's
+    // float32 numbers - near = p5 / (p4 - 1) - not the near GXSetFog was handed)
+    const g = this.inner.camGx;
+    const near = g && g[14] === -1 && g[10] !== 1 ? g[11] / (g[10] - 1) : null;
+    const dec = r ? fogDecoded(near !== null && Number.isFinite(near) ? { ...r, near } : r) : null;
     return { type: FOG_TYPE[f.type & 7] ?? String(f.type & 7), ortho: ((f.type >> 3) & 1) === 1,
              start: dec ? dec.start : this.num(f.start), end: dec ? dec.end : this.num(f.end),
              set_start: this.num(f.start), set_end: this.num(f.end),
@@ -532,24 +592,46 @@ export class DrawLog {
     return out;
   }
 
-  private texRec(a: Archive, t: TexState | undefined, gen: number, F?: Float32Array, n = 0): Record<string, unknown> {
+  private texRec(a: Archive, t: TexState | undefined, gen: number, F?: Float32Array, n = 0, view?: Mat,
+                 mv?: Float32Array): Record<string, unknown> {
     if (!t) return { id: null };
     const o = t.tobj;
     let id = this.images.get(t.image);
-    // (a picture made at run time - the mirror's, one the page draws into, Stadium's screen - is a frame
-    // copy to the game, not the file's bytes)
-    if (this.inner.live.has(t.image)) id = "efb:live";
+    // (a picture made at run time - the mirror's, one the page draws into, Stadium's screen, the magnifier's - is a
+    // frame copy to the game, not the file's bytes)
+    if (this.inner.live.has(t.image) || this.inner.imageTex.has(t.image)) id = "efb:live";
     else if (id === undefined) this.images.set(t.image, (id = gen === 4 ? "mirror" : imageId(a, t.image)));
+    const game = id === "mirror" ? MIRROR_GAME : id === "efb:live" ? liveGame.get(t.image) : undefined;
     const at = 24 + n * 12;
+    let gameRows: number[][] | null = null;
+    // (the mirror's: its three rows as the game's post-matrix has them, grIzumi_801CCEA0's texture_matrix times
+    // the inverse of the view - it takes the point in view space - and t from the top)
+    if (gen === 4 && view && F && F.length >= at + 12) {
+      const g = [F.subarray(at, at + 4), F.subarray(at + 4, at + 8).map((v, c) => F[at + 8 + c] - v), F.subarray(at + 8, at + 12)];
+      const vi = invert(new Float32Array(16), view);
+      const post = g.map((r) => [0, 1, 2, 3].map((c) => r[0] * vi[c * 4] + r[1] * vi[c * 4 + 1] + r[2] * vi[c * 4 + 2] + r[3] * vi[c * 4 + 3]));
+      gameRows = post.map((r) => r.map(this.num));
+    }
+    // (a reflection's: as the game's texgen goes, its post-matrix - tobj->mtx times HSD's reflection matrix, s and
+    // t from 0.5 + x / 2 and 0.5 - y / 2 - times the normal matrix, the modelview's inverse transposed: s and t)
+    if (gen === 2 && mv && F && F.length >= at + 12) {
+      const N = normalMatrix(mv);
+      gameRows = [0, 1].map((r) => {
+        const x = F[at + r * 4], y = F[at + r * 4 + 1], z = F[at + r * 4 + 2], w = F[at + r * 4 + 3];
+        const post = [0.5 * x, -0.5 * y, 0];
+        return [...[0, 1, 2].map((c) => post[0] * N[c] + post[1] * N[3 + c] + post[2] * N[6 + c]), 0.5 * x + 0.5 * y + z + w]
+          .map(this.num);
+      });
+    }
     const m = F && F.length >= at + 8 ? Array.from(F.subarray(at, at + 8))
       : textureMatrix([t.translate[0], t.translate[1], o.translate[2]], [t.scale[0], t.scale[1], o.scale[2]],
                       [t.rotX, t.rotY, t.rotate], o.repeatS, o.repeatT, o.wrapT);
     const rec: Record<string, unknown> = {
-      map: o.id, id, format: t.image.format, w: t.image.width, h: t.image.height,
+      map: o.id, id, format: game?.[0] ?? t.image.format, w: game?.[1] ?? t.image.width, h: game?.[2] ?? t.image.height,
       wrap: [WRAP[o.wrapS] ?? String(o.wrapS), WRAP[o.wrapT] ?? String(o.wrapT)],
       mag: o.magFilt ? "linear" : "near", min: o.lod ? MIN[o.lod.minFilt] ?? String(o.lod.minFilt) : null,
       lod_bias: o.lod ? this.num(o.lod.bias) : 0, texgen: TEXGEN[gen] ?? String(gen),
-      mtx: [m.slice(0, 4), m.slice(4, 8)].map((r) => r.map(this.num)), blending: rnd(t.blending),
+      mtx: gameRows ?? [m.slice(0, 4), m.slice(4, 8)].map((r) => uvRow(r, gen).map(this.num)), blending: rnd(t.blending),
     };
     if (t.tlut) {
       rec.tlut = tlutId(a, t.tlut, t.image.format);
@@ -569,6 +651,13 @@ export class DrawLog {
       : !!ol || (!!l && Array.from({ length: l.n }, (_, k) => (l.attnA[k * 4 + 3] & 1) !== 0).some(Boolean));
     const anySpec = !first && !(ol && !ol.adds) && !!l && Array.from({ length: l.n }, (_, k) => (l.attnA[k * 4 + 3] & 2) !== 0).some(Boolean);
     const addsOn = !!ol && ol.adds && !(s.mobj.renderMode & RENDER.XLU);
+    // (the alpha channel, HSD_SetupChannelMode: lit when the ambient light has LOBJ_ALPHA - its alpha the ambient -
+    // or HSD_LObjGetLightMaskAlpha has a light: the set's with LOBJ_ALPHA (w 4), the color animation's added one
+    // (ftCo_8009F5AC); not while it lights alone or for a see-through material's channels, set with x588 without
+    // it; else unlit, 255)
+    const ambA = l?.ambientAlpha ?? null;
+    const anyAlpha = !first && (ol ? ol.adds : !!l && Array.from({ length: l.n }, (_, k) => (l.attnA[k * 4 + 3] & 4) !== 0).some(Boolean));
+    const litA = ambA === null && !anyAlpha ? 255 : null;
     const B = (v: number[]) => v.map(byteOf);
     return this.inputs.map((q) => {
       // (every input as the bytes the TEV takes: a texel round(t * 255), the channels' integers)
@@ -579,14 +668,13 @@ export class DrawLog {
         return [0, 4, 8].map((o) => (c ? B(Array.from(c.subarray(o, o + 4))) : [0, 0, 0, 0]));
       });
       // (the lit channel: the ambient register, HSD_MulColor of the material's ambient and the ambient light, plus
-      // the probe's light sum, through the channel; its alpha 255)
+      // the probe's light sum, through the channel; its alpha the light sum's alpha with the ambient's the same way,
+      // when the alpha channel is lit)
       const ambReg = mulColor(B([s.ambient[0], s.ambient[1], s.ambient[2]]), B([amb[0], amb[1], amb[2]]));
       const sum0 = B(q.s[0]), sum1 = B(q.s[1]);
       const lit = [0, 1, 2].map((i) => chanColor(255, ambReg[i] + (anyDiffuse ? sum0[i] : 0)));
-      // (while the light adds, a lit material's alpha channel is lit by it: the light's alpha by the probe's turn,
-      // which the material's alpha stage takes as the rasterized alpha, as the shader does)
-      const litA = ol && ol.adds ? chanColor(255, byteOf(q.s[0][3])) : 255;
-      const ras0 = p.channel === 1 ? B(q.v[0]) : p.channel === 2 ? [...lit, litA] : [255, 255, 255, 255];
+      const alpha0 = litA ?? chanColor(255, (ambA === null ? 0 : byteOf(ambA)) + (anyAlpha ? sum0[3] : 0));
+      const ras0 = p.channel === 1 ? B(q.v[0]) : p.channel === 2 ? [...lit, alpha0] : [255, 255, 255, 255];
       const ras1 = [0, 1, 2].map((i) => chanColor(255, anySpec ? sum1[i] : 0)).concat([255]);
       const dif = s.override ?? s.diffuse;
       const out = evalMaterial(p, {
@@ -595,11 +683,10 @@ export class DrawLog {
         shadows: Array.from({ length: nShadow }, (_, k) => B(q.t[(p.textures.length + k) & 7])),
       });
       // (the overlay light's color where its alpha channel falls: ftMaterial_800BF534's stage, prev + konst x ras.a)
-      // (its strength the rasterized alpha: the lit channel's - the light's alpha by the probe's turn - else the
-      // vertex alpha or the material's)
+      // (its strength the rasterized alpha: the lit alpha channel's - the probe's light sum's alpha, the added light's
+      // with the set's alpha lights' - else the vertex alpha or the material's)
       // (the probe's light sum is the lights' term already, color and all, as for the rgb: not the light's alpha again)
-      const rasA = p.channel === 2 && ol ? chanColor(255, byteOf(q.s[0][3]))
-        : p.channel === 1 ? byteOf(q.v[0][3]) : byteOf(s.alpha);
+      const rasA = p.channel === 2 ? alpha0 : p.channel === 1 ? byteOf(q.v[0][3]) : byteOf(s.alpha);
       if (addsOn) { const k = B(ol!.rgb); for (let i = 0; i < 3; i++) out[i] = tevStage(0, k[i], rasA, out[i], 0, 0, 0, true); }
       const tc = this.tint?.color;
       if (tc && tc[3] > 0) out.splice(0, 3, ...overColor(out.slice(0, 3), B(tc.slice(0, 3)), byteOf(tc[3])));
