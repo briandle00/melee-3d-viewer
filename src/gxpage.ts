@@ -124,7 +124,10 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
   session?.close();
   const t0 = performance.now(), mark = (k: string) => { loadTimes[k] = performance.now() - t0; };
   info("reading the replay...");
-  const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  const res = await fetch(url);
+  // (a replay the server does not have is said as that, not as the bytes of its error page failing to decode)
+  if (!res.ok) throw new Error(`the replay could not be read: HTTP ${res.status} for ${url}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
   // (another replay: sound off, and the next start opens this one; the same one played again in another Playback keeps it)
   if (url !== currentUrl) { sound.load(new Blob([bytes as unknown as BlobPart])); sound.playback(playbackMode); }
   const parsed = decode(bytes, { useTypedArrays: true }) as { raw: Uint8Array; metadata?: { playedOn?: string } };
