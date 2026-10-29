@@ -17,57 +17,8 @@
 import { createSignal } from "solid-js";
 import { clearSimulationStage, receiveSimulationStage } from "./simulation-stage";
 
-/** what the host page sets before the viewer loads */
-interface AudioConfig {
-  /** URL of an ES module that exports ReplayPlayer */
-  module: string;
-  /** passed through to the host player */
-  assetsUrl: string;
-}
-
-/** the host player's position event: which seek it is for, and whether that seek is done */
-interface PositionDetail {
-  videoEpoch: number;
-  seeking: boolean;
-}
-
-/** the host's sound-only replay player (the contract in README.md) */
-interface AudioPlayer extends EventTarget {
-  /** the replay is open and seeks may be sent */
-  readonly ready: boolean;
-  readonly speed: number;
-  /** the fractional game frame (from -123) at the audio device's playback time, null until known */
-  readonly audioFrame: number | null | undefined;
-  /** the number of the latest seek. Provisional: this is the existing host
-   *  player's private field; a public way to acknowledge a seek should take
-   *  its place before this contract is final */
-  readonly _videoEpoch: number;
-  enableAudio(): Promise<unknown>;
-  open(replay: Blob): Promise<unknown>;
-  seek(gameFrame: number, options: { resume: boolean }): void;
-  /** play on from where the sound is (no seek) */
-  play(): Promise<unknown>;
-  /** stop the sound where it is */
-  pause(): void;
-  setSpeed(rate: number): void;
-  setMusic(on: boolean): void;
-  /** (optional) how the viewer plays the replay back from now on: "slippi" (as Slippi's replay playback shows it) or "original" (as the
-   *  console recorded it). The two can play some replays differently (the C-stick of a replay from before Slippi 3.17); a backend that
-   *  simulates the game plays it the same way, or its sound drifts from the picture. A backend may ignore it */
-  setPlayback?(mode: PlaybackMode): void;
-  destroy(): unknown;
-}
-
-/** how the viewer plays the replay back (the GX player's Playback setting) */
-export type PlaybackMode = "slippi" | "original";
-
-type AudioPlayerClass = new (options: {
-  audioOnly: true;
-  assetsUrl: string;
-  music: boolean;
-  /** (optional for the backend) the playback mode the replay is played back in, as setPlayback */
-  playback: PlaybackMode;
-}) => AudioPlayer;
+import type { AudioConfig, AudioPlayer, AudioPlayerClass, PlaybackMode, PositionDetail } from "./audio-backend";
+export type { AudioConfig, AudioPlayer, AudioPlayerClass, PlaybackMode } from "./audio-backend";
 
 /** the game's first frame: viewer frame indexes start at 0, the host player's game frames at -123 */
 const FIRST_FRAME = -123;
@@ -101,6 +52,8 @@ let playbackMode: PlaybackMode = "slippi";
 let generation = 0;
 // a seek was sent and the host player has not said it is done
 let seeking = false;
+// Viewer-owned sequence: promise completion never needs a backend private field.
+let seekSequence = 0;
 
 // the host's module is loaded ahead of the first click, so the click can
 // start sound at once; loading it makes no worker or AudioContext
@@ -140,9 +93,19 @@ function fail(p: AudioPlayer) {
 function align() {
   if (!player?.ready) return;
   seeking = true;
-  // each seek gets a new epoch in the host player and the latest one wins;
-  // the old sound stops at once, before this returns
-  player.seek(index + FIRST_FRAME, { resume: desired });
+  const p = player, sequence = ++seekSequence;
+  try {
+    const completion = p.seek(index + FIRST_FRAME, { resume: desired });
+    if (completion) {
+      void completion.then(() => {
+        if (p === player && sequence === seekSequence) seeking = false;
+      }, () => {
+        if (p === player && sequence === seekSequence) fail(p);
+      });
+    } else if (typeof p._videoEpoch !== "number") {
+      throw new Error("Audio backend seek must return a promise or provide legacy seek acknowledgements");
+    }
+  } catch { fail(p); }
 }
 
 export const sound = {
@@ -169,6 +132,7 @@ export const sound = {
       setSoundState("error");
       return;
     }
+    this.disable();
     const id = ++generation;
     const p = new Player({
       audioOnly: true,
@@ -189,7 +153,7 @@ export const sound = {
       const detail = (event as CustomEvent<PositionDetail>).detail;
       // (a seek is done only when the host player says so for the latest
       // seek: an older seek finishing while the slider moves on is not it)
-      if (p !== player || detail.videoEpoch !== p._videoEpoch) return;
+      if (p !== player || typeof p._videoEpoch !== "number" || detail.videoEpoch !== p._videoEpoch) return;
       if (!detail.seeking) seeking = false;
     });
     try {

@@ -14,6 +14,8 @@ export interface ModelSpawn {
   bank?: number;
   /** follows the joint it is made on */
   attach?: boolean;
+  /** the dispatch replaces the root translation with the spawn position (efLib_Create_Attach_Pos) */
+  rootSet?: boolean;
   /** a child of that joint, held to it by place and turn constraints (efLib_Create_AttachChild: Prop.poseConstrained) */
   child?: boolean;
   /** made on this fighter part (an index into fp->parts), not the call's joint */
@@ -181,7 +183,9 @@ export const SPAWNS: Record<number, Spawn> = {
   0x3f7: M(0x12, { face: true, rotZ: "arg" }),
   0x3f8: M(0x13, { face: true, rotZ: "arg" }),
   0x3f9: M(0x14, { face: true, rotZ: "arg" }),
-  0x3fa: M(0x15),
+  // efAsync case 0x3FA uses efLib_Create_Attach_Pos. The model's authored root has
+  // a large Z offset; retaining it brings the flash toward the camera, below the HUD.
+  0x3fa: M(0x15, { rootSet: true }),
   0x3fb: M(0x16),
   0x3fc: M(0x17),
   0x3fd: M(3, { face: true, rotZ: "arg" }),

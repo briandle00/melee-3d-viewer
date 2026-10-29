@@ -319,6 +319,9 @@ anything, and leaves the renderer's files as they are:
 
 ## Optional browser audio
 
+For a public backend contract, an asset-free diagnostic tone module, and offline
+PCM capture instructions, see [Supplying an audio backend](docs/audio-backend.md).
+
 The viewer makes no sound by itself. A page that embeds it can supply a
 sound-only replay player; the viewer then shows a sound button, and while
 sound is on the picture follows the sound's PCM playback clock. Without that
@@ -349,12 +352,11 @@ The module exports `ReplayPlayer`:
   click, and returns a promise for when it is ready. `open(blob)` loads the
   same replay and resolves once `ready` is true. The two may run at the same
   time.
-- `seek(gameFrame, { resume })` clears the old sound at once, increments
-  `_videoEpoch` and cancels older seeks. `position` events carry
-  `{ videoEpoch, seeking }` in `CustomEvent.detail`; a seek is done when one
-  reports the current epoch. `_videoEpoch` is provisional: it is the existing
-  player's private field, and a public seek acknowledgement should replace it
-  before this contract is final.
+- `seek(gameFrame, { resume })` clears old sound synchronously and returns a
+  promise resolving when that position is ready. Cancel superseded backend work;
+  the viewer ignores stale promise completions and failures. New backends do not
+  need any private fields. Legacy backends may still return void, increment
+  `_videoEpoch` and emit `position` events with `{ videoEpoch, seeking }`.
 - `audioFrame`: the fractional game frame at the audio device's current PCM
   playback time, or `null` until known. It must not run ahead of the
   simulation. Game frames start at -123; the viewer's frame indexes start at 0.

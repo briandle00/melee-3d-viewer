@@ -1747,6 +1747,7 @@ export class FxWorld {
       if (s.persistent && desc.life === 0) life = Infinity;
       const m: ModelFx = {
         bank, index, x: ctx.pos[0], y: ctx.pos[1], z: ctx.pos[2],
+        rootSet: s.rootSet,
         rotY: s.face ? (ctx.facing < 0 ? -Math.PI / 2 : Math.PI / 2) : 0,
         rotZ: s.rotZ === "rand" ? Math.PI * 2 * R.next() : s.rotZ === "arg" ? ctx.angle : 0,
         scale, age: (ctx.age ?? 0) + (s.startFrame ?? 0), life,
