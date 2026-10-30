@@ -1,13 +1,13 @@
 The GX player's simulator module (gx-core.js, gx-core.wasm) and its game file list (sim-files.json).
 
 Built from melee-sim-light (https://github.com/briandle00/melee-sim-light, a fork of https://github.com/kyhavlov/melee-sim-light),
-commit b93e8a2e7029b8361b9b0610de4bbffea3858a54 (branch gx-viewer): the viewer build with the HUD layout option (msl_gxw_set_hud_layout) and the stream restart and memory-top
+commit 119be5220f6a8f38238efce784cda5b127db5447 (branch gx-viewer; the float rule for a sum's own product, native libm calls, fighter facing in the effect callback): the viewer build with the HUD layout option (msl_gxw_set_hud_layout) and the stream restart and memory-top
 calls the app's player seeks with (msl_gxw_restart_stream, msl_gxw_heap_top). Built with tools/build/build_wasm_gx.sh from a clean
 build folder, DATA unset: no game data is inside the module (the page hands it the user's own files, main.dol included).
 Source-file names are relative (prefix maps); gx-core.js has its two CRLF line ends written as LF.
 
 sha256
   gx-core.js    c0d37dc7879f1f046274fa77be464ac170712b187459c7b1ef4741fd37c5f279
-  gx-core.wasm  85389f70f12baa7bfc7b993fd4348edebd87acb2840b636c6b24772f88412d78
+  gx-core.wasm  01287c62abe802d91c916923a242d11e28598b61a257ec6b2f11955a34320bb5
 
 sim-files.json lists the game files the module reads (names only), for a game folder given by URL (?files=).
