@@ -394,7 +394,7 @@ site's origin, and the module and worklet files must be reachable by the
 browser. No server-side audio generation is needed.
 
 While sound is on, a seek shows its frame at once and the picture holds until
-the sound has caught up; the acknowledgement of an older seek is ignored.
+the sound has caught up; the acknowledgment of an older seek is ignored.
 A pause, a play or a change of speed goes to the host player as it is; a seek
 under way is sent again with the new playing state. Music
 is turned on and off separately. Turning sound off, or loading another replay,

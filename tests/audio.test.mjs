@@ -96,7 +96,7 @@ test("optional audio follows acknowledged seeks, pauses, speed, music and teardo
     p.ack();
     assert.equal(sound.frame(), 135);
 
-    // an older seek's acknowledgement does not end the latest seek
+    // an older seek's acknowledgment does not end the latest seek
     sound.seek(1000);
     const old = p._videoEpoch;
     sound.seek(500);

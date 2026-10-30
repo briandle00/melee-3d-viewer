@@ -103,7 +103,7 @@ function align() {
         if (p === player && sequence === seekSequence) fail(p);
       });
     } else if (typeof p._videoEpoch !== "number") {
-      throw new Error("Audio backend seek must return a promise or provide legacy seek acknowledgements");
+      throw new Error("Audio backend seek must return a promise or provide legacy seek acknowledgments");
     }
   } catch { fail(p); }
 }

@@ -21,7 +21,7 @@ export interface AudioPlayer extends EventTarget {
   readonly speed: number;
   /** the fractional game frame (from -123) at the audio device's playback time, null until known */
   readonly audioFrame: number | null | undefined;
-  /** Legacy position-event acknowledgement only. New backends omit this and
+  /** Legacy position-event acknowledgment only. New backends omit this and
    * return a promise from seek instead. */
   readonly _videoEpoch?: number;
   enableAudio(): Promise<unknown>;
