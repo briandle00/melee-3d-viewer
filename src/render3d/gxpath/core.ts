@@ -66,10 +66,6 @@ export interface GxInitial { bp: Uint32Array; cp: Uint32Array; xfMem: Uint32Arra
 
 const RESULTS: Record<number, string> = { 1: "end of tape", [-1]: "not open", [-2]: "step failed", [-3]: "game data failed", [-4]: "match failed" };
 
-const SNAP_PAGE = 65536;
-/** GxCore.snapshot(): the module's memory (its non-zero pages) and the JavaScript side's own state */
-export interface CoreSnapshot { length: number; pages: Map<number, Uint8Array>; frameBuf: number; open: boolean; bytes: number }
-
 export class GxCore {
   private frameBuf = 0;
   private open = false;
@@ -187,32 +183,6 @@ export class GxCore {
   outRow(): DataView {
     const m = this.mod, p = m._msl_gxw_out_row();
     return new DataView(m.HEAPU8.buffer, p, m._msl_gxw_out_row_size());
-  }
-
-  /** The module's whole state as it is now (between calls everything it holds is in its memory: the stack is back at its base): the
-   *  memory's non-zero 64 KiB pages and its length. restore() puts it back. */
-  snapshot(): CoreSnapshot {
-    const h = this.mod.HEAPU8, length = h.length, pages = new Map<number, Uint8Array>();
-    const words = new Int32Array(h.buffer, 0, length >> 2), per = SNAP_PAGE >> 2;
-    for (let p = 0; p * SNAP_PAGE < length; p++) {
-      const a = p * per, b = Math.min(a + per, words.length);
-      for (let i = a; i < b; i++) if (words[i] !== 0) { pages.set(p, h.slice(p * SNAP_PAGE, Math.min(length, (p + 1) * SNAP_PAGE))); break; }
-    }
-    return { length, pages, frameBuf: this.frameBuf, open: this.open, bytes: pages.size * SNAP_PAGE };
-  }
-
-  /** Put back a snapshot of this instance: its memory byte for byte as it was, and every byte the memory has grown by since zero (as a
-   *  fresh instance's memory would be where it grows) */
-  restore(s: CoreSnapshot): void {
-    const h = this.mod.HEAPU8;
-    for (let p = 0; p * SNAP_PAGE < s.length; p++) {
-      const page = s.pages.get(p);
-      if (page) h.set(page, p * SNAP_PAGE);
-      else h.fill(0, p * SNAP_PAGE, Math.min(s.length, (p + 1) * SNAP_PAGE));
-    }
-    h.fill(0, s.length);
-    this.frameBuf = s.frameBuf;
-    this.open = s.open;
   }
 
   /** bytes the module holds (its memory, wasm pages) */
