@@ -214,7 +214,7 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
 }
 
 /** a row's picture onto the screen, after the session drew it (the CPU renderer's comes as pixels through onPicture instead) */
-function showShown() { if (glBackend && !screen.needsPixels) glBackend.present(); }
+function showShown() { if (glBackend && !screen.needsPixels) { glBackend.present(); screen.showGl(); } }
 
 let you: number | null = null;
 function update() {

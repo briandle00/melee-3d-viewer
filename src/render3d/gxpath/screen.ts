@@ -69,8 +69,8 @@ export class GxScreen {
   /** a TV shown with the WebGL renderer: the TV takes the picture from that renderer's canvas on the graphics card (showGl), no read-back */
   get tvFromGl(): boolean { return this.glMode && this.preset !== "off" && !!this.crt; }
 
-  /** whether the page needs the picture's pixels (a TV is chosen, or the renderer is the CPU one) */
-  get needsPixels(): boolean { return this.preset !== "off" || !this.glMode; }
+  /** whether the page needs the picture's pixels: only with the CPU renderer (with the WebGL one a TV takes the picture from its canvas, showGl) */
+  get needsPixels(): boolean { return !this.glMode; }
 
   private layout(): void {
     const tube = this.preset !== "off";
