@@ -87,20 +87,34 @@ function setPlaybackMode(m: PlaybackMode) {
 }
 function setPace(p: Pace) { pace = p; playback?.setPace(p); showButtons(); }
 
+/** The WebGL renderer is made when the page starts, so its shaders compile (on the browser's own threads) while the replay, the game
+ *  files and the simulator load; a first load in a browser otherwise waited for the compile after all of those. */
+const pageStart = performance.now();
+const glEarly: Promise<{ b: import("./render3d/gxr/gl").GxGl; gl: WebGL2RenderingContext; ready: Promise<void> } | null> | null = q.get("backend") === "cpu" ? null : (async () => {
+  const { GxGl } = await import("./render3d/gxr/gl");
+  // (no multisampling: the picture is blitted onto the canvas as it is, and a blit into a multisampled canvas is refused - the
+  // picture stayed black; the canvas keeps it between frames, for the video export and a paused player)
+  const gl = screen.glFlat.getContext("webgl2", { preserveDrawingBuffer: true, antialias: false, depth: false, stencil: false, alpha: false });
+  if (!gl) return null;
+  const b = new GxGl(gl, {}, { workers: Math.max(0, Number(q.get("workers") ?? Math.min(3, Math.max(0, (navigator.hardwareConcurrency || 4) - 2)))) });
+  const ready = b.prepare().then(() => { loadTimes.shadersReady = performance.now() - pageStart; });
+  ready.catch(() => {});
+  return { b, gl, ready };
+})();
+glEarly?.catch(() => {});
+
 async function makeBackend(env: ConstructorParameters<typeof CpuBackend>[0]): Promise<SessionBackend> {
   // (one WebGL renderer for the page: a replay loaded again, or played again for another playback setting, reuses its context and shaders)
   if (glBackend) { glBackend.reset(); return glBackend as unknown as SessionBackend; }
-  if (q.get("backend") !== "cpu") {
+  if (glEarly) {
     try {
-      const { GxGl } = await import("./render3d/gxr/gl");
-      // (no multisampling: the picture is blitted onto the canvas as it is, and a blit into a multisampled canvas is refused - the
-      // picture stayed black; the canvas keeps it between frames, for the video export and a paused player)
-      const gl = screen.glFlat.getContext("webgl2", { preserveDrawingBuffer: true, antialias: false, depth: false, stencil: false, alpha: false });
-      if (gl) {
-        const b = new GxGl(gl, {}, { workers: Math.max(0, Number(q.get("workers") ?? Math.min(3, Math.max(0, (navigator.hardwareConcurrency || 4) - 2)))) });
+      const early = await glEarly;
+      if (early) {
+        const { b, gl } = early;
         info("preparing the renderer (the first time in this browser this can take a minute)...");
         const t = performance.now();
-        await b.prepare();
+        await early.ready;
+        // (the time the load waited for the shaders; shadersReady is when they were done, from the page's start)
         loadTimes.shaders = performance.now() - t;
         // (the optional shader variants compile in the background: a draw that needs one waits for it)
         void b.warm();
