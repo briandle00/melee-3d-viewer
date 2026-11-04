@@ -382,7 +382,7 @@ async function bench(s: GxSession) {
     gpuMs: gb.timing ? gb.collectTimes() : null, stats: { ...gb.stats }, timers: { ...(gpuOf()?.timers ?? {}) },
     draws: gb.draws, tris: gb.tris, passes: gb.passes, compileWaits: gb.compileWaits, floatOps: gb.floatOps, floatCheck: gb.floatCheck,
   } : null;
-  const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, snapshotBytes: s.snapshotBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
+  const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
   // (tape=1: the whole tape the match played, for the native recorder to play the same one)
   if (q.get("tape") && s.wholeTape) await fetch("/save/tape.bin", { method: "POST", body: s.wholeTape as unknown as BodyInit });
   await fetch("/bench", { method: "POST", body });
