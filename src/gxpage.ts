@@ -338,6 +338,11 @@ async function bench(s: GxSession) {
   const frameHash = q.get("hash") ? (await import("./render3d/gxpath/streamhash")).frameHash : null;
   s.setPictures(false);
   await s.start();
+  // (measure=1: the renderer's own counters; timing=1: the GPU's time per pass kind, timer queries)
+  const gpuOf = () => (s as unknown as { gpu?: { measure: boolean; timers: Record<string, number> } }).gpu;
+  const gb = glBackend as unknown as import("./render3d/gxr/gl").GxGl | null;
+  if (gb && q.get("measure")) { gb.measure = true; const g = gpuOf(); if (g) g.measure = true; }
+  if (gb && q.get("timing")) gb.timing = true;
   const t0 = performance.now();
   while (s.index < s.frameCount) {
     const t = performance.now();
@@ -353,7 +358,11 @@ async function bench(s: GxSession) {
     await new Promise((r) => setTimeout(r, 0));
   }
   const heap = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? 0;
-  const body = JSON.stringify({ rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
+  const extra = gb && (q.get("measure") || q.get("timing")) ? {
+    gpuMs: gb.timing ? gb.collectTimes() : null, stats: { ...gb.stats }, timers: { ...(gpuOf()?.timers ?? {}) },
+    draws: gb.draws, tris: gb.tris, passes: gb.passes, compileWaits: gb.compileWaits,
+  } : null;
+  const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
   await fetch("/bench", { method: "POST", body });
 }
 
