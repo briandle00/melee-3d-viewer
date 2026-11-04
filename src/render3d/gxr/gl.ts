@@ -20,7 +20,7 @@ import type { GxInitial } from "./dff";
 import { bits, GxRegs } from "./state";
 import { formatInfo, levelOffset } from "./texunit";
 import { VertexData } from "./vertex";
-import { checkOps, checkPixels } from "./floatcheck";
+import { checkOps, checkPixels, checkScene } from "./floatcheck";
 import type { FloatOps } from "./glsl-float";
 
 const EFB_W = 640, EFB_H = 528;
@@ -255,6 +255,23 @@ export class GxGl implements GxBackend {
     for (const k of [...this.progs.keys()]) if (k.startsWith("pixel")) { this.gl.deleteProgram(this.progs.get(k)!); this.progs.delete(k); }
     for (const k of [...this.pending.keys()]) if (k.startsWith("pixel")) this.pending.delete(k);
     this.pending.set("pixel", startCompile(this.gl, FULLSCREEN_VS, pixelShader(this.pixelOptions())));
+  }
+
+  /** Draw a small built-in scene (floatcheck.ts checkScene) `times` times and forget it: the JavaScript engine has compiled the draw path,
+   *  and the workers have started, before a replay's first frame. Leaves the renderer as reset() does. Call after prepare(). */
+  warmUp(times = 6): void {
+    const sc = checkScene();
+    const draws = this.draws, drawing = this.drawing, ff = this.fastForward;
+    try {
+      this.reset();
+      this.drawing = true; this.fastForward = false;
+      const g = new GxGpu(this, sc.init, sc.mem);
+      for (let i = 0; i < times; i++) { g.runFrame({ fifo: sc.stream, updates: [] }); this.flush(); }
+      this.finish();
+    } finally {
+      this.reset();
+      this.draws = draws; this.drawing = drawing; this.fastForward = ff;
+    }
   }
 
   /** wait (without blocking the page) until the shaders are compiled; `features` also starts the optional pixel shader variants

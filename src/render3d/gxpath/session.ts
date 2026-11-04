@@ -162,13 +162,10 @@ export class GxSession {
     if (this.backend) this.backend.onPicture = on ? (rgba) => { this.onPicture?.(rgba, this.index - 1); } : null;
   }
 
-  /** Draw the first few rows once, hidden, and start the match again: the JavaScript engine and the renderer's caches are warm before the first row shown */
-  async warmup(rows = 4): Promise<void> {
-    await this.start();
-    const was = this.wantPictures;
-    this.setPictures(false);
-    for (let i = 0; i < rows && this.index < this.frameCount; i++) { this.step(true); await new Promise((r) => setTimeout(r, 0)); }
-    this.setPictures(was);
+  /** The match from its first row, with the renderer warm: a renderer with warmUp() (GxGl) has drawn its built-in scene, so the JavaScript
+   *  engine has compiled the draw path before the first row shown. The simulator is not stepped for it: the match is opened once. (Before,
+   *  the first rows were drawn hidden and the match opened again, which took over a second.) */
+  async warmup(): Promise<void> {
     await this.start();
   }
 
