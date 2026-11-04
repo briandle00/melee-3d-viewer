@@ -20,6 +20,8 @@ import type { GxInitial } from "./dff";
 import { bits, GxRegs } from "./state";
 import { formatInfo, levelOffset } from "./texunit";
 import { VertexData } from "./vertex";
+import { checkOps, checkPixels } from "./floatcheck";
+import type { FloatOps } from "./glsl-float";
 
 const EFB_W = 640, EFB_H = 528;
 const EXP_CONSTS = expConstants();
@@ -118,8 +120,11 @@ export class GxGl implements GxBackend {
   private timer: { ext: any; pending: { q: WebGLQuery; what: string }[]; ms: Record<string, number> } | null = null;
 
   /** options of the pixel shader (test aids) */
-  constructor(gl: WebGL2RenderingContext, private shaderOptions: { debugRegs?: [number, number]; mutate?: (source: string) => string } = {}, front: { workers?: number; factory?: () => Worker } = {}) {
+  constructor(gl: WebGL2RenderingContext, private shaderOptions: { debugRegs?: [number, number]; mutate?: (source: string) => string; floatOps?: FloatOps | "auto" } = {}, front: { workers?: number; factory?: () => Worker } = {}) {
     this.gl = gl;
+    // (auto: the card's own float arithmetic, once floatCheck has found it exact on this card; the whole-number functions otherwise)
+    this.floatOps = !shaderOptions.floatOps || shaderOptions.floatOps === "auto" ? "fast" : shaderOptions.floatOps;
+    this.floatAuto = !shaderOptions.floatOps || shaderOptions.floatOps === "auto";
     // the front half on worker threads (a page that is cross-origin isolated); otherwise it runs on this thread, with the same result
     if ((front.workers ?? 0) > 0 && FrontPool.available()) {
       this.fp = new FrontPool(front.workers!, front.factory ?? (() => new Worker(new URL("./frontworker.ts", import.meta.url), { type: "module" })));
@@ -127,7 +132,7 @@ export class GxGl implements GxBackend {
     if (gl.getParameter(gl.MAX_TEXTURE_SIZE) < MEM_ROWS) throw new Error(`the GX renderer needs textures of ${MEM_ROWS} texels (this GPU's limit is ${gl.getParameter(gl.MAX_TEXTURE_SIZE)})`);
     // the programs compile in the background (when the browser can); `prepare()` waits for them, and the first draw would
     this.pending = new Map([
-      ["pixel", startCompile(gl, FULLSCREEN_VS, pixelShader(shaderOptions))], ["copy", startCompile(gl, FULLSCREEN_VS, COPY_FS)],
+      ["pixel", startCompile(gl, FULLSCREEN_VS, pixelShader(this.pixelOptions()))], ["copy", startCompile(gl, FULLSCREEN_VS, COPY_FS)],
       ["clear", startCompile(gl, FULLSCREEN_VS, CLEAR_FS)], ["picture", startCompile(gl, FULLSCREEN_VS, PICTURE_FS)],
       ["present", startCompile(gl, FULLSCREEN_VS, PRESENT_FS)],
     ]);
@@ -209,11 +214,55 @@ export class GxGl implements GxBackend {
     return p;
   }
 
+  /** how the pixel programs add and multiply floats (glsl-float.ts): "fast" the card's own arithmetic, "soft" whole numbers ("dual": a check) */
+  floatOps: FloatOps;
+  private floatAuto: boolean;
+  /** the start-up check of the card's float arithmetic (floatcheck.ts): operations and pixels that differed, and the time it took; null before it ran */
+  floatCheck: { ops: number; pixels: number; ms: number; error?: string } | null = null;
+  private floatChecking: Promise<void> | null = null;
+  private pixelOptions() { return { ...this.shaderOptions, floatOps: this.floatOps }; }
+
+  /** With floatOps auto: the card's float arithmetic is checked (floatcheck.ts: operations, then a scene's pixels against the CPU
+   *  reference, through the base pixel program) before anything is drawn; on any difference the programs are made again with the
+   *  whole-number float functions. Every user of the renderer (the player, the export, a host's own player) goes through prepare() or
+   *  its first draw, so none draws before the check. */
+  private checkFloat(): Promise<void> {
+    if (!this.floatAuto || this.floatOps !== "fast") return Promise.resolve();
+    if (!this.floatChecking) this.floatChecking = (async () => {
+      let ms = 0, ops = -1, pixels = -1, error: string | undefined;
+      try {
+        let t0 = performance.now();
+        ops = checkOps(this.gl);
+        ms += performance.now() - t0;
+        if (ops === 0) {
+          // (the scene is drawn by the base pixel program: its compile is waited for, not counted)
+          const c = this.pending.get("pixel");
+          while (c && !compileDone(this.gl, c)) await new Promise((r) => setTimeout(r, 10));
+          t0 = performance.now();
+          pixels = checkPixels(this);
+          ms += performance.now() - t0;
+        }
+      } catch (e) { error = String((e as Error)?.message ?? e); }
+      this.floatCheck = { ops, pixels, ms, error };
+      if (ops !== 0 || pixels !== 0) this.useSoftFloat();
+    })();
+    return this.floatChecking;
+  }
+
+  /** the pixel programs again with the whole-number float functions (the card's arithmetic failed the check) */
+  private useSoftFloat(): void {
+    this.floatOps = "soft";
+    for (const k of [...this.progs.keys()]) if (k.startsWith("pixel")) { this.gl.deleteProgram(this.progs.get(k)!); this.progs.delete(k); }
+    for (const k of [...this.pending.keys()]) if (k.startsWith("pixel")) this.pending.delete(k);
+    this.pending.set("pixel", startCompile(this.gl, FULLSCREEN_VS, pixelShader(this.pixelOptions())));
+  }
+
   /** wait (without blocking the page) until the shaders are compiled; `features` also starts the optional pixel shader variants
    *  (1: the indirect texture unit, 2: the exponential fog and range adjustment) so that no draw has to wait for them later */
   async prepare(features = 0): Promise<void> {
+    await this.checkFloat();
     for (const f of [1, 2, 3]) if ((features & f) === f && !this.pending.has("pixel" + f) && !this.progs.has("pixel" + f)) {
-      this.pending.set("pixel" + f, startCompile(this.gl, FULLSCREEN_VS, pixelShader({ ...this.shaderOptions, indirect: (f & 1) !== 0, fogExtra: (f & 2) !== 0 })));
+      this.pending.set("pixel" + f, startCompile(this.gl, FULLSCREEN_VS, pixelShader({ ...this.pixelOptions(), indirect: (f & 1) !== 0, fogExtra: (f & 2) !== 0 })));
     }
     for (const [name, c] of [...this.pending]) {
       while (!compileDone(this.gl, c)) await new Promise((r) => setTimeout(r, 10));
@@ -224,9 +273,10 @@ export class GxGl implements GxBackend {
   /** compile the optional pixel shader variants one after another in the background (the browser compiles on its own threads where it can), so that a draw
    *  that needs one finds it ready. Resolves when all are done; nothing waits for it. Call after `prepare()`. */
   async warm(features = 3): Promise<void> {
+    await this.checkFloat();
     for (const f of [2, 1, 3]) {
       if ((features & f) !== f || this.progs.has("pixel" + f)) continue;
-      if (!this.pending.has("pixel" + f)) this.pending.set("pixel" + f, startCompile(this.gl, FULLSCREEN_VS, pixelShader({ ...this.shaderOptions, indirect: (f & 1) !== 0, fogExtra: (f & 2) !== 0 })));
+      if (!this.pending.has("pixel" + f)) this.pending.set("pixel" + f, startCompile(this.gl, FULLSCREEN_VS, pixelShader({ ...this.pixelOptions(), indirect: (f & 1) !== 0, fogExtra: (f & 2) !== 0 })));
       const c = this.pending.get("pixel" + f)!;
       while (!compileDone(this.gl, c)) await new Promise((r) => setTimeout(r, 50));
       if (this.pending.has("pixel" + f)) this.program("pixel" + f);
@@ -241,7 +291,7 @@ export class GxGl implements GxBackend {
     if (features === 0) return this.progPixel;
     const key = "pixel" + features;
     if (this.progs.has(key)) return this.progs.get(key)!;
-    if (!this.pending.has(key)) this.pending.set(key, startCompile(this.gl, FULLSCREEN_VS, pixelShader({ ...this.shaderOptions, indirect: (features & 1) !== 0, fogExtra: (features & 2) !== 0 })));
+    if (!this.pending.has(key)) this.pending.set(key, startCompile(this.gl, FULLSCREEN_VS, pixelShader({ ...this.pixelOptions(), indirect: (features & 1) !== 0, fogExtra: (features & 2) !== 0 })));
     const t0 = performance.now();
     const p = this.program(key);
     this.compileWaits.count++; this.compileWaits.ms += performance.now() - t0;
@@ -492,6 +542,9 @@ export class GxGl implements GxBackend {
     return intTexture(this.gl, t.fmt, t.w, h);
   }
 
+  /** (floatcheck.ts draws its scene through this backend while it checks) */
+  floatChecking_ = false;
+
   flush(): void {
     this.drainFront();
     const qn = this.q.n;
@@ -500,6 +553,8 @@ export class GxGl implements GxBackend {
     if (this.attached) this.uploadDirty(this.attached);
     if (this.measure) this.stats.uploadMs += performance.now() - tu;
     if (qn === 0) { this.used.clear(); return; }
+    // (nothing is drawn with the card's float arithmetic before the check has found it exact: a draw that comes first gets the whole-number functions)
+    if (this.floatAuto && this.floatOps === "fast" && !this.floatCheck && !this.floatChecking_) this.useSoftFloat();
     const t0 = this.measure ? performance.now() : 0;
     const gl = this.gl;
     // bins: every triangle goes into the tiles its blocks can reach and where its three edge tests can pass for some pixel. The edge test

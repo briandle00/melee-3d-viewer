@@ -15,7 +15,7 @@
  *    each of the 8 texture maps (264..271), the texgen projection flags (272), the viewport half width as float bits (273), the byte length of each map's palette (274..281);
  *  - uEfb: (color word, depth) per pixel of the previous pass.
  */
-import { SOFT_FLOAT_GLSL } from "./glsl-float";
+import { floatGlsl, type FloatOps } from "./glsl-float";
 
 export const MEM_TMEM = 0x1800000;
 export const MEM_PAL = 0x1900000;
@@ -112,7 +112,7 @@ uint f_exp2(uint x) {
 }
 `;
 
-export function pixelShader(opts: { indirect?: boolean; fogExtra?: boolean; debugRegs?: [number, number]; mutate?: (source: string) => string } = {}): string {
+export function pixelShader(opts: { indirect?: boolean; fogExtra?: boolean; floatOps?: FloatOps; debugRegs?: [number, number]; mutate?: (source: string) => string } = {}): string {
   const src = /* glsl */ `#version 300 es
 ${opts.indirect ? "#define INDIRECT 1" : ""}
 ${opts.fogExtra ? "#define FOG_EXTRA 1" : ""}
@@ -137,7 +137,7 @@ out uvec4 o;
 #define STATE_WORDS ${STATE_WORDS}u
 #define NO_PAL 0xffffffffu
 
-${SOFT_FLOAT_GLSL}
+${floatGlsl(opts.floatOps ?? "soft")}
 
 uint wd(usampler2D t, uint i) { return texelFetch(t, ivec2(int(i & 4095u), int(i >> 12)), 0).r; }
 // texel t of the triangle data (4 words)
@@ -974,7 +974,12 @@ void main() {
   o = uvec4(col, dep, 0u, 0u);
 }
 `;
-  return opts.mutate ? opts.mutate(src) : src;
+  // (dual: a check of the card's float arithmetic against the soft one on the real operands: a pixel where some addition or multiplication
+  // gave other bits comes out with bit 31 of its depth word set; the depth read in is the stored 24 bits)
+  const out = opts.floatOps !== "dual" ? src : src.replace("  uint col = e.x, dep = e.y;", "  uint col = e.x, dep = e.y & 0xffffffu;")
+    .replace("  o = uvec4(col, dep, 0u, 0u);\n}", "  o = uvec4(col, gFloatMismatch ? (dep | 0x80000000u) : dep, 0u, 0u);\n}");
+  if (opts.floatOps === "dual" && !out.includes("gFloatMismatch ? (dep")) throw new Error("pixelShader: no place for the dual check");
+  return opts.mutate ? opts.mutate(out) : out;
 }
 
 export const PIXEL_FS = pixelShader();

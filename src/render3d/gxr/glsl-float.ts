@@ -155,3 +155,68 @@ bool f_ge(uint a, uint b) { return f_le(b, a); }
 bool f_eq(uint a, uint b) { return (f_key(a) == f_key(b)) && !f_isnan(a) && !f_isnan(b); }
 bool f_iszero(uint a) { return (a << 1) == 0u; }
 `;
+
+/* The graphics card's own float addition and multiplication, made to give exactly the bits of f_add and f_mul above (the spec's
+ * rounding); `floatGlsl("fast")` puts them in their place. What the card's own arithmetic leaves open is closed here, the same way on
+ * every card:
+ * - fusing: a product is never fused into a following addition (nor anything reordered across operations): every result goes through
+ *   an exclusive-or with uFence, a uniform the program never sets (it reads zero), so no compiler can see through it;
+ * - numbers below the smallest normal number: operands are flushed to signed zeros first (the spec's "treat denormals as zero"),
+ *   whatever the card does with them; a sum that small is exact (both operands are multiples of the smallest denormal), so flushing it
+ *   gives the spec's signed zero (by the spec's sign rules, taken from the operands, not from the card); a product that small is
+ *   rounded by the spec to 24 bits before the flush, which can reach the smallest normal number: the same product scaled by 2^24 (exact,
+ *   one operand is below 2 there) is a normal number rounded to those 24 bits and says which;
+ * - not-a-numbers: always the one pattern f_add and f_mul give (0x7fc00000).
+ * Rounding to nearest even of one addition or multiplication of normal numbers is what WebGL's back ends ask of the card; the renderer
+ * checks it, and all of the above, on the card when it starts (gl.ts floatCheck) and uses f_add and f_mul above if anything differs. */
+const FAST_ADD_MUL = /* glsl */ `
+uniform uint uFence;
+uint f_ftz(uint a) { return (a & 0x7f800000u) == 0u ? (a & 0x80000000u) : a; }
+uint f_fence(float x) { return floatBitsToUint(x) ^ uFence; }
+uint f_add(uint a, uint b) {
+  uint A = f_ftz(a), B = f_ftz(b);
+  uint r = f_fence(uintBitsToFloat(A) + uintBitsToFloat(B));
+  uint mA = A & 0x7fffffffu, mB = B & 0x7fffffffu;
+  uint z = (mA | mB) == 0u ? (A & B & 0x80000000u) : (A == (B ^ 0x80000000u) ? 0u : ((mA >= mB ? A : B) & 0x80000000u));
+  r = (r & 0x7f800000u) == 0u ? z : r;
+  return (r & 0x7fffffffu) > F_INF ? F_NAN : r;
+}
+uint f_mul(uint a, uint b) {
+  uint A = f_ftz(a), B = f_ftz(b);
+  float fa = uintBitsToFloat(A), fb = uintBitsToFloat(B);
+  uint r = f_fence(fa * fb);
+  uint p2 = f_fence(uintBitsToFloat(f_fence(fa * 16777216.0)) * fb) & 0x7fffffffu;
+  bool zero = (A & 0x7fffffffu) == 0u || (B & 0x7fffffffu) == 0u;
+  uint tiny = ((A ^ B) & 0x80000000u) | (!zero && p2 >= 0x0c800000u ? 0x00800000u : 0u);
+  r = (r & 0x7fffffffu) <= 0x00800000u ? tiny : r;
+  return (r & 0x7fffffffu) > F_INF ? F_NAN : r;
+}
+`;
+
+const ADD_FROM = "uint f_add(uint a, uint b) {", ADD_TO = "uint f_sub(uint a, uint b)";
+const MUL_FROM = "uint f_mul(uint a, uint b) {", MUL_TO = "uint f_div(uint a, uint b)";
+const cutOut = (s: string, from: string, to: string): [string, string] => {
+  const a = s.indexOf(from), b = s.indexOf(to);
+  if (a < 0 || b < a) throw new Error("glsl-float: no " + from);
+  return [s.slice(0, a) + s.slice(b), s.slice(a, b)];
+};
+
+/** How the pixel shader does float addition and multiplication: "soft" in whole numbers (SOFT_FLOAT_GLSL as it is), "fast" with the card's
+ *  own arithmetic made exact (FAST_ADD_MUL), "dual" both (a check: the soft result is used, and any operation whose two results differ
+ *  sets gFloatMismatch) */
+export type FloatOps = "soft" | "fast" | "dual";
+export function floatGlsl(mode: FloatOps): string {
+  if (mode === "soft") return SOFT_FLOAT_GLSL;
+  const [noAdd, softAdd] = cutOut(SOFT_FLOAT_GLSL, ADD_FROM, ADD_TO);
+  const [rest, softMul] = cutOut(noAdd, MUL_FROM, MUL_TO);
+  // (f_sub, the first user of f_add, follows where f_add was: the replacements go there)
+  const at = rest.indexOf(ADD_TO);
+  if (mode === "fast") return rest.slice(0, at) + FAST_ADD_MUL + rest.slice(at);
+  const ren = (s: string, p: string) => s.replace(/\bf_(add|mul)\(/g, p + "_$1(");
+  const dual = ren(softAdd, "sf") + ren(softMul, "sf") + ren(FAST_ADD_MUL, "ff") + `
+bool gFloatMismatch = false;
+uint f_add(uint a, uint b) { uint s = sf_add(a, b); gFloatMismatch = gFloatMismatch || s != ff_add(a, b); return s; }
+uint f_mul(uint a, uint b) { uint s = sf_mul(a, b); gFloatMismatch = gFloatMismatch || s != ff_mul(a, b); return s; }
+`;
+  return rest.slice(0, at) + dual + rest.slice(at);
+}

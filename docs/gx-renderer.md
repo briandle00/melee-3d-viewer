@@ -15,7 +15,7 @@ The pipeline follows the raster spec section by section.
 | front half | `xform.ts`, `setup.ts`, `front.ts`, `frontpool.ts`, `frontworker.ts` | vertex transform and lighting, texture coordinate generation, culling, clipping, viewport, triangle setup (snapped integer edges, float planes). Every float operation is rounded to binary32 in the spec's order. `front.ts` is the one copy of this code; `frontpool.ts` runs it on worker threads |
 | pixel stage | `raster.ts`, `texunit.ts`, `tev.ts` | the CPU reference: coverage by 2 x 2 blocks, planes, texture unit reading raw GX texture memory, indirect stages, TEV, alpha test, fog, depth test, blend |
 | copies | `copy.ts` | EFB copies to texture memory in every color and depth format, and the clear after a copy |
-| GPU | `gl.ts`, `glsl-pixel.ts`, `glsl-float.ts`, `glsl-copy.ts`, `glutil.ts` | the same pixel stage as a WebGL 2 fragment shader. A queue of triangles is binned into 16 x 16 tiles and drawn in one full-screen pass; every pixel walks its tile's triangles in draw order, so blending and depth order are the hardware's. Floats are whole-number arithmetic on `uint` (`glsl-float.ts`), so the shader has no rounding of its own |
+| GPU | `gl.ts`, `glsl-pixel.ts`, `glsl-float.ts`, `glsl-copy.ts`, `glutil.ts` | the same pixel stage as a WebGL 2 fragment shader. A queue of triangles is binned into 16 x 16 tiles and drawn in one full-screen pass; every pixel walks its tile's triangles in draw order, so blending and depth order are the hardware's. Floats are `uint` bit patterns: division and the rest are whole-number arithmetic (`glsl-float.ts`); addition and multiplication use the card's own arithmetic once it has passed the start-up check (below), whole numbers otherwise |
 | CPU backend | `cpu.ts` | the reference as a backend (slow, used by the tests and as the oracle) |
 
 Backends implement `GxBackend` (`gpu.ts`): `draw`, `copy`, `copyClear`, plus `drawing` (draws skipped), `fastForward` (draws, copies and clears skipped, for
@@ -28,6 +28,22 @@ The pixel shader is large and compiles slowly on some drivers (the browser cache
 program on a discrete GPU with a cold cache). `await gx.prepare(features)` waits for the base program; `scanFeatures(dff, mem, frames)` finds which optional variants a
 stream needs (1: the indirect texture unit, 2: exponential fog and fog range adjustment); `gx.warm()` compiles the others in the background, one at a time. A draw that
 needs a variant that is not ready waits for it (`gx.compileWaits` counts these; it stays zero when `prepare` was given the stream's features).
+
+### The card's float arithmetic
+
+The spec rounds every float operation to binary32, unfused, with numbers below the smallest normal number treated as zero. `glsl-float.ts` has
+whole-number versions of every operation (`f_add`, `f_mul`, `f_div`, ...), and for addition and multiplication also versions on the card's own
+float arithmetic (`floatGlsl("fast")`), made to give the same bits on any card: each result passes through an exclusive-or with a uniform the
+program never sets (no compiler can fuse a product into a sum across it), operands below the smallest normal number are flushed first, a
+sum or product that small gets the spec's result by its own rule (a product rounded to 24 bits before the flush is found from the same product
+scaled by 2^24), and every not-a-number is the one pattern. With them the base program compiles in about two thirds of the time.
+
+`floatcheck.ts` decides, when the renderer starts (`prepare()`, and before any first draw): the card's addition and multiplication, in a small
+program, on 64 Ki operand pairs (the pairings where cards and the spec can part, and random numbers) must equal the spec's bit for bit, and a
+small scene drawn by the base program must equal the CPU reference in every pixel. Any difference, or a check that cannot run, and the
+programs are made with the whole-number versions (`gx.floatOps` says which; `gx.floatCheck` what was found). A draw before the check uses the
+whole-number versions. `new GxGl(gl, { floatOps })` forces `"soft"` or `"fast"`; `"dual"` (a check) computes both and marks a pixel where any
+addition or multiplication differed (bit 31 of its depth word). `tools/gxr/web/fastfloat.ts` and the harness's `floatops=dual` run them.
 
 ### Frame time
 
