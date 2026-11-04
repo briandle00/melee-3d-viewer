@@ -21,6 +21,7 @@ import { bits, GxRegs } from "./state";
 import { formatInfo, levelOffset } from "./texunit";
 import { VertexData } from "./vertex";
 import { checkOps, checkPixels, checkScene } from "./floatcheck";
+import { binTriangles, Entries } from "./bin";
 import type { FloatOps } from "./glsl-float";
 
 const EFB_W = 640, EFB_H = 528;
@@ -110,8 +111,8 @@ export class GxGl implements GxBackend {
   private tmemVersion = -1;
   private ctx = new FrontCtx();
   private fp: FrontPool | null = null;
-  private entTile = new Int32Array(1 << 16);
-  private entTri = new Int32Array(1 << 16);
+  /** the tile entries of the queued triangles (bin.ts) */
+  private ent = new Entries();
   private uniforms = new Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
   /** whether `stats` are kept (reading the clock per draw costs about 1% of a frame) */
   measure = false;
@@ -197,7 +198,7 @@ export class GxGl implements GxBackend {
     if (this.attached) { this.attached.onTouch = null; this.attached.beforeWrite = null; }
     this.attached = null;
     this.drainFront();
-    this.q.n = 0; this.used.clear(); this.dirty = [];
+    this.q.n = 0; this.ent.n = 0; this.used.clear(); this.dirty = [];
     this.palMap.clear(); this.palNext = 0;
     this.resetStates();
     this.tmemVersion = -1;
@@ -523,6 +524,7 @@ export class GxGl implements GxBackend {
       this.drainFront();
       const q = this.q, o0 = q.n;
       this.ctx.run(regs, vd, prims, st, q);
+      this.tris += binTriangles(q.ints.subarray(o0), q.words.subarray(o0), q.n - o0, o0 >> 2, this.ent);
     }
     if (this.measure) this.stats.cpuMs += performance.now() - t0;
   }
@@ -532,11 +534,20 @@ export class GxGl implements GxBackend {
     const fp = this.fp;
     if (!fp || !fp.busy) return;
     const q = this.q;
-    fp.drain((words) => {
+    const E = this.ent;
+    fp.drain((words, ents, tris) => {
       q.ensure(words.length);
       const o0 = q.n;
       q.words.set(words, o0);
       q.n += words.length;
+      if (!ents) { this.tris += binTriangles(q.ints.subarray(o0), q.words.subarray(o0), words.length, o0 >> 2, E); return; }
+      // (the worker's entries name triangles from its job's first word: the job's words start at texel o0 >> 2 here)
+      this.tris += tris;
+      E.ensure(ents.length);
+      const A = E.a, base = o0 >> 2;
+      let n = E.n;
+      for (let i = 0; i < ents.length; i += 2) { A[n++] = ents[i]; A[n++] = ents[i + 1] + base; }
+      E.n = n;
     });
     if (fp.zFresh) { fp.zFresh = false; setLastZ(fp.zPlane!); }
   }
@@ -574,62 +585,18 @@ export class GxGl implements GxBackend {
     if (this.floatAuto && this.floatOps === "fast" && !this.floatCheck && !this.floatChecking_) this.useSoftFloat();
     const t0 = this.measure ? performance.now() : 0;
     const gl = this.gl;
-    // bins: every triangle goes into the tiles its blocks can reach and where its three edge tests can pass for some pixel. The edge test
-    // of a pixel is C + DX * 16y - DY * 16x > 0 (32-bit); its largest value over a tile is at one corner, so a tile where that corner
-    // fails an edge holds no covered pixel. Triangles with edge numbers too big for plain arithmetic to match the wrapping 32-bit
-    // arithmetic of the shader are binned by their bounds only.
+    // the tile lists: the entries of the queued triangles (bin.ts; made by the workers for their draws, here for the others), counted and placed in draw order
     const nTiles = TILES_X * TILES_Y;
     const counts = new Uint32Array(nTiles + 1);
-    const I = this.q.ints, U = this.q.words;
-    let ent = this.entTile;
-    let entTri = this.entTri;
-    let ne = 0;
-    // the triangles follow each other in the queue: a header, then its planes
-    for (let o = 0; o < qn; o += (HEADER_TEXELS + U[o + 18]) * 4) {
-      this.tris++;
-      const minx = I[o], maxx = I[o + 1], miny = I[o + 2], maxy = I[o + 3];
-      const tx0 = Math.max(0, minx) >> TILE_SHIFT, ty0 = Math.max(0, miny) >> TILE_SHIFT, tx1 = Math.min(EFB_W - 1, maxx) >> TILE_SHIFT, ty1 = Math.min(EFB_H - 1, maxy) >> TILE_SHIFT;
-      const dx12 = I[o + 4], dy12 = I[o + 5], dx23 = I[o + 6], dy23 = I[o + 7], dx31 = I[o + 8], dy31 = I[o + 9], c1 = I[o + 10], c2 = I[o + 11], c3 = I[o + 12];
-      const safe = Math.abs(dx12) < 16384 && Math.abs(dy12) < 16384 && Math.abs(dx23) < 16384 && Math.abs(dy23) < 16384 && Math.abs(dx31) < 16384 &&
-        Math.abs(dy31) < 16384 && Math.abs(c1) < 1073741824 && Math.abs(c2) < 1073741824 && Math.abs(c3) < 1073741824;
-      if (ne + (tx1 - tx0 + 1) * (ty1 - ty0 + 1) > ent.length) {
-        const n2 = Math.max(ent.length * 2, ne + (tx1 - tx0 + 1) * (ty1 - ty0 + 1));
-        const e2 = new Int32Array(n2), t2 = new Int32Array(n2);
-        e2.set(ent.subarray(0, ne)); t2.set(entTri.subarray(0, ne));
-        ent = this.entTile = e2; entTri = this.entTri = t2;
-      }
-      for (let ty = ty0; ty <= ty1; ty++) {
-        for (let tx = tx0; tx <= tx1; tx++) {
-          // which 8 x 8 quarters of the tile the triangle can reach: inside its bounds, and where each edge test passes at the quarter's best corner
-          let mask = 0;
-          for (let sy = 0; sy < 2; sy++) {
-            const y0 = (ty << TILE_SHIFT) + (sy << 3), y1 = y0 + 7;
-            if (y1 < miny || y0 > maxy) continue;
-            for (let sx = 0; sx < 2; sx++) {
-              const x0 = (tx << TILE_SHIFT) + (sx << 3), x1 = x0 + 7;
-              if (x1 < minx || x0 > maxx) continue;
-              if (safe) {
-                if (c1 + 16 * (dx12 > 0 ? dx12 * y1 : dx12 * y0) - 16 * (dy12 > 0 ? dy12 * x0 : dy12 * x1) <= 0) continue;
-                if (c2 + 16 * (dx23 > 0 ? dx23 * y1 : dx23 * y0) - 16 * (dy23 > 0 ? dy23 * x0 : dy23 * x1) <= 0) continue;
-                if (c3 + 16 * (dx31 > 0 ? dx31 * y1 : dx31 * y0) - 16 * (dy31 > 0 ? dy31 * x0 : dy31 * x1) <= 0) continue;
-              }
-              mask |= 1 << (sy * 2 + sx);
-            }
-          }
-          if (mask === 0) continue;
-          const t = ty * TILES_X + tx;
-          counts[t]++;
-          ent[ne] = t; entTri[ne] = (o >> 2) | (mask << 24); ne++;
-        }
-      }
-    }
+    const EA = this.ent.a, ne2 = this.ent.n;
+    for (let e = 0; e < ne2; e += 2) counts[EA[e]]++;
     const start = new Uint32Array(nTiles + 1);
     let total = 0;
     for (let t = 0; t < nTiles; t++) { start[t] = total; total += counts[t]; }
     this.stats.listEntries += total;
     const list = new Uint32Array(Math.max(1, Math.ceil(total / 4096)) * 4096);
     const fill = new Uint32Array(nTiles);
-    for (let e = 0; e < ne; e++) { const t = ent[e]; list[start[t] + fill[t]++] = entTri[e]; }
+    for (let e = 0; e < ne2; e += 2) { const t = EA[e]; list[start[t] + fill[t]++] = EA[e + 1]; }
     const tileRows = Math.ceil(nTiles / 1024);
     const tiles = new Uint32Array(1024 * tileRows * 2);
     for (let t = 0; t < TILES_X * TILES_Y; t++) { tiles[t * 2] = start[t]; tiles[t * 2 + 1] = counts[t]; }
@@ -671,7 +638,7 @@ export class GxGl implements GxBackend {
     this.timeEnd(tq, "pixel");
     this.cur = 1 - this.cur;
     this.passes++;
-    this.q.n = 0; this.used.clear(); this.needFeatures = 0;
+    this.q.n = 0; this.ent.n = 0; this.used.clear(); this.needFeatures = 0;
     if (this.measure) this.stats.flushMs += performance.now() - t0;
     this.onFlush?.();
   }

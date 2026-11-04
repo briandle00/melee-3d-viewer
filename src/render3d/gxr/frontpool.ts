@@ -10,6 +10,7 @@
  * The buffer: control words, the job table, the XF unit's copies (one per change), the inputs and the outputs. Jobs are numbered
  * from the start of the page, a job sits in slot number % maxJobs, and the inputs and outputs are bump-allocated and start over at each drain.
  */
+import { binTriangles, Entries } from "./bin";
 import { FrontCtx, FrontRegs, Growable } from "./front";
 import { getLastZ, zInfo } from "./setup";
 import { XF_SIZE } from "./state";
@@ -17,8 +18,10 @@ import type { VertexData, VertexLayout } from "./vertex";
 
 const C_HEAD = 0, C_TAIL = 1, C_DONE = 2, C_OUT = 3, C_STOP = 4, C_SLEEPERS = 10;
 const CTL_WORDS = 16;
-const JW = 16;
+const JW = 20;
 const J_LAY0 = 0, J_LAY1 = 1, J_XF = 2, J_BP = 3, J_NV = 4, J_VOFF = 5, J_PRIMS = 6, J_NPRIMS = 7, J_ST = 8, J_OUT = 9, J_OUTLEN = 10, J_ZFLAG = 11, J_Z = 12, J_OVER = 15;
+// (the job's tile entries follow its words in the output area: J_NENT words of them, for J_TRIS triangles: bin.ts)
+const J_NENT = 16, J_TRIS = 17;
 
 export interface PoolConfig { maxJobs: number; xfSlots: number; inWords: number; outWords: number }
 export const DEFAULT_POOL: PoolConfig = { maxJobs: 512, xfSlots: 512, inWords: 1 << 23, outWords: 1 << 24 };
@@ -117,14 +120,20 @@ function runJob(sh: Shared, ctx: FrontCtx, lq: Growable, j: number): void {
 
 const zTmp = new Float32Array(3);
 
-/** run job j on this thread and leave its words in the output area */
-function doJob(sh: Shared, ctx: FrontCtx, lq: Growable, j: number): void {
+/** run job j on this thread and leave its words, then their tile entries (bin.ts, triangle offsets from the job's first word), in the output area */
+function doJob(sh: Shared, ctx: FrontCtx, lq: Growable, le: Entries, j: number): void {
   runJob(sh, ctx, lq, j);
   const J = sh.jobs, b = (j % sh.cfg.maxJobs) * JW;
   const len = lq.n;
-  const off = Atomics.add(sh.ctl, C_OUT, len);
-  if (off + len > sh.cfg.outWords) J[b + J_OVER] = 1;
-  else { sh.out.set(lq.words.subarray(0, len), off); J[b + J_OUT] = off; J[b + J_OUTLEN] = len; J[b + J_OVER] = 0; }
+  le.n = 0;
+  const tris = binTriangles(lq.ints, lq.words, len, 0, le);
+  const off = Atomics.add(sh.ctl, C_OUT, len + le.n);
+  if (off + len + le.n > sh.cfg.outWords) J[b + J_OVER] = 1;
+  else {
+    sh.out.set(lq.words.subarray(0, len), off);
+    sh.out.set(new Uint32Array(le.a.buffer, 0, le.n), off + len);
+    J[b + J_OUT] = off; J[b + J_OUTLEN] = len; J[b + J_NENT] = le.n; J[b + J_TRIS] = tris; J[b + J_OVER] = 0;
+  }
   J[b + J_ZFLAG] = zInfo.wrote ? 1 : 0;
   if (zInfo.wrote) { getLastZ(zTmp); sh.jobsF[b + J_Z] = zTmp[0]; sh.jobsF[b + J_Z + 1] = zTmp[1]; sh.jobsF[b + J_Z + 2] = zTmp[2]; }
   Atomics.add(sh.ctl, C_DONE, 1);
@@ -141,13 +150,13 @@ function claim(sh: Shared): number {
 /** the worker thread's loop (frontworker.ts) */
 export function workerMain(sab: SharedArrayBuffer, cfg: PoolConfig): void {
   const sh = new Shared(sab, cfg);
-  const ctx = new FrontCtx(), lq = new Growable();
+  const ctx = new FrontCtx(), lq = new Growable(), le = new Entries();
   Atomics.add(sh.ctl, 9, 1);
   let idle = 0;
   for (;;) {
     if (Atomics.load(sh.ctl, C_STOP)) return;
     const j = claim(sh);
-    if (j >= 0) { doJob(sh, ctx, lq, j); Atomics.add(sh.ctl, 8, 1); idle = 0; continue; }
+    if (j >= 0) { doJob(sh, ctx, lq, le, j); Atomics.add(sh.ctl, 8, 1); idle = 0; continue; }
     // draws come a few tens of microseconds apart: look for the next one for a moment before sleeping (a sleeping worker costs the main thread a wake-up call)
     if (++idle < 3000) continue;
     Atomics.add(sh.ctl, C_SLEEPERS, 1);
@@ -163,6 +172,7 @@ export class FrontPool {
   private workers: Worker[] = [];
   private ctx = new FrontCtx();
   private lq = new Growable();
+  private le = new Entries();
   /** jobs from `base` on are not merged yet */
   private base = 0;
   private tail = 0;
@@ -244,8 +254,9 @@ export class FrontPool {
     if (Atomics.load(sh.ctl, C_SLEEPERS) > 0) Atomics.notify(sh.ctl, C_TAIL, 1);
   }
 
-  /** wait for every published job (helping with them), then hand the outputs over in draw order and start the buffers over */
-  drain(merge: (words: Uint32Array) => void): void {
+  /** wait for every published job (helping with them), then hand the outputs over in draw order and start the buffers over: each job's
+   *  words, and its tile entries with their triangle count (null when they were not made: the caller bins the words) */
+  drain(merge: (words: Uint32Array, entries: Int32Array | null, tris: number) => void): void {
     const sh = this.sh;
     if (this.tail === this.base) return;
     const target = this.tail;
@@ -253,7 +264,7 @@ export class FrontPool {
     this.stats.jobs += target - this.base;
     for (;;) {
       const j = claim(sh);
-      if (j >= 0) { doJob(sh, this.ctx, this.lq, j); this.stats.mainJobs++; continue; }
+      if (j >= 0) { doJob(sh, this.ctx, this.lq, this.le, j); this.stats.mainJobs++; continue; }
       if (Atomics.load(sh.ctl, C_DONE) >= target) break;
     }
     const t1 = performance.now();
@@ -263,10 +274,11 @@ export class FrontPool {
       if (sh.jobs[b + J_OVER]) {
         // the output area was full: run it again here (its inputs are still in the buffer)
         runJob(sh, this.ctx, this.lq, j);
-        merge(this.lq.words.subarray(0, this.lq.n));
+        merge(this.lq.words.subarray(0, this.lq.n), null, 0);
         if (zInfo.wrote) { this.zPlane = this.zPlane ?? new Float32Array(3); getLastZ(this.zPlane); this.zFresh = true; }
       } else {
-        merge(sh.out.subarray(sh.jobs[b + J_OUT], sh.jobs[b + J_OUT] + sh.jobs[b + J_OUTLEN]));
+        const o = sh.jobs[b + J_OUT], len = sh.jobs[b + J_OUTLEN];
+        merge(sh.out.subarray(o, o + len), new Int32Array(sh.out.buffer, sh.out.byteOffset + (o + len) * 4, sh.jobs[b + J_NENT]), sh.jobs[b + J_TRIS]);
         if (sh.jobs[b + J_ZFLAG]) { this.zPlane = this.zPlane ?? new Float32Array(3); this.zPlane[0] = sh.jobsF[b + J_Z]; this.zPlane[1] = sh.jobsF[b + J_Z + 1]; this.zPlane[2] = sh.jobsF[b + J_Z + 2]; this.zFresh = true; }
       }
     }

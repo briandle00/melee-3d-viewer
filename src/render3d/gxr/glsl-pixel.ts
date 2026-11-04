@@ -16,6 +16,7 @@
  *  - uEfb: (color word, depth) per pixel of the previous pass.
  */
 import { floatGlsl, type FloatOps } from "./glsl-float";
+import { TILE, TILE_SHIFT } from "./bin";
 
 export const MEM_TMEM = 0x1800000;
 export const MEM_PAL = 0x1900000;
@@ -27,8 +28,7 @@ export { HEADER_TEXELS };
 export const STATE_WORDS = 288;
 /** the pixel tiles the triangle lists are binned in: 1 << TILE_SHIFT pixels on a side; each list entry also says which of the tile's four 8 x 8 quarters
  *  the triangle can reach (bits 24..27 of the entry, bit 2 * (y >> 3 & 1) + (x >> 3 & 1)), so a pixel skips the triangles that miss its quarter after one read */
-export const TILE_SHIFT = 4;
-export const TILE = 1 << TILE_SHIFT;
+export { TILE, TILE_SHIFT };
 
 /** the pixel shader; `indirect` adds the indirect texture unit (spec 10.5) and `fogExtra` the exponential fog forms and the range adjustment (11.3), compiled only for draws that use them */
 /** the correctly rounded 2^x for binary32 x in [-8, 0] (fog shaping), GLSL ES 3.00 */
