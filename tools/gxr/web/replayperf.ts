@@ -18,7 +18,8 @@ const from = Number(q.get("from") ?? 0), to = Number(q.get("to") ?? dff.frames.l
 const workers = Number(q.get("workers") ?? 0);
 const sync = q.get("sync") === "1";
 const ablate = q.get("ablate");
-const be = new GxGl(gl, ablate ? { mutate: variants[ablate] } : {}, { workers, factory: () => new Worker("/frontworker.js", { type: "module" }) });
+const fo = (q.get("floatops") ?? "auto") as "auto";
+const be = new GxGl(gl, ablate ? { mutate: variants[ablate], floatOps: fo } : { floatOps: fo }, { workers, factory: () => new Worker("/frontworker.js", { type: "module" }) });
 be.measure = q.get("measure") === "1";
 be.timing = q.get("timing") === "1";
 let need = 0;

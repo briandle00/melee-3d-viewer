@@ -7,7 +7,9 @@
  */
 import type { GxSession } from "./session";
 
-export async function runHarness(s: GxSession, names: string[], replayOf: (win: string) => boolean): Promise<string> {
+/** `dual` (a renderer made with floatOps "dual"): after every pass of a window's rows the pixels whose float arithmetic differed between the
+ *  card's and the whole-number functions are counted (bit 31 of the depth word) and reported */
+export async function runHarness(s: GxSession, names: string[], replayOf: (win: string) => boolean, dual?: { onFlush: (() => void) | null; readEfb(): { depth: Uint32Array } }): Promise<string> {
   const wins: { win: string; rows: number[] }[] = [];
   for (const win of names) {
     if (!replayOf(win)) continue;
@@ -20,6 +22,13 @@ export async function runHarness(s: GxSession, names: string[], replayOf: (win: 
   for (const w of wins) for (const r of w.rows) want.set(r, null);
   await s.start();
   s.setPictures(true);
+  let dualPasses = 0, dualPixels = 0;
+  if (dual) dual.onFlush = () => {
+    if (!want.has(s.index - 1)) return;
+    dualPasses++;
+    const d = dual.readEfb().depth;
+    for (let i = 0; i < d.length; i++) if (d[i] >>> 31) dualPixels++;
+  };
   s.onPicture = (rgba, row) => { if (want.has(row)) want.set(row, rgba.slice()); };
   let report = "";
   const post = async (w: { win: string; rows: number[] }) => {
@@ -42,5 +51,6 @@ export async function runHarness(s: GxSession, names: string[], replayOf: (win: 
     await new Promise((r) => setTimeout(r, 0));
   }
   while (next < wins.length) await post(wins[next++]);
+  if (dual) { dual.onFlush = null; report += `float dual check: ${dualPasses} passes, ${dualPixels} pixels differ; `; }
   return report + (s.diverged ? `diverged at row ${s.diverged.row} (${s.diverged.lane})` : "held to the end");
 }

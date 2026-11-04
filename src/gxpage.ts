@@ -96,7 +96,9 @@ const glEarly: Promise<{ b: import("./render3d/gxr/gl").GxGl; gl: WebGL2Renderin
   // picture stayed black; the canvas keeps it between frames, for the video export and a paused player)
   const gl = screen.glFlat.getContext("webgl2", { preserveDrawingBuffer: true, antialias: false, depth: false, stencil: false, alpha: false });
   if (!gl) return null;
-  const b = new GxGl(gl, {}, { workers: Math.max(0, Number(q.get("workers") ?? Math.min(3, Math.max(0, (navigator.hardwareConcurrency || 4) - 2)))) });
+  // (floatops: soft, fast or dual, for the checks; auto, the default: the card's own float arithmetic once the renderer's start-up check finds it exact)
+  const fo = q.get("floatops");
+  const b = new GxGl(gl, { floatOps: fo === "soft" || fo === "fast" || fo === "dual" ? fo : "auto" }, { workers: Math.max(0, Number(q.get("workers") ?? Math.min(3, Math.max(0, (navigator.hardwareConcurrency || 4) - 2)))) });
   const ready = b.prepare().then(() => { loadTimes.shadersReady = performance.now() - pageStart; });
   ready.catch(() => {});
   return { b, gl, ready };
@@ -116,6 +118,10 @@ async function makeBackend(env: ConstructorParameters<typeof CpuBackend>[0]): Pr
         await early.ready;
         // (the time the load waited for the shaders; shadersReady is when they were done, from the page's start)
         loadTimes.shaders = performance.now() - t;
+        // (whether the card's own float arithmetic is used: 1, after the start-up check found it exact, and that check's time)
+        loadTimes.floatFast = b.floatOps === "fast" ? 1 : 0;
+        loadTimes.floatCheckMs = b.floatCheck?.ms ?? 0;
+        if (b.floatCheck && (b.floatCheck.ops || b.floatCheck.pixels || b.floatCheck.error)) console.log("gx: the card's float arithmetic differs (" + JSON.stringify(b.floatCheck) + "): the renderer uses its whole-number float functions");
         // (the optional shader variants compile in the background: a draw that needs one waits for it)
         void b.warm();
         glBackend = b;
@@ -197,7 +203,7 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
   if (q.get("harness")) {
     const names = q.get("harness")!.split(",");
     const { runHarness } = await import("./render3d/gxpath/harness");
-    const msg = await runHarness(session, names, (w) => replayUrl !== null && w.startsWith(replayUrl.split("/").pop()!.replace(/\.slp$/, "") + "-"));
+    const msg = await runHarness(session, names, (w) => replayUrl !== null && w.startsWith(replayUrl.split("/").pop()!.replace(/\.slp$/, "") + "-"), q.get("floatops") === "dual" ? glBackend as never : undefined);
     await fetch("/done", { method: "POST", body: "ok " + msg });
     return;
   }
@@ -374,7 +380,7 @@ async function bench(s: GxSession) {
   const heap = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? 0;
   const extra = gb && (q.get("measure") || q.get("timing")) ? {
     gpuMs: gb.timing ? gb.collectTimes() : null, stats: { ...gb.stats }, timers: { ...(gpuOf()?.timers ?? {}) },
-    draws: gb.draws, tris: gb.tris, passes: gb.passes, compileWaits: gb.compileWaits,
+    draws: gb.draws, tris: gb.tris, passes: gb.passes, compileWaits: gb.compileWaits, floatOps: gb.floatOps, floatCheck: gb.floatCheck,
   } : null;
   const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, snapshotBytes: s.snapshotBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
   // (tape=1: the whole tape the match played, for the native recorder to play the same one)

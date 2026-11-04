@@ -3,11 +3,11 @@ import { variants as sharedVariants } from "./variants.ts";
 const q = new URLSearchParams(location.search);
 const v = q.get("v") ?? "full";
 const log = (s: string) => fetch("/log", { method: "POST", body: s });
-let fs = v === "indirect" ? pixelShader({ indirect: true }) : v === "fogextra" ? pixelShader({ fogExtra: true }) : v === "both" ? pixelShader({ indirect: true, fogExtra: true }) : PIXEL_FS;
+let fs = v === "fast" ? pixelShader({ floatOps: "fast" }) : v === "indirect" ? pixelShader({ indirect: true }) : v === "fogextra" ? pixelShader({ fogExtra: true }) : v === "both" ? pixelShader({ indirect: true, fogExtra: true }) : PIXEL_FS;
 const rep = (a: string, b: string) => { if (!fs.includes(a)) throw new Error("no such text: " + a); fs = fs.replace(a, b); };
 const cut = (from: string, to: string, body: string) => { const a = fs.indexOf(from), b = fs.indexOf(to); if (a < 0 || b < 0) throw new Error("cut " + from); fs = fs.slice(0, a) + body + fs.slice(b); };
 const variants: Record<string, () => void> = {
-  indirect: () => {}, fogextra: () => {}, both: () => {},
+  indirect: () => {}, fogextra: () => {}, both: () => {}, fast: () => {},
   nativef: () => {
     cut("uint f_add(uint a, uint b) {", "uint f_sub(uint a, uint b)", "uint f_add(uint a, uint b) { return floatBitsToUint(uintBitsToFloat(a) + uintBitsToFloat(b)); }\n");
     cut("uint f_mul(uint a, uint b) {", "uint f_div(uint a, uint b)", "uint f_mul(uint a, uint b) { return floatBitsToUint(uintBitsToFloat(a) * uintBitsToFloat(b)); }\n");

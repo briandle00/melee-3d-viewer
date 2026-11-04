@@ -11,11 +11,17 @@ const manifest = await (await fetch("/spec/manifest.json")).json();
 const only = q.get("windows")?.split(",");
 const t0 = performance.now();
 if (q.get("profile")) await fetch("/go");
-const be = new GxGl(gl, {}, { workers: Number(q.get("workers") ?? 0), factory: () => new Worker("/frontworker.js", { type: "module" }) });
+// floatops=soft|fast|dual|auto (default auto, as the renderer starts); dual: the pixels whose float arithmetic differed are counted after every pass
+const fo = q.get("floatops") ?? "auto";
+// (dualcontrol=1: the dual check's own control, the card's product made one unit high: the check must report pixels)
+const ctl = q.get("dualcontrol") === "1" ? { mutate: (s: string) => s.replace("  uint r = f_fence(fa * fb);\n", "  uint r = f_fence(fa * fb) + 1u;\n") } : {};
+const be = new GxGl(gl, { floatOps: fo as "auto", ...ctl }, { workers: Number(q.get("workers") ?? 0), factory: () => new Worker("/frontworker.js", { type: "module" }) });
 be.timing = q.get("timing") === "1";
 be.measure = q.get("nomeasure") !== "1";
 await be.prepare();
-await log(`compiled in ${(performance.now() - t0).toFixed(0)} ms`);
+await log(`compiled in ${(performance.now() - t0).toFixed(0)} ms; floatOps ${be.floatOps}, check ${JSON.stringify(be.floatCheck)}`);
+let dualPasses = 0, dualPixels = 0;
+if (fo === "dual") be.onFlush = () => { dualPasses++; const d = be.readEfb().depth; for (let i = 0; i < d.length; i++) if (d[i] >>> 31) dualPixels++; };
 let failed = false;
 for (const w of manifest.windows) {
   if (only && !only.includes(w.name)) continue;
@@ -80,4 +86,5 @@ for (const w of manifest.windows) {
     break;
   }
 }
-await fetch("/done", { method: "POST", body: failed ? "error" : "ok" });
+if (fo === "dual") await log(`float dual check: ${dualPasses} passes, ${dualPixels} pixels differ`);
+await fetch("/done", { method: "POST", body: failed ? "error" : fo === "dual" && dualPixels ? "dual mismatch" : "ok" });
