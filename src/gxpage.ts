@@ -183,7 +183,7 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
   session.setPictures(screen.needsPixels);
   playback = new GxPlayback(session, {
     onPicture: (rgba) => screen.show(rgba),
-    onShown: () => { if (glBackend && !screen.needsPixels) glBackend.present(); },
+    onShown: () => showShown(),
     onState: update,
     onError: fail,
     onRetry: (text) => { retryText = text; update(); },
@@ -212,6 +212,9 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
   pads.set(padShow, you);
   update();
 }
+
+/** a row's picture onto the screen, after the session drew it (the CPU renderer's comes as pixels through onPicture instead) */
+function showShown() { if (glBackend && !screen.needsPixels) glBackend.present(); }
 
 let you: number | null = null;
 function update() {
@@ -357,7 +360,8 @@ else info("waiting for a replay: replayUrl=<url> or a {type: \"load\"} message")
 async function bench(s: GxSession) {
   const total: number[] = [], render: number[] = [], step: number[] = [], hashes: string[] = [];
   const frameHash = q.get("hash") ? (await import("./render3d/gxpath/streamhash")).frameHash : null;
-  s.setPictures(false);
+  // (crt=<preset>: the rows shown on that TV the way play shows them, the picture's way to the TV included)
+  s.setPictures(q.get("crt") ? screen.needsPixels : false);
   // (nostart=1: the rows after the one the load showed, as a person pressing play would get them: the first rows' times after a load)
   if (!q.get("nostart")) await s.start();
   // (measure=1: the renderer's own counters; timing=1: the GPU's time per pass kind, timer queries)
@@ -371,7 +375,7 @@ async function bench(s: GxSession) {
     while (performance.now() - t < 1 && s.index < s.frameCount) {
       const a = performance.now();
       s.step(true);
-      if (glBackend) glBackend.present();
+      if (q.get("crt")) showShown(); else if (glBackend) glBackend.present();
       total.push(performance.now() - a);
       if (frameHash) hashes.push(frameHash(s.core_!));
       step.push(s.times.step);
