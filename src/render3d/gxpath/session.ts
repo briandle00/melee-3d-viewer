@@ -11,7 +11,7 @@ import type { GxBackend } from "../gxr/gpu";
 import { differs } from "../../sim/compare";
 import { driveOrder, type DriveOptions, type Tape } from "../../sim/tape";
 import { fitCstick, type RawC } from "./cfit";
-import { GxCore, type GxCoreFactory, type PlaybackMode } from "./core";
+import { GxCore, type CoreSnapshot, type GxCoreFactory, type PlaybackMode } from "./core";
 import { nativeRow, nativeTape } from "./tapebridge";
 
 /** what the session needs of a renderer (CpuBackend, GxGl) */
@@ -81,6 +81,10 @@ export class GxSession {
   /** (playback original) drives and kept trials the C-stick fit took, for the drive choice playing */
   fitStats: { drives: number; flips: number } | null = null;
   private picturedRow = -1;
+  /** the instance's state right after the match opened (GxCore.snapshot), for the drive choice it was opened with: start() puts it back */
+  private opened: { drive: number; snap: CoreSnapshot } | null = null;
+  /** bytes the kept state holds (the memory's non-zero pages) */
+  get snapshotBytes(): number { return this.opened?.snap.bytes ?? 0; }
   private closed = false;
   private firstStepped = false;
 
@@ -93,16 +97,26 @@ export class GxSession {
 
   /** the match from its first row (a fresh instance of the module; the renderer back to its start) */
   async start(): Promise<void> {
-    const { tape, files } = this.o;
-    this.core?.destroy();
-    this.core = null;
-    const core = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), files.files);
-    if (this.closed) { core.destroy(); return; }
-    const whole = await this.tapeFor(this.driveIndex);
-    if (this.closed) { core.destroy(); return; }
-    this.whole = whole;
-    core.openMatch(whole, files.names, this.playback);
-    this.core = core;
+    const { files } = this.o;
+    let core: GxCore;
+    if (this.core && this.opened && this.opened.drive === this.driveIndex) {
+      // (the same match again: the instance is put back to its state right after the match opened, byte for byte, instead of a
+      // fresh instance opening it again - opening takes over a second)
+      core = this.core;
+      core.restore(this.opened.snap);
+    } else {
+      this.core?.destroy();
+      this.core = null;
+      this.opened = null;
+      core = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), files.files);
+      if (this.closed) { core.destroy(); return; }
+      const whole = await this.tapeFor(this.driveIndex);
+      if (this.closed) { core.destroy(); return; }
+      this.whole = whole;
+      core.openMatch(whole, files.names, this.playback);
+      this.opened = { drive: this.driveIndex, snap: core.snapshot() };
+      this.core = core;
+    }
     if (this.backend?.reset) this.backend.reset();
     else this.backend = await this.o.makeBackend(() => {
       const g = this.gpu!;
@@ -112,7 +126,7 @@ export class GxSession {
     backend.drawing = false;
     backend.onPicture = this.wantPictures ? (rgba) => { this.onPicture?.(rgba, this.index - 1); } : null;
     // (the register files the stream starts from are taken when the first frame is stepped: row 0 is stepped here and fed first)
-    core.step(nativeRow(whole, 0));
+    core.step(nativeRow(this.whole!, 0));
     this.firstStepped = true;
     this.gpu = new GxGpu(backend, core.initial() as unknown as Dff);
     backend.prepareMemory?.(this.gpu.mem, this.gpu.regs);
@@ -219,6 +233,7 @@ export class GxSession {
 
   close(): void {
     this.closed = true;
+    this.opened = null;
     this.core?.destroy();
     this.core = null;
     this.gpu = null;
