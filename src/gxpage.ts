@@ -38,6 +38,14 @@ const loadTimes: Record<string, number> = {};
 let session: GxSession | null = null;
 let filesFrom: GameFilesFrom | null = q.get("files") ? { kind: "url", base: new URL(q.get("files")!, location.href).href } : null;
 const coreUrl = new URL(q.get("core") ?? "gx/gx-core.js", location.href).href;
+/** the simulator's WebAssembly compiled once, from the page's start, while the rest loads: every instance of the module (the match, the
+ *  C-stick fit's, a drive choice's check) is made from it instead of fetching and compiling the file again (null: it could not be compiled
+ *  here, and the module does its own) */
+const wasmModule: Promise<WebAssembly.Module | null> = (async () => {
+  const url = new URL("gx-core.wasm", coreUrl).href;
+  try { return await WebAssembly.compileStreaming(fetch(url)); } catch { /* not served as application/wasm: compiled from the bytes */ }
+  try { return await WebAssembly.compile(await (await fetch(url)).arrayBuffer()); } catch { return null; }
+})();
 let gameFiles: GameFiles | null = null;
 const screen = new GxScreen($("view"));
 const pads = new ControllerOverlay($("view"), () => session?.tape ?? null);
@@ -174,7 +182,7 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
   info("starting the simulator...");
   const factory = (await import(/* @vite-ignore */ coreUrl)).default as GxCoreFactory;
   session = new GxSession({
-    factory, coreOptions: { locateFile: (p: string) => new URL(p, coreUrl).href }, files: gameFiles, tape,
+    factory, coreOptions: coreOptions(await wasmModule), files: gameFiles, tape,
     makeBackend, playback: playbackMode, onProgress: (text) => { if (text) info(text + "..."); },
   });
   session.setPictures(true);
@@ -215,6 +223,13 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
 
 /** a row's picture onto the screen, after the session drew it (the CPU renderer's comes as pixels through onPicture instead) */
 function showShown() { if (glBackend && !screen.needsPixels) { glBackend.present(); screen.showGl(); } }
+
+/** the module's options: where its files are, and the compiled WebAssembly when there is one */
+function coreOptions(wasm: WebAssembly.Module | null): Record<string, unknown> {
+  const o: Record<string, unknown> = { locateFile: (p: string) => new URL(p, coreUrl).href };
+  if (wasm) o.instantiateWasm = (imports: WebAssembly.Imports, ok: (i: WebAssembly.Instance) => void) => { WebAssembly.instantiate(wasm, imports).then(ok, fail); return {}; };
+  return o;
+}
 
 let you: number | null = null;
 function update() {
