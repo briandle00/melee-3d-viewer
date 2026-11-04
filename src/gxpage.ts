@@ -357,7 +357,8 @@ async function bench(s: GxSession) {
   const total: number[] = [], render: number[] = [], step: number[] = [], hashes: string[] = [];
   const frameHash = q.get("hash") ? (await import("./render3d/gxpath/streamhash")).frameHash : null;
   s.setPictures(false);
-  await s.start();
+  // (nostart=1: the rows after the one the load showed, as a person pressing play would get them: the first rows' times after a load)
+  if (!q.get("nostart")) await s.start();
   // (measure=1: the renderer's own counters; timing=1: the GPU's time per pass kind, timer queries)
   const gpuOf = () => (s as unknown as { gpu?: { measure: boolean; timers: Record<string, number> } }).gpu;
   const gb = glBackend as unknown as import("./render3d/gxr/gl").GxGl | null;
