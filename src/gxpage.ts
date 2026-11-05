@@ -378,7 +378,10 @@ async function bench(s: GxSession) {
   // (crt=<preset>: the rows shown on that TV the way play shows them, the picture's way to the TV included)
   s.setPictures(q.get("crt") ? screen.needsPixels : false);
   // (nostart=1: the rows after the one the load showed, as a person pressing play would get them: the first rows' times after a load)
+  // (restartMs: what that start took: the match from its first row again, as a seek back does)
+  const r0 = performance.now();
   if (!q.get("nostart")) await s.start();
+  const restartMs = q.get("nostart") ? null : performance.now() - r0;
   // (measure=1: the renderer's own counters; timing=1: the GPU's time per pass kind, timer queries)
   const gpuOf = () => (s as unknown as { gpu?: { measure: boolean; timers: Record<string, number> } }).gpu;
   const gb = glBackend as unknown as import("./render3d/gxr/gl").GxGl | null;
@@ -403,7 +406,7 @@ async function bench(s: GxSession) {
     gpuMs: gb.timing ? gb.collectTimes() : null, stats: { ...gb.stats }, timers: { ...(gpuOf()?.timers ?? {}) },
     draws: gb.draws, tris: gb.tris, passes: gb.passes, compileWaits: gb.compileWaits, floatOps: gb.floatOps, floatCheck: gb.floatCheck,
   } : null;
-  const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
+  const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, restartMs, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
   // (tape=1: the whole tape the match played, for the native recorder to play the same one)
   if (q.get("tape") && s.wholeTape) await fetch("/save/tape.bin", { method: "POST", body: s.wholeTape as unknown as BodyInit });
   await fetch("/bench", { method: "POST", body });
