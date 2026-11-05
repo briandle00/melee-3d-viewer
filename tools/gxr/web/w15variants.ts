@@ -208,6 +208,19 @@ int nibblesOf(uint fmt) { return int(FINFO[fmt & 15u] >> 5); }
     r = (c565 || opq) ? ivec4(x5, 255) : ivec4(c4, (a3 << 5) | (a3 << 2) | (a3 >> 1));
   }
   else if (kind == 6u)`),
+  // rewrite: the TEV registers as four vectors (exact)
+  regvec: (s) => {
+    s = rep(s, "int gRegs[16];", "ivec4 gR[4];");
+    s = rep(s, `    gRegs[int(r) * 4] = sx11(ra & 0x7ffu); gRegs[int(r) * 4 + 3] = sx11((ra >> 12) & 0x7ffu);
+    gRegs[int(r) * 4 + 2] = sx11(bg & 0x7ffu); gRegs[int(r) * 4 + 1] = sx11((bg >> 12) & 0x7ffu);`, "    gR[r] = ivec4(sx11(ra & 0x7ffu), sx11((bg >> 12) & 0x7ffu), sx11(bg & 0x7ffu), sx11((ra >> 12) & 0x7ffu));");
+    s = rep(s, "    for (int r = 0; r < 4; r++) { cIn[2 * r] = ivec3(gRegs[4 * r], gRegs[4 * r + 1], gRegs[4 * r + 2]); cIn[2 * r + 1] = ivec3(gRegs[4 * r + 3]); }",
+      "    for (int r = 0; r < 4; r++) { cIn[2 * r] = gR[r].rgb; cIn[2 * r + 1] = gR[r].aaa; }");
+    s = rep(s, "int[8](gRegs[3], gRegs[7], gRegs[11], gRegs[15],", "int[8](gR[0].a, gR[1].a, gR[2].a, gR[3].a,");
+    s = rep(s, "    gRegs[cdest * 4] = rc[0]; gRegs[cdest * 4 + 1] = rc[1]; gRegs[cdest * 4 + 2] = rc[2];\n    gRegs[adest * 4 + 3] = ra;", "    gR[cdest].rgb = rcv;\n    gR[adest].a = ra;");
+    s = rep(s, "  ivec4 src = ivec4(gRegs[lastC * 4] & 255, gRegs[lastC * 4 + 1] & 255, gRegs[lastC * 4 + 2] & 255, gRegs[lastA * 4 + 3] & 255);", "  ivec4 src = ivec4(gR[lastC].rgb & 255, gR[lastA].a & 255);");
+    s = rep(s, "  col = (uint(gRegs[DEBUG_A] & 0xfff) << 12) | uint(gRegs[DEBUG_B] & 0xfff);", "  col = (uint(gR[DEBUG_A >> 2][DEBUG_A & 3] & 0xfff) << 12) | uint(gR[DEBUG_B >> 2][DEBUG_B & 3] & 0xfff);");
+    return s;
+  },
   // ablation: the level loop's offsets and the taps' weights
   onetap: (s) => rep(s, "  int ntaps = linear ? 4 : 1;", "  int ntaps = 1;"),
   onelev: (s) => rep(s, "  int nlev = mixl ? 2 : 1;", "  int nlev = 1;"),

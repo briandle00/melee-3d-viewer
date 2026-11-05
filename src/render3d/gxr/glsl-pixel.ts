@@ -464,7 +464,7 @@ void indirectOffsets(uint ind, ivec4 tx, int cs, int ct, int prevS, int prevT, o
 // ---------------------------------------------------------------------------------------------------------------------
 // TEV (spec 10)
 
-int gRegs[16];
+ivec4 gR[4];     // the TEV registers (r, g, b, a): 0 PREV, 1-3 REG0-REG2
 int gKk[16];
 int gTex[4];
 int gRas[4];
@@ -563,8 +563,7 @@ void swz(uint t, int v[4], out int o4[4]) {
 void loadColorRegs() {
   for (uint r = 0u; r < 4u; r++) {
     uint ra = S(0xe0u + 2u * r), bg = S(0xe1u + 2u * r);
-    gRegs[int(r) * 4] = sx11(ra & 0x7ffu); gRegs[int(r) * 4 + 3] = sx11((ra >> 12) & 0x7ffu);
-    gRegs[int(r) * 4 + 2] = sx11(bg & 0x7ffu); gRegs[int(r) * 4 + 1] = sx11((bg >> 12) & 0x7ffu);
+    gR[r] = ivec4(sx11(ra & 0x7ffu), sx11((bg >> 12) & 0x7ffu), sx11(bg & 0x7ffu), sx11((ra >> 12) & 0x7ffu));
     uint ka = S(256u + 2u * r), kb = S(257u + 2u * r);
     gKk[int(r) * 4] = sx11(ka & 0x7ffu); gKk[int(r) * 4 + 3] = sx11((ka >> 12) & 0x7ffu);
     gKk[int(r) * 4 + 2] = sx11(kb & 0x7ffu); gKk[int(r) * 4 + 1] = sx11((kb >> 12) & 0x7ffu);
@@ -840,20 +839,19 @@ void shade(int x, int y, inout uint col, inout uint dep) {
     // the combiner's inputs (10.2): the selections from arrays filled once per stage (switch functions at each input took the
     // D3D compiler a long time: it inlines every call)
     ivec3 cIn[16];
-    for (int r = 0; r < 4; r++) { cIn[2 * r] = ivec3(gRegs[4 * r], gRegs[4 * r + 1], gRegs[4 * r + 2]); cIn[2 * r + 1] = ivec3(gRegs[4 * r + 3]); }
+    for (int r = 0; r < 4; r++) { cIn[2 * r] = gR[r].rgb; cIn[2 * r + 1] = gR[r].aaa; }
     cIn[8] = ivec3(gTex[0], gTex[1], gTex[2]); cIn[9] = ivec3(gTex[3]);
     cIn[10] = ivec3(gRas[0], gRas[1], gRas[2]); cIn[11] = ivec3(gRas[3]);
     cIn[12] = ivec3(255); cIn[13] = ivec3(128); cIn[14] = konstColor(kcs); cIn[15] = ivec3(0);
     ivec3 ca = cIn[bfi(cc, 12, 4)], cb = cIn[bfi(cc, 8, 4)], ccc = cIn[bfi(cc, 4, 4)], cd = cIn[bfi(cc, 0, 4)];
     int cbias = bfi(cc, 16, 2), cop = bfi(cc, 18, 1), cclamp = bfi(cc, 19, 1), cscale = bfi(cc, 20, 2), cdest = bfi(cc, 22, 2);
-    int aIn[8] = int[8](gRegs[3], gRegs[7], gRegs[11], gRegs[15], gTex[3], gRas[3], konstAlpha(kas), 0);
+    int aIn[8] = int[8](gR[0].a, gR[1].a, gR[2].a, gR[3].a, gTex[3], gRas[3], konstAlpha(kas), 0);
     int aa = aIn[bfi(ac, 13, 3)], ab = aIn[bfi(ac, 10, 3)], ac_ = aIn[bfi(ac, 7, 3)], ad = aIn[bfi(ac, 4, 3)];
     int abias = bfi(ac, 16, 2), aop = bfi(ac, 18, 1), aclamp = bfi(ac, 19, 1), ascale = bfi(ac, 20, 2), adest = bfi(ac, 22, 2);
     ivec3 rcv;
     ivec3 dv = ivec3(sx11(uint(cd.x) & 0x7ffu), sx11(uint(cd.y) & 0x7ffu), sx11(uint(cd.z) & 0x7ffu));
     if (cbias == 3) rcv = clampTev3(dv + ivec3(compare3((cscale << 1) | cop, ca & 255, cb & 255)) * (ccc & 255), cclamp);
     else rcv = tevColor3(ca & 255, cb & 255, ccc & 255, dv, cbias, cop, cscale, cclamp);
-    int rc[3] = int[3](rcv.x, rcv.y, rcv.z);
     int ra;
     if (abias == 3) {
       int mode = (ascale << 1) | aop;
@@ -862,11 +860,11 @@ void shade(int x, int y, inout uint col, inout uint dep) {
       else cond = compareCond(mode, ca & 255, cb & 255, 0);
       ra = clampTev(sx11(uint(ad) & 0x7ffu) + (cond ? (ac_ & 255) : 0), aclamp);
     } else ra = tevRegular(true, aa & 255, ab & 255, ac_ & 255, sx11(uint(ad) & 0x7ffu), abias, aop, ascale, aclamp);
-    gRegs[cdest * 4] = rc[0]; gRegs[cdest * 4 + 1] = rc[1]; gRegs[cdest * 4 + 2] = rc[2];
-    gRegs[adest * 4 + 3] = ra;
+    gR[cdest].rgb = rcv;
+    gR[adest].a = ra;
   }
   int lastC = bfi(S(0xc0u + uint(2 * (nStages - 1))), 22, 2), lastA = bfi(S(0xc1u + uint(2 * (nStages - 1))), 22, 2);
-  ivec4 src = ivec4(gRegs[lastC * 4] & 255, gRegs[lastC * 4 + 1] & 255, gRegs[lastC * 4 + 2] & 255, gRegs[lastA * 4 + 3] & 255);
+  ivec4 src = ivec4(gR[lastC].rgb & 255, gR[lastA].a & 255);
   // alpha test
   uint at = S(0xf3u);
   bool a0 = cmpOp(bf(at, 16, 3), src.a, bfi(at, 0, 8)), a1 = cmpOp(bf(at, 19, 3), src.a, bfi(at, 8, 8));
@@ -891,7 +889,7 @@ void shade(int x, int y, inout uint col, inout uint dep) {
   col = writeColor(col, pixFmt, S(0x41u), res);
 #ifdef DEBUG_REGS
   // a test aid: the color word carries two of the TEV registers' components instead of the pixel
-  col = (uint(gRegs[DEBUG_A] & 0xfff) << 12) | uint(gRegs[DEBUG_B] & 0xfff);
+  col = (uint(gR[DEBUG_A >> 2][DEBUG_A & 3] & 0xfff) << 12) | uint(gR[DEBUG_B >> 2][DEBUG_B & 3] & 0xfff);
 #endif
   dep = newDep;
 }
