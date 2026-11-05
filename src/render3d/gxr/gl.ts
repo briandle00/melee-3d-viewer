@@ -117,6 +117,8 @@ export class GxGl implements GxBackend {
   private tmemVersion = -1;
   private ctx = new FrontCtx();
   private fp: FrontPool | null = null;
+  /** the pass data's copy for the upload */
+  private stage = new Uint32Array(0);
   /** the tile entries of the queued triangles (bin.ts) */
   private ent = new Entries();
   private uniforms = new Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
@@ -642,7 +644,13 @@ export class GxGl implements GxBackend {
     const set = this.sets[this.setNo++ % this.sets.length];
     const dataRows = Math.ceil(qn / 4096);
     set.data = this.grow(set.data, (outRows + dataRows) * 4096, 4096);
-    if (outRows) uploadRows(gl, set.data, 0, 0, 1024, outRows, this.fp!.outView(outRows * 4096));
+    if (outRows) {
+      // (through a copy in ordinary memory: the browser uploads from a shared buffer's view far slower)
+      if (this.stage.length < outRows * 4096) this.stage = new Uint32Array(Math.max(outRows * 4096, this.stage.length * 2));
+      const st = this.stage.subarray(0, outRows * 4096);
+      st.set(this.fp!.outView(outRows * 4096));
+      uploadRows(gl, set.data, 0, 0, 1024, outRows, st);
+    }
     if (dataRows) uploadRows(gl, set.data, 0, outRows, 1024, dataRows, this.q.words.subarray(0, dataRows * 4096));
     set.list = this.grow(set.list, list.length, 4096);
     uploadRows(gl, set.list, 0, 0, 4096, list.length / 4096, list);
