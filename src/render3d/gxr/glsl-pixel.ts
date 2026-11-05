@@ -195,15 +195,8 @@ uint tAddr(MapI mp, uint i) {
 }
 uint tb(MapI mp, uint i) { return mbyte(tAddr(mp, i)); }
 
-int w3(int v) { return (v << 5) | (v << 2) | (v >> 1); }
-int w4(int v) { return v * 17; }
 int w5(int v) { return (v << 3) | (v >> 2); }
 int w6(int v) { return (v << 2) | (v >> 4); }
-
-ivec4 rgb5a3(uint v) {
-  if ((v & 0x8000u) != 0u) return ivec4(w5(bfi(v, 10, 5)), w5(bfi(v, 5, 5)), w5(bfi(v, 0, 5)), 255);
-  return ivec4(w4(bfi(v, 8, 4)), w4(bfi(v, 4, 4)), w4(bfi(v, 0, 4)), w3(bfi(v, 12, 3)));
-}
 
 void finfo(uint fmt, out int kw, out int kh, out uint bytes) {
   bytes = 32u;
@@ -251,12 +244,23 @@ ivec4 fetchTexel(MapI mp, uint off, int W, int s, int t) {
   }
   uint kind = indexed ? 3u + min(mp.pf, 2u) : fmt;
   ivec4 r = ivec4(0);
-  if (kind == 0u) { int v = w4((tx & 1) == 1 ? int(b0 & 15u) : int(b0 >> 4)); r = ivec4(v); }
-  else if (kind == 1u) r = ivec4(int(b0));
-  else if (kind == 2u) { int i = w4(int(b0 & 15u)); r = ivec4(i, i, i, w4(int(b0 >> 4))); }
-  else if (kind == 3u) { int i = int(v16 & 255u); r = ivec4(i, i, i, int(v16 >> 8)); }
-  else if (kind == 4u) r = ivec4(w5(bfi(v16, 11, 5)), w6(bfi(v16, 5, 6)), w5(bfi(v16, 0, 5)), 255);
-  else if (kind == 5u) r = rgb5a3(v16);
+  if (kind <= 3u) {
+    // I4, I8, IA4, IA8: intensity and alpha
+    int n4 = (tx & 1) == 1 ? int(b0 & 15u) : int(b0 >> 4);
+    int I = kind == 0u ? n4 * 17 : (kind == 1u ? int(b0) : (kind == 2u ? int(b0 & 15u) * 17 : int(v16 & 255u)));
+    int A = kind == 0u ? I : (kind == 1u ? int(b0) : (kind == 2u ? int(b0 >> 4) * 17 : int(v16 >> 8)));
+    r = ivec4(I, I, I, A);
+  } else if (kind <= 5u) {
+    // RGB565, RGB5A3 (opaque 555 or 4443 with alpha)
+    bool c565 = kind == 4u, opq = (v16 & 0x8000u) != 0u;
+    ivec3 c5 = ivec3(int(v16 >> 11) & 31, int(v16 >> 5) & 63, int(v16) & 31);
+    ivec3 c555 = ivec3(int(v16 >> 10) & 31, int(v16 >> 5) & 31, int(v16) & 31);
+    ivec3 c4 = ivec3(int(v16 >> 8) & 15, int(v16 >> 4) & 15, int(v16) & 15) * 17;
+    ivec3 e5 = c565 ? c5 : c555;
+    ivec3 x5 = ivec3((e5.x << 3) | (e5.x >> 2), c565 ? ((e5.y << 2) | (e5.y >> 4)) : ((e5.y << 3) | (e5.y >> 2)), (e5.z << 3) | (e5.z >> 2));
+    int a3 = int(v16 >> 12) & 7;
+    r = (c565 || opq) ? ivec4(x5, 255) : ivec4(c4, (a3 << 5) | (a3 << 2) | (a3 >> 1));
+  }
   else if (kind == 6u) r = ivec4(int(b1), int(b2), int(b3), int(b0));
   else if (kind == 14u) {
     uint c1 = v16, c2 = (b2 << 8) | b3;
@@ -349,7 +353,9 @@ uint planeAt(uint k, uint dx, uint dy) {
   // a plane with no slope (both differences zero) is its own constant: adding the zero products changes nothing in a finite non-zero value
   uint ex = (p.x >> 23) & 255u;
   if ((p.y & 0x7f800000u) == 0u && (p.z & 0x7f800000u) == 0u && ex != 0u && ex != 255u) return p.x;
-  return f_add(f_add(p.x, f_mul(p.y, dx)), f_mul(p.z, dy));
+  uint acc = p.x;
+  for (int i = 0; i < uK.w; i++) acc = f_add(acc, f_mul(i == 0 ? p.y : p.z, i == 0 ? dx : dy));
+  return acc;
 }
 
 // s and t of generator n at pixel (px, py)

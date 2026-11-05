@@ -221,6 +221,36 @@ int nibblesOf(uint fmt) { return int(FINFO[fmt & 15u] >> 5); }
     s = rep(s, "  col = (uint(gRegs[DEBUG_A] & 0xfff) << 12) | uint(gRegs[DEBUG_B] & 0xfff);", "  col = (uint(gR[DEBUG_A >> 2][DEBUG_A & 3] & 0xfff) << 12) | uint(gR[DEBUG_B >> 2][DEBUG_B & 3] & 0xfff);");
     return s;
   },
+  // ablation: the fast add/multiply without their exactness wrappers (fence, flush, tiny results, NaN)
+  plainfast: (s) => cut(cut(s, "uint f_add(uint a, uint b) {\n  uint A = f_ftz(a)", "uint f_mul(uint a, uint b) {\n  uint A", "uint f_add(uint a, uint b) { return floatBitsToUint(uintBitsToFloat(a) + uintBitsToFloat(b)); }\n"),
+    "uint f_mul(uint a, uint b) {\n  uint A", "uint f_sub(uint a, uint b)","uint f_mul(uint a, uint b) { return floatBitsToUint(uintBitsToFloat(a) * uintBitsToFloat(b)); }\n"),
+  nofence: (s) => rep(s, "uint f_fence(float x) { return floatBitsToUint(x) ^ uFence; }", "uint f_fence(float x) { return floatBitsToUint(x); }"),
+  noftz: (s) => rep(s, "uint f_ftz(uint a) { return (a & 0x7f800000u) == 0u ? (a & 0x80000000u) : a; }", "uint f_ftz(uint a) { return a; }"),
+  addlite: (s) => rep(s, `  uint mA = A & 0x7fffffffu, mB = B & 0x7fffffffu;
+  uint z = (mA | mB) == 0u ? (A & B & 0x80000000u) : (A == (B ^ 0x80000000u) ? 0u : ((mA >= mB ? A : B) & 0x80000000u));
+  r = (r & 0x7f800000u) == 0u ? z : r;
+`, ""),
+  mullite: (s) => rep(s, `  uint p2 = f_fence(uintBitsToFloat(f_fence(fa * 16777216.0)) * fb) & 0x7fffffffu;
+  bool zero = (A & 0x7fffffffu) == 0u || (B & 0x7fffffffu) == 0u;
+  uint tiny = ((A ^ B) & 0x80000000u) | (!zero && p2 >= 0x0c800000u ? 0x00800000u : 0u);
+  r = (r & 0x7fffffffu) <= 0x00800000u ? tiny : r;
+`, ""),
+  nonan: (s) => rep(rep(s, "  r = (r & 0x7f800000u) == 0u ? z : r;\n  return (r & 0x7fffffffu) > F_INF ? F_NAN : r;", "  r = (r & 0x7f800000u) == 0u ? z : r;\n  return r;"), "  r = (r & 0x7fffffffu) <= 0x00800000u ? tiny : r;\n  return (r & 0x7fffffffu) > F_INF ? F_NAN : r;", "  r = (r & 0x7fffffffu) <= 0x00800000u ? tiny : r;\n  return r;"),
+  // rewrites: fewer inlined copies of the card's add/multiply (and their exactness wrappers), by loops with run-time bounds (exact)
+  planeloop: (s) => rep(s, "  return f_add(f_add(p.x, f_mul(p.y, dx)), f_mul(p.z, dy));", "  uint acc = p.x;\n  for (int i = 0; i < uK.w; i++) acc = f_add(acc, f_mul(i == 0 ? p.y : p.z, i == 0 ? dx : dy));\n  return acc;"),
+  offloop: (s) => {
+    s = rep(s, "  uint dx = f_add(gOx, f_from_int(px - gXi)), dy = f_add(gOy, f_from_int(py - gYi));", "  uint dx, dy;\n  pixOffsets(px, py, dx, dy);");
+    s = rep(s, "  uint dx = f_add(gOx, f_from_int(x - gXi)), dy = f_add(gOy, f_from_int(y - gYi));", "  uint dx, dy;\n  pixOffsets(x, y, dx, dy);");
+    return rep(s, "uint planeAt(uint k, uint dx, uint dy) {", `// the pixel's offsets from the triangle's reference point, as floats (x, then y)
+void pixOffsets(int px, int py, out uint dx, out uint dy) {
+  uint d[2];
+  for (int i = 0; i < uK.w; i++) d[i] = f_add(i == 0 ? gOx : gOy, f_from_int(i == 0 ? px - gXi : py - gYi));
+  dx = d[0]; dy = d[1];
+}
+
+uint planeAt(uint k, uint dx, uint dy) {`);
+  },
+  stloop: (s) => rep(s, "  s = f_mul(pv[1], proj);\n  t = f_mul(pv[2], proj);", "  uint st2[2];\n  for (int i = 0; i < uK.w; i++) st2[i] = f_mul(pv[1 + i], proj);\n  s = st2[0]; t = st2[1];"),
   // ablation: the level loop's offsets and the taps' weights
   onetap: (s) => rep(s, "  int ntaps = linear ? 4 : 1;", "  int ntaps = 1;"),
   onelev: (s) => rep(s, "  int nlev = mixl ? 2 : 1;", "  int nlev = 1;"),
