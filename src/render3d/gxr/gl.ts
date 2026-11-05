@@ -13,9 +13,9 @@ import { COPY_FS, CLEAR_FS, PICTURE_FS, PRESENT_FS } from "./glsl-copy";
 import { expConstants, MEM_BYTES, MEM_PAL, MEM_PAL_SIZE, MEM_ROW, MEM_TMEM, pixelShader, STATE_WORDS, TILE, TILE_SHIFT } from "./glsl-pixel";
 import { compile, compileDone, Compiling, finishCompile, FULLSCREEN_VS, intTexture, IntTex, startCompile, uploadRows } from "./glutil";
 import { FrontCtx, Growable, HEADER_TEXELS, needsMainThread } from "./front";
-import { FrontPool } from "./frontpool";
+import { FrontPool, Q_FLAG } from "./frontpool";
 import { setLastZ } from "./setup";
-import { GxGpu, type GxBackend } from "./gpu";
+import { GxGpu, type GxBackend, type RawRun } from "./gpu";
 import type { GxInitial } from "./dff";
 import { bits, GxRegs } from "./state";
 import { formatInfo, levelOffset } from "./texunit";
@@ -198,6 +198,7 @@ export class GxGl implements GxBackend {
     if (this.attached) { this.attached.onTouch = null; this.attached.beforeWrite = null; }
     this.attached = null;
     this.drainFront();
+    this.fp?.resetOut();
     this.q.n = 0; this.ent.n = 0; this.used.clear(); this.dirty = [];
     this.palMap.clear(); this.palNext = 0;
     this.resetStates();
@@ -346,13 +347,18 @@ export class GxGl implements GxBackend {
 
   private attach(mem: Memory, regs: GxRegs): void {
     if (this.attached === mem) return;
+    if (this.attached) { this.attached.onTouch = null; this.attached.beforeWrite = null; }
     this.attached = mem;
     const gl = this.gl;
     // the whole main memory, then TMEM
     uploadRows(gl, this.mem, 0, 0, MEM_ROW, mem.data.length / MEM_ROW, mem.data);
     this.uploadTmem(regs);
     this.dirty = [];
-    mem.onTouch = (a, n) => { this.dirty.push(a, n); };
+    // (the worker threads' mirror of it, which the raw draws' indexed vertex attributes read: written only once every raw draw published
+    // has read its vertices, frontpool.ts)
+    const fp = this.fp, drain = () => this.drainFront();
+    fp?.writeMirror(mem.data, 0, mem.data.length, drain);
+    mem.onTouch = fp ? (a, n) => { this.dirty.push(a, n); fp.writeMirror(mem.data, a, n, drain); } : (a, n) => { this.dirty.push(a, n); };
     mem.beforeWrite = (a, n) => {
       for (const [start, len] of this.used) {
         if (a < start + len && start < a + n) { this.flush(); break; }
@@ -508,23 +514,32 @@ export class GxGl implements GxBackend {
   // -------------------------------------------------------------------------------------------------------------------
   // draws
 
-  draw(regs: GxRegs, mem: Memory, vd: VertexData, tris: number[], lines: number[], points: number[], prims: { type: number; base: number; count: number }[]): void {
+  /** draws may come with their vertices undecoded (gpu.ts RawRun): the worker threads decode them */
+  get rawVertices(): boolean { return this.fp !== null; }
+
+  draw(regs: GxRegs, mem: Memory, vd: VertexData, tris: number[], lines: number[], points: number[], prims: { type: number; base: number; count: number }[], raw?: RawRun | null): void {
     if (!this.drawing || this.fastForward) return;
     this.draws++;
     const t0 = this.measure ? performance.now() : 0;
     this.attach(mem, regs);
     if (regs.tmemVersion !== this.tmemVersion) { this.flush(); this.uploadTmem(regs); }
+    // (the workers' output area half full: a pass takes it, frontpool.ts)
+    if (this.fp && (this.draws & 3) === 0 && this.fp.outFull) this.flush();
     const st = this.stateFor(regs);
     const ranges = this.stateRanges[st];
     this.needFeatures |= this.stateFeatures[st];
     for (let i = 0; i < ranges.length; i += 2) if ((this.used.get(ranges[i]) ?? 0) < ranges[i + 1]) this.used.set(ranges[i], ranges[i + 1]);
-    if (this.fp && !needsMainThread(regs.bp, prims)) this.fp.submit(regs, vd, prims, st, () => this.drainFront());
-    else {
+    if (this.fp && !needsMainThread(regs.bp, prims)) {
+      if (raw) this.fp.submitRaw(regs, raw.vat, raw.size, raw.n, raw.segs, prims, st, () => this.drainFront());
+      else this.fp.submit(regs, vd, prims, st, () => this.drainFront());
+    } else {
+      raw?.decode();
       // on this thread: after the jobs of the earlier draws, so the queue keeps the draw order
       this.drainFront();
       const q = this.q, o0 = q.n;
       this.ctx.run(regs, vd, prims, st, q);
-      this.tris += binTriangles(q.ints.subarray(o0), q.words.subarray(o0), q.n - o0, o0 >> 2, this.ent);
+      // (this queue's words follow the output area's in the pass: their entries are flagged and placed there by flush)
+      this.tris += binTriangles(q.ints.subarray(o0), q.words.subarray(o0), q.n - o0, (o0 >> 2) | Q_FLAG, this.ent);
     }
     if (this.measure) this.stats.cpuMs += performance.now() - t0;
   }
@@ -535,19 +550,18 @@ export class GxGl implements GxBackend {
     if (!fp || !fp.busy) return;
     const q = this.q;
     const E = this.ent;
-    fp.drain((words, ents, tris) => {
+    fp.drain((ents, tris) => {
+      // (a job's entries name its triangles in the output area, where its words stay)
+      this.tris += tris;
+      E.ensure(ents.length);
+      E.a.set(ents, E.n);
+      E.n += ents.length;
+    }, (words) => {
       q.ensure(words.length);
       const o0 = q.n;
       q.words.set(words, o0);
       q.n += words.length;
-      if (!ents) { this.tris += binTriangles(q.ints.subarray(o0), q.words.subarray(o0), words.length, o0 >> 2, E); return; }
-      // (the worker's entries name triangles from its job's first word: the job's words start at texel o0 >> 2 here)
-      this.tris += tris;
-      E.ensure(ents.length);
-      const A = E.a, base = o0 >> 2;
-      let n = E.n;
-      for (let i = 0; i < ents.length; i += 2) { A[n++] = ents[i]; A[n++] = ents[i + 1] + base; }
-      E.n = n;
+      this.tris += binTriangles(q.ints.subarray(o0), q.words.subarray(o0), words.length, (o0 >> 2) | Q_FLAG, E);
     });
     if (fp.zFresh) { fp.zFresh = false; setLastZ(fp.zPlane!); }
   }
@@ -556,7 +570,11 @@ export class GxGl implements GxBackend {
   get poolStats(): { mainJobs: number; jobs: number; waitMs: number; mergeMs: number; workerJobs: number; workersStarted: number } | null { return this.fp ? { ...this.fp.stats, workerJobs: this.fp.workerJobs, workersStarted: this.fp.workersStarted } : null; }
 
   /** stop the worker threads (the backend draws on this thread from then on) */
-  dispose(): void { this.drainFront(); this.fp?.dispose(); this.fp = null; }
+  dispose(): void {
+    // (the queued triangles' words are in the threads' output area: drawn first)
+    if (this.fp && (this.fp.busy || this.fp.outUsed > 0)) this.flush();
+    this.fp?.dispose(); this.fp = null;
+  }
 
   // -------------------------------------------------------------------------------------------------------------------
   // passes
@@ -576,11 +594,13 @@ export class GxGl implements GxBackend {
   flush(): void {
     this.drainFront();
     const qn = this.q.n;
+    // (the pass's data: the worker threads' output area, then this queue from the next row on)
+    const outN = this.fp ? this.fp.outUsed : 0;
     // memory writes that have landed go to the GPU now, before anything that writes memory there (a copy) or reads it
     const tu = this.measure ? performance.now() : 0;
     if (this.attached) this.uploadDirty(this.attached);
     if (this.measure) this.stats.uploadMs += performance.now() - tu;
-    if (qn === 0) { this.used.clear(); return; }
+    if (qn === 0 && outN === 0) { this.used.clear(); return; }
     // (nothing is drawn with the card's float arithmetic before the check has found it exact: a draw that comes first gets the whole-number functions)
     if (this.floatAuto && this.floatOps === "fast" && !this.floatCheck && !this.floatChecking_) this.useSoftFloat();
     const t0 = this.measure ? performance.now() : 0;
@@ -596,15 +616,17 @@ export class GxGl implements GxBackend {
     this.stats.listEntries += total;
     const list = new Uint32Array(Math.max(1, Math.ceil(total / 4096)) * 4096);
     const fill = new Uint32Array(nTiles);
-    for (let e = 0; e < ne2; e += 2) { const t = EA[e]; list[start[t] + fill[t]++] = EA[e + 1]; }
+    const outRows = Math.ceil(outN / 4096), qBase = outRows * 1024;
+    for (let e = 0; e < ne2; e += 2) { const t = EA[e], v = EA[e + 1]; list[start[t] + fill[t]++] = v & Q_FLAG ? (v ^ Q_FLAG) + qBase : v; }
     const tileRows = Math.ceil(nTiles / 1024);
     const tiles = new Uint32Array(1024 * tileRows * 2);
     for (let t = 0; t < TILES_X * TILES_Y; t++) { tiles[t * 2] = start[t]; tiles[t * 2 + 1] = counts[t]; }
     // uploads
     const set = this.sets[this.setNo++ % this.sets.length];
-    set.data = this.grow(set.data, this.q.n, 4096);
-    const dataRows = Math.ceil(this.q.n / 4096);
-    uploadRows(gl, set.data, 0, 0, 1024, dataRows, this.q.words.subarray(0, dataRows * 4096));
+    const dataRows = Math.ceil(qn / 4096);
+    set.data = this.grow(set.data, (outRows + dataRows) * 4096, 4096);
+    if (outRows) uploadRows(gl, set.data, 0, 0, 1024, outRows, this.fp!.outView(outRows * 4096));
+    if (dataRows) uploadRows(gl, set.data, 0, outRows, 1024, dataRows, this.q.words.subarray(0, dataRows * 4096));
     set.list = this.grow(set.list, list.length, 4096);
     uploadRows(gl, set.list, 0, 0, 4096, list.length / 4096, list);
     uploadRows(gl, set.tiles, 0, 0, 1024, tileRows, tiles);
@@ -639,6 +661,7 @@ export class GxGl implements GxBackend {
     this.cur = 1 - this.cur;
     this.passes++;
     this.q.n = 0; this.ent.n = 0; this.used.clear(); this.needFeatures = 0;
+    this.fp?.resetOut();
     if (this.measure) this.stats.flushMs += performance.now() - t0;
     this.onFlush?.();
   }
