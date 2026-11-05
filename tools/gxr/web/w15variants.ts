@@ -251,6 +251,12 @@ void pixOffsets(int px, int py, out uint dx, out uint dy) {
 uint planeAt(uint k, uint dx, uint dy) {`);
   },
   stloop: (s) => rep(s, "  s = f_mul(pv[1], proj);\n  t = f_mul(pv[2], proj);", "  uint st2[2];\n  for (int i = 0; i < uK.w; i++) st2[i] = f_mul(pv[1 + i], proj);\n  s = st2[0]; t = st2[1];"),
+  // candidate: a tiny or zero sum's sign taken from the card's own result (IEEE round-to-nearest gives the spec's sign there; would need the check)
+  addsign: (s) => rep(s, `  uint mA = A & 0x7fffffffu, mB = B & 0x7fffffffu;
+  uint z = (mA | mB) == 0u ? (A & B & 0x80000000u) : (A == (B ^ 0x80000000u) ? 0u : ((mA >= mB ? A : B) & 0x80000000u));
+  r = (r & 0x7f800000u) == 0u ? z : r;
+`, `  r = (r & 0x7f800000u) == 0u ? (r & 0x80000000u) : r;
+`),
   // ablation: the level loop's offsets and the taps' weights
   onetap: (s) => rep(s, "  int ntaps = linear ? 4 : 1;", "  int ntaps = 1;"),
   onelev: (s) => rep(s, "  int nlev = mixl ? 2 : 1;", "  int nlev = 1;"),
