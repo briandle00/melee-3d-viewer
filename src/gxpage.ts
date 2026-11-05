@@ -106,7 +106,8 @@ const glEarly: Promise<{ b: import("./render3d/gxr/gl").GxGl; gl: WebGL2Renderin
   if (!gl) return null;
   // (floatops: soft, fast or dual, for the checks; auto, the default: the card's own float arithmetic once the renderer's start-up check finds it exact)
   const fo = q.get("floatops");
-  const b = new GxGl(gl, { floatOps: fo === "soft" || fo === "fast" || fo === "dual" ? fo : "auto" }, { workers: Math.max(0, Number(q.get("workers") ?? Math.min(3, Math.max(0, (navigator.hardwareConcurrency || 4) - 2)))) });
+  // (the front half's worker threads: up to 5, two threads left to the page and the browser; they decode the vertices too)
+  const b = new GxGl(gl, { floatOps: fo === "soft" || fo === "fast" || fo === "dual" ? fo : "auto" }, { workers: Math.max(0, Number(q.get("workers") ?? Math.min(5, Math.max(0, (navigator.hardwareConcurrency || 4) - 2)))) });
   // (then its built-in scene drawn a few times: the draw path is compiled by the JavaScript engine before the first frame of a replay)
   const ready = b.prepare().then(() => { loadTimes.shadersReady = performance.now() - pageStart; b.warmUp(); loadTimes.warmedRenderer = performance.now() - pageStart; });
   ready.catch(() => {});
