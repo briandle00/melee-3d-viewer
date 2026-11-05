@@ -6,9 +6,9 @@
  * replay_drive.py frame_diff) and, for the first, whether it is only such a near miss (positions_near_only). Nothing of the rule is here.
  */
 import type { DriveOptions, Tape } from "../../sim/tape";
-import { GxCore, type CoreSnapshot, type GxCoreFactory } from "./core";
+import { GxCore, type GxCoreFactory } from "./core";
 import { frameDiffs, positionsNearOnly } from "./framediff";
-import { nativeRow, nativeTape, TAPE_CONFIG_SIZE, TAPE_FRAME_SIZE } from "./tapebridge";
+import { nativeRow, nativeTape } from "./tapebridge";
 
 export type RawC = ([Int16Array, Int16Array] | null)[];
 
@@ -50,22 +50,18 @@ export async function fitCstick(o: FitOptions): Promise<{ rawC: RawC; drives: nu
   const recorded = resyncRecord(tape);
   // one whole drive, the simulator alone, playback original (resynced: the recording's positions put back where near): the first row whose
   // output is not the recording's (-1 none), and whether that row differs only by such near misses
-  // The match is opened once for the drives (opening takes over a second; a drive's steps a few). What opening reads of a tape is its
-  // configuration, its first row and what follows the rows (msl_gxw_open), and the drives' tapes differ only in later rows' C-stick
-  // bytes: each drive puts the instance back to its state right after that open (GxCore.snapshot/restore, byte for byte), and a tape
-  // whose opening part differs gets a fresh instance and open.
-  let opened: { core: GxCore; key: Uint8Array; snap: CoreSnapshot } | null = null;
+  // The game files are read once for the drives (that is nearly all of an open's time; a drive's steps take a few seconds): each drive puts
+  // the module back to its state right after the files loaded (GxCore.rewind, byte for byte) and opens its tape there, as a fresh
+  // instance would. A module that cannot be rewound is replaced by a fresh one.
+  let opened: GxCore | null = null;
   const openedFor = async (whole: Uint8Array): Promise<GxCore> => {
-    const rows = TAPE_CONFIG_SIZE + count * TAPE_FRAME_SIZE;
-    const key = new Uint8Array(TAPE_CONFIG_SIZE + TAPE_FRAME_SIZE + whole.length - rows);
-    key.set(whole.subarray(0, TAPE_CONFIG_SIZE + TAPE_FRAME_SIZE)); key.set(whole.subarray(rows), TAPE_CONFIG_SIZE + TAPE_FRAME_SIZE);
-    if (opened && opened.key.length === key.length && opened.key.every((b, i) => b === key[i])) { opened.core.restore(opened.snap); return opened.core; }
-    opened?.core.destroy();
-    opened = null;
-    const core = await GxCore.create(make, files);
-    core.openMatch(whole, [...files.keys()], "original");
-    opened = { core, key, snap: core.snapshot() };
-    return core;
+    if (!opened?.rewind()) {
+      opened?.destroy();
+      opened = await GxCore.create(make, files);
+      opened.loadGame([...files.keys()]);
+    }
+    opened.openMatch(whole, [...files.keys()], "original");
+    return opened;
   };
   const drive = async (rawC: RawC, resynced: boolean): Promise<{ first: number; near: boolean }> => {
     drives++;
@@ -102,7 +98,7 @@ export async function fitCstick(o: FitOptions): Promise<{ rawC: RawC; drives: nu
   if (m._msl_gxw_cfit_mode()) await drive(rawC, false);
   const flips = m._msl_gxw_cfit_flips();
   planner.destroy();
-  (opened as { core: GxCore } | null)?.core.destroy();
+  (opened as GxCore | null)?.destroy();
   opened = null;
   return { rawC, drives, flips };
 }

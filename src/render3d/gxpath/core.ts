@@ -13,6 +13,8 @@
  *                                     the stream offset they must be in place by
  *   msl_gxw_initial_state(0/1/2)      the register files before the first frame: BP 256 words, CP 256, XF 0x1000 + 0x60
  *   msl_gxw_output_ptr/_size          the step's MslCoreCompare (src/sim/compare.ts holds it against the replay)
+ *   msl_gxw_load_game(root)           (newer builds) the game files read once, and the module's state right after kept: msl_gxw_rewind() puts
+ *                                     the module back to it, so the next match opens in milliseconds instead of reading the files again
  */
 import type { GxUpdate } from "../gxr/dff";
 import { DATA_ROOT } from "../../sim/engine";
@@ -24,6 +26,9 @@ export interface GxCoreModule {
   _malloc(size: number): number;
   _free(ptr: number): void;
   _msl_gxw_open(tape: number, size: number, root: number): number;
+  _msl_gxw_load_game?(root: number): number;
+  _msl_gxw_rewind?(): number;
+  _msl_gxw_kept_bytes?(): number;
   _msl_gxw_set_playback(name: number): number;
   _msl_gxw_playback(): number;
   _msl_gxw_step_frame(frame: number): number;
@@ -73,6 +78,8 @@ export interface CoreSnapshot { length: number; pages: Map<number, Uint8Array>; 
 export class GxCore {
   private frameBuf = 0;
   private open = false;
+  /** the game data is loaded and the state after it kept (loadGame): rewind() can start another match in this instance */
+  private kept = false;
 
   private constructor(readonly mod: GxCoreModule) {}
 
@@ -106,6 +113,42 @@ export class GxCore {
     this.frameBuf = m._malloc(TAPE_FRAME_SIZE);
     this.open = true;
   }
+
+  /** Read the game files once and keep the module's state right after (builds with msl_gxw_load_game; others: nothing, false). The files
+   *  are then dropped from the file system: every later match of this instance opens from the kept game data (rewind, then openMatch). */
+  loadGame(names: string[]): boolean {
+    const m = this.mod;
+    if (!m._msl_gxw_load_game || !m._msl_gxw_rewind) return false;
+    const root = m._malloc(DATA_ROOT.length + 1);
+    let r: number;
+    try {
+      m.HEAPU8.set(new TextEncoder().encode(DATA_ROOT + "\0"), root);
+      r = m._msl_gxw_load_game(root);
+    } finally {
+      m._free(root);
+    }
+    if (r === -3) throw new Error("msl_gxw_load_game: game data failed");
+    if (r !== 0) return false;
+    for (const n of names) {
+      try { m.FS.unlink(`${DATA_ROOT}/${n}`); } catch { /* already gone */ }
+    }
+    this.kept = true;
+    return true;
+  }
+
+  /** The module back to its state right after loadGame, for another match (openMatch next): every byte as it was, so the match is
+   *  the one a fresh instance would play. False when it cannot be (no kept state, or the game data changed since): make a new instance. */
+  rewind(): boolean {
+    if (!this.kept || !this.mod._msl_gxw_rewind) return false;
+    if (this.mod._msl_gxw_rewind() !== 0) { this.kept = false; return false; }
+    // (every allocation made after loadGame is gone with the rewind, the frame buffer too)
+    this.frameBuf = 0;
+    this.open = false;
+    return true;
+  }
+
+  /** bytes kept for rewind() */
+  get keptBytes(): number { return this.kept ? this.mod._msl_gxw_kept_bytes?.() ?? 0 : 0; }
 
   /** the playback option (only before the first step: the option decides the very first frames) */
   setPlayback(name: PlaybackMode): void {
