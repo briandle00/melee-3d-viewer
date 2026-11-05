@@ -420,7 +420,7 @@ const exportName = () => (q.get("name") ?? currentUrl?.split("/").pop()?.split("
  *  without drawing (fast-forward), the last EXPORT_LEAD drawn */
 async function seekForExport(row: number): Promise<void> {
   const s = session!;
-  if (s.needsRestart(row)) await s.start();
+  if (s.needsRestart(row)) await s.rewindFor(row);
   while (!s.seekStep(row, 50, EXPORT_LEAD)) await new Promise((r) => setTimeout(r, 0));
   glBackend?.present();
 }
