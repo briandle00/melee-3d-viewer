@@ -108,7 +108,11 @@ const glEarly: Promise<{ b: import("./render3d/gxr/gl").GxGl; gl: WebGL2Renderin
   const fo = q.get("floatops");
   const b = new GxGl(gl, { floatOps: fo === "soft" || fo === "fast" || fo === "dual" ? fo : "auto" }, { workers: Math.max(0, Number(q.get("workers") ?? Math.min(3, Math.max(0, (navigator.hardwareConcurrency || 4) - 2)))) });
   // (then its built-in scene drawn a few times: the draw path is compiled by the JavaScript engine before the first frame of a replay)
-  const ready = b.prepare().then(() => { loadTimes.shadersReady = performance.now() - pageStart; b.warmUp(); loadTimes.warmedRenderer = performance.now() - pageStart; });
+  // (then the optional shader variants start compiling in the background, one after another, so that a draw needing one later finds it ready)
+  const ready = b.prepare().then(() => {
+    loadTimes.shadersReady = performance.now() - pageStart; b.warmUp(); loadTimes.warmedRenderer = performance.now() - pageStart;
+    void b.warm().then(() => { loadTimes.variantsReady = performance.now() - pageStart; }).catch(() => {});
+  });
   ready.catch(() => {});
   return { b, gl, ready };
 })();
@@ -131,8 +135,6 @@ async function makeBackend(env: ConstructorParameters<typeof CpuBackend>[0]): Pr
         loadTimes.floatFast = b.floatOps === "fast" ? 1 : 0;
         loadTimes.floatCheckMs = b.floatCheck?.ms ?? 0;
         if (b.floatCheck && (b.floatCheck.ops || b.floatCheck.pixels || b.floatCheck.error)) console.log("gx: the card's float arithmetic differs (" + JSON.stringify(b.floatCheck) + "): the renderer uses its whole-number float functions");
-        // (the optional shader variants compile in the background: a draw that needs one waits for it)
-        void b.warm().then(() => { loadTimes.variantsReady = performance.now() - pageStart; });
         glBackend = b;
         screen.setGlMode(true);
         const dbg = gl.getExtension("WEBGL_debug_renderer_info");
