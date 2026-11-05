@@ -746,20 +746,24 @@ void shade(int x, int y, inout uint col, inout uint dep) {
   bool zEarly = ((b43 >> 6) & 1u) == 1u && zEnable;
 
   uint dx = f_add(gOx, f_from_int(x - gXi)), dy = f_add(gOy, f_from_int(y - gYi));
-  uint zf = planeAt(1u, dx, dy);
-  int z = f_trunc(f_gt(zf, 0x4b7fffffu) ? 0x4b7fffffu : (f_lt(zf, 0u) ? 0u : zf)) & 0xffffff;
   int stored = int(dep);
   uint newDep = dep;
-  if (zEarly) {
-    if (!cmpOp(zFunc, z, stored)) return;
-    if (zUpdate) newDep = uint(z);
-  }
-  // raster colors
+  int z = 0;
   for (int i = 0; i < 8; i++) gRasCh[i] = 0;
-  for (int i = 0; i < numCols * 4; i++) {
-    int tv = f_trunc(planeAt(uint(2 + i), dx, dy));
-    int v16 = tv & 0xffff;
-    gRasCh[i] = (v16 & ~(v16 >> 8)) & 0xff;
+  // plane 1 the depth (clamped to 0 .. 0xffffff, then the early depth test), planes 2.. the raster colors: one copy of planeAt and f_trunc
+  for (int i = 0; i <= numCols * 4; i++) {
+    uint pv = planeAt(uint(1 + i), dx, dy);
+    int tv = f_trunc(i == 0 ? (f_gt(pv, 0x4b7fffffu) ? 0x4b7fffffu : (f_lt(pv, 0u) ? 0u : pv)) : pv);
+    if (i == 0) {
+      z = tv & 0xffffff;
+      if (zEarly) {
+        if (!cmpOp(zFunc, z, stored)) return;
+        if (zUpdate) newDep = uint(z);
+      }
+    } else {
+      int v16 = tv & 0xffff;
+      gRasCh[i - 1] = (v16 & ~(v16 >> 8)) & 0xff;
+    }
   }
   loadColorRegs();
   for (int i = 0; i < 4; i++) { gLastTex[i] = 0; gTex[i] = 0; }
