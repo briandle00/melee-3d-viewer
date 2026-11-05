@@ -7,7 +7,8 @@
  * the queue holds exactly the words one thread would have made: the same code runs everywhere, and nothing here depends on the order the jobs
  * finish in. Needs a shared buffer (a page that is cross-origin isolated); `FrontPool.available()` says.
  *
- * The buffer: control words, the job table, the XF unit's copies (one per change), the inputs and the outputs. Jobs are numbered
+ * The buffer: control words, the job table, the XF unit (its words when the first job after a drain was published, then a log of the
+ * ranges loaded since, each with its words: a job names the log's end at its draw), the inputs and the outputs. Jobs are numbered
  * from the start of the page, a job sits in slot number % maxJobs, and the inputs and outputs are bump-allocated and start over at each drain.
  */
 import { binTriangles, Entries } from "./bin";
@@ -23,6 +24,7 @@ import { VertexData, vertexLayout, type VertexLayout } from "./vertex";
 const C_HEAD = 0, C_TAIL = 16, C_STOP = 17, C_DONE = 32, C_OUT = 33, C_DECODED = 34, C_RAWOVER = 35, C_ENT = 36, C_WJOBS = 37, C_SLEEPERS = 48, C_STARTED = 64;
 const CTL_WORDS = 80;
 const JW = 24;
+// (J_XF: the XF log's end for the job, J_XFGEN: the XF base it starts from)
 const J_LAY0 = 0, J_LAY1 = 1, J_XF = 2, J_BP = 3, J_NV = 4, J_VOFF = 5, J_PRIMS = 6, J_NPRIMS = 7, J_ST = 8, J_OUT = 9, J_OUTLEN = 10, J_ZFLAG = 11, J_Z = 12, J_OVER = 15;
 // (the job's tile entries follow its words in the output area: J_NENT words of them, for J_TRIS triangles: bin.ts)
 const J_NENT = 16, J_TRIS = 17;
@@ -30,10 +32,10 @@ const J_NENT = 16, J_TRIS = 17;
 // table entry J_LAY0), decoded by the thread that runs it from those bytes, the CP registers at J_CP and the memory mirror)
 const J_KIND = 18, J_CP = 19;
 // (where the job's tile entries are in the entry area)
-const J_ENT = 20;
+const J_ENT = 20, J_XFGEN = 21;
 
-export interface PoolConfig { maxJobs: number; xfSlots: number; inWords: number; outWords: number; entWords: number }
-export const DEFAULT_POOL: PoolConfig = { maxJobs: 512, xfSlots: 512, inWords: 1 << 23, outWords: 1 << 24, entWords: 1 << 22 };
+export interface PoolConfig { maxJobs: number; xfLogWords: number; inWords: number; outWords: number; entWords: number }
+export const DEFAULT_POOL: PoolConfig = { maxJobs: 512, xfLogWords: 1 << 21, inWords: 1 << 23, outWords: 1 << 24, entWords: 1 << 22 };
 /** set in an entry's triangle field (bin.ts) by gl.ts for the words of its own queue, which follow the output area's in a pass */
 export const Q_FLAG = 1 << 30;
 
@@ -41,7 +43,8 @@ class Shared {
   ctl: Int32Array;
   jobs: Int32Array;
   jobsF: Float32Array;
-  xf: Uint32Array;
+  xfBase: Uint32Array;
+  xfLog: Uint32Array;
   inU: Uint32Array;
   inI: Int32Array;
   inF: Float32Array;
@@ -56,7 +59,8 @@ class Shared {
     this.ctl = new Int32Array(sab, 0, CTL_WORDS);
     this.jobs = new Int32Array(sab, l.jobsAt * 4, cfg.maxJobs * JW);
     this.jobsF = new Float32Array(sab, l.jobsAt * 4, cfg.maxJobs * JW);
-    this.xf = new Uint32Array(sab, l.xfAt * 4, cfg.xfSlots * XF_SIZE);
+    this.xfBase = new Uint32Array(sab, l.xfAt * 4, XF_SIZE);
+    this.xfLog = new Uint32Array(sab, (l.xfAt + XF_SIZE) * 4, cfg.xfLogWords);
     this.inU = new Uint32Array(sab, l.inAt * 4, cfg.inWords);
     this.inI = new Int32Array(sab, l.inAt * 4, cfg.inWords);
     this.inF = new Float32Array(sab, l.inAt * 4, cfg.inWords);
@@ -67,7 +71,7 @@ class Shared {
     this.memView = new DataView(memSab);
   }
   static layout(cfg: PoolConfig): { jobsAt: number; xfAt: number; inAt: number; outAt: number; entAt: number; words: number } {
-    const jobsAt = CTL_WORDS, xfAt = jobsAt + cfg.maxJobs * JW, inAt = xfAt + cfg.xfSlots * XF_SIZE, outAt = inAt + cfg.inWords, entAt = outAt + cfg.outWords;
+    const jobsAt = CTL_WORDS, xfAt = jobsAt + cfg.maxJobs * JW, inAt = xfAt + XF_SIZE + cfg.xfLogWords, outAt = inAt + cfg.inWords, entAt = outAt + cfg.outWords;
     return { jobsAt, xfAt, inAt, outAt, entAt, words: entAt + cfg.entWords };
   }
 }
@@ -111,6 +115,26 @@ function plan(lo: number, hi: number, n: number, at: number): Plan {
 
 const EMPTY_F = new Float32Array(0), EMPTY_B = new Uint8Array(0);
 
+/** what the pool reads of the registers' XF unit (state.ts GxRegs): its words, a counter of loads, and the ranges loaded (address,
+ *  count) the pool asks it to keep (lost: too many to keep, the pool takes the whole unit again) */
+export interface XfRegs { xf: Uint32Array; xfVersion: number; xfLog?: number[] | null; xfLogLost?: boolean }
+
+/** a thread's own XF unit for the jobs it runs: the base, then the log up to the job's end (a thread claims jobs in order, so it only
+ *  ever moves forward within a base; a job made again for drain() starts from the base) */
+class XfView {
+  xf = new Uint32Array(XF_SIZE);
+  private gen = -1;
+  private pos = 0;
+  at(sh: Shared, gen: number, pos: number): Uint32Array {
+    const xf = this.xf, L = sh.xfLog;
+    if (gen !== this.gen || pos < this.pos) { xf.set(sh.xfBase); this.gen = gen; this.pos = 0; }
+    let p = this.pos;
+    while (p < pos) { const a = L[p], n = L[p + 1]; xf.set(L.subarray(p + 2, p + 2 + n), a); p += 2 + n; }
+    this.pos = p;
+    return xf;
+  }
+}
+
 /** a thread's own decoder for raw jobs: the layouts by vertex attribute table entry (made again when one of the five words they depend on
  *  changes, as gpu.ts does), the decoded vertices */
 class RawDecoder {
@@ -118,13 +142,13 @@ class RawDecoder {
   private layouts: ({ l: VertexLayout; w0: number; w1: number; w2: number; w3: number; w4: number } | null)[] = Array(8).fill(null);
   private dflt = [0, 0, 0, 0, 0, 0, 0, 0];
   /** the vertices of raw job at b, decoded as gpu.ts decodes a run (VertexData.add over the command bytes) */
-  decode(sh: Shared, b: number): VertexData {
+  decode(sh: Shared, b: number, xf: Uint32Array): VertexData {
     const J = sh.jobs, vat = J[b + J_LAY0], n = J[b + J_NV];
     const cp = sh.inU.subarray(J[b + J_CP], J[b + J_CP] + 256);
     const w0 = cp[0x50], w1 = cp[0x60], w2 = cp[0x70 + vat], w3 = cp[0x80 + vat], w4 = cp[0x90 + vat];
     let c = this.layouts[vat];
     if (!c || c.w0 !== w0 || c.w1 !== w1 || c.w2 !== w2 || c.w3 !== w3 || c.w4 !== w4) c = this.layouts[vat] = { l: vertexLayout(cp, vat), w0, w1, w2, w3, w4 };
-    const xf = sh.xf.subarray(J[b + J_XF] * XF_SIZE, (J[b + J_XF] + 1) * XF_SIZE), d = this.dflt;
+    const d = this.dflt;
     d[0] = bits(xf[0x1018], 6, 6); d[1] = bits(xf[0x1018], 12, 6); d[2] = bits(xf[0x1018], 18, 6); d[3] = bits(xf[0x1018], 24, 6);
     d[4] = bits(xf[0x1019], 0, 6); d[5] = bits(xf[0x1019], 6, 6); d[6] = bits(xf[0x1019], 12, 6); d[7] = bits(xf[0x1019], 18, 6);
     this.vd.setup(c.l, bits(xf[0x1018], 0, 6), d);
@@ -134,15 +158,14 @@ class RawDecoder {
 }
 
 /** run job j (its inputs are in the shared buffer) into lq */
-function runJob(sh: Shared, ctx: FrontCtx, rd: RawDecoder, lq: Growable, j: number, again = false): void {
+function runJob(sh: Shared, ctx: FrontCtx, rd: RawDecoder, xv: XfView, lq: Growable, j: number, again = false): void {
   const J = sh.jobs, b = (j % sh.cfg.maxJobs) * JW;
   const np = J[b + J_NPRIMS], pa = J[b + J_PRIMS];
   const prims: { type: number; base: number; count: number }[] = [];
   for (let i = 0; i < np; i++) prims.push({ type: sh.inI[pa + 3 * i], base: sh.inI[pa + 3 * i + 1], count: sh.inI[pa + 3 * i + 2] });
-  const slot = J[b + J_XF];
-  const regs: FrontRegs = { bp: sh.inU.subarray(J[b + J_BP], J[b + J_BP] + 256), xf: sh.xf.subarray(slot * XF_SIZE, (slot + 1) * XF_SIZE) };
+  const regs: FrontRegs = { bp: sh.inU.subarray(J[b + J_BP], J[b + J_BP] + 256), xf: xv.at(sh, J[b + J_XFGEN], J[b + J_XF]) };
   if (J[b + J_KIND] === 1) {
-    const vd = rd.decode(sh, b);
+    const vd = rd.decode(sh, b, regs.xf);
     // (the memory mirror may change from here on: gl.ts waits for this count before it writes the mirror; a job made again is counted once)
     if (!again) Atomics.add(sh.ctl, C_DECODED, 1);
     lq.n = 0;
@@ -171,8 +194,8 @@ const zTmp = new Float32Array(3);
 
 /** run job j on this thread and leave its words in the output area, and their tile entries (bin.ts, the triangles' texel offsets in the
  *  output area: a pass's data starts with the output area) in the entry area */
-function doJob(sh: Shared, ctx: FrontCtx, rd: RawDecoder, lq: Growable, le: Entries, j: number): void {
-  runJob(sh, ctx, rd, lq, j);
+function doJob(sh: Shared, ctx: FrontCtx, rd: RawDecoder, xv: XfView, lq: Growable, le: Entries, j: number): void {
+  runJob(sh, ctx, rd, xv, lq, j);
   const J = sh.jobs, b = (j % sh.cfg.maxJobs) * JW;
   const len = lq.n;
   const off = len ? Atomics.add(sh.ctl, C_OUT, len) : 0;
@@ -205,13 +228,13 @@ function claim(sh: Shared): number {
 /** the worker thread's loop (frontworker.ts) */
 export function workerMain(sab: SharedArrayBuffer, cfg: PoolConfig, memSab: SharedArrayBuffer): void {
   const sh = new Shared(sab, cfg, memSab);
-  const ctx = new FrontCtx(), rd = new RawDecoder(), lq = new Growable(), le = new Entries();
+  const ctx = new FrontCtx(), rd = new RawDecoder(), xv = new XfView(), lq = new Growable(), le = new Entries();
   Atomics.add(sh.ctl, C_STARTED, 1);
   let idle = 0;
   for (;;) {
     if (Atomics.load(sh.ctl, C_STOP)) return;
     const j = claim(sh);
-    if (j >= 0) { doJob(sh, ctx, rd, lq, le, j); Atomics.add(sh.ctl, C_WJOBS, 1); idle = 0; continue; }
+    if (j >= 0) { doJob(sh, ctx, rd, xv, lq, le, j); Atomics.add(sh.ctl, C_WJOBS, 1); idle = 0; continue; }
     // draws come a few tens of microseconds apart: look for the next one for a moment before sleeping (a sleeping worker costs the main thread a wake-up call)
     if (++idle < 3000) continue;
     Atomics.add(sh.ctl, C_SLEEPERS, 1);
@@ -227,6 +250,7 @@ export class FrontPool {
   private workers: Worker[] = [];
   private ctx = new FrontCtx();
   private rd = new RawDecoder();
+  private xv = new XfView();
   private lq = new Growable();
   private le = new Entries();
   /** raw jobs published (C_DECODED counts those decoded) */
@@ -235,9 +259,15 @@ export class FrontPool {
   private base = 0;
   private tail = 0;
   private inUsed = 0;
-  private xfUsed = 0;
+  /** the XF base published for this drain's jobs (gen), the regs it is of, its log's end, and the version that end is at */
+  private xfGen = 0;
+  private xfBased = false;
+  private xfRegs: XfRegs | null = null;
+  private xfLogN = 0;
   private xfVersion = -1;
-  private xfSlot = -1;
+  /** the inputs' last BP and CP copies (a job whose registers are the same names them again) */
+  private bpAt = -1;
+  private cpAt = -1;
   /** the depth plane the last merged job left (for draws that run on the main thread), when there was one */
   zPlane: Float32Array | null = null;
   /** set by `drain` when a merged job left a depth plane (`zPlane`); the caller clears it */
@@ -287,20 +317,64 @@ export class FrontPool {
   /** whether jobs are outstanding */
   get busy(): boolean { return this.tail > this.base; }
 
+  /** the XF unit as the next job sees it: the base (after a drain, or for other registers) or the log of the ranges loaded since */
+  private publishXf(regs: XfRegs, onFull: () => void): void {
+    const sh = this.sh;
+    if (this.xfBased && (regs !== this.xfRegs || regs.xfLogLost)) this.rebase(onFull);
+    if (!this.xfBased) {
+      sh.xfBase.set(regs.xf.subarray(0, XF_SIZE));
+      this.xfGen++; this.xfLogN = 0; this.xfBased = true; this.xfRegs = regs;
+      regs.xfLog = regs.xfLog ?? []; regs.xfLog.length = 0; regs.xfLogLost = false;
+      this.xfVersion = regs.xfVersion;
+      return;
+    }
+    if (regs.xfVersion === this.xfVersion) return;
+    const R = regs.xfLog!, L = sh.xfLog;
+    let need = 0;
+    for (let i = 0; i < R.length; i += 2) need += 2 + R[i + 1];
+    if (this.xfLogN + need > sh.cfg.xfLogWords) { this.rebase(onFull); this.publishXf(regs, onFull); return; }
+    let w = this.xfLogN;
+    for (let i = 0; i < R.length; i += 2) {
+      const a = R[i], n = Math.min(R[i + 1], XF_SIZE - a);
+      if (n <= 0) continue;
+      L[w] = a; L[w + 1] = n; L.set(regs.xf.subarray(a, a + n), w + 2);
+      w += 2 + n;
+    }
+    this.xfLogN = w;
+    R.length = 0;
+    this.xfVersion = regs.xfVersion;
+  }
+
+  /** the next job gets a new XF base: the jobs published are drained first (they read the one there) */
+  private rebase(onFull: () => void): void {
+    if (this.busy) onFull();
+    if (this.busy) throw new Error("the XF base would change under published jobs");
+    this.xfBased = false;
+  }
+
+  /** 256 register words into the inputs, or the last copy's place when they are the same words */
+  private regsAt(src: Uint32Array, last: number): number {
+    const I = this.sh.inU;
+    if (last >= 0) {
+      let same = true;
+      for (let i = 0; i < 256; i++) if (I[last + i] !== src[i]) { same = false; break; }
+      if (same) return last;
+    }
+    const at = this.inUsed;
+    I.set(src.subarray(0, 256), at);
+    this.inUsed = at + 256;
+    return at;
+  }
+
   /** publish a draw; `onFull` drains when the buffer is full */
-  submit(regs: { bp: Uint32Array; xf: Uint32Array; xfVersion: number }, vd: VertexData, prims: { type: number; base: number; count: number }[], st: number, onFull: () => void): void {
+  submit(regs: XfRegs & { bp: Uint32Array }, vd: VertexData, prims: { type: number; base: number; count: number }[], st: number, onFull: () => void): void {
     const sh = this.sh, n = vd.n;
     const [lo, hi] = layoutBits(vd.layout);
     const need = 256 + 3 * prims.length + plan(lo, hi, n, 0).end;
-    if (this.tail - this.base >= sh.cfg.maxJobs || this.inUsed + need > sh.cfg.inWords || this.xfUsed >= sh.cfg.xfSlots) onFull();
-    if (this.xfSlot < 0 || this.xfVersion !== regs.xfVersion) {
-      this.xfSlot = this.xfUsed++;
-      sh.xf.set(regs.xf.subarray(0, XF_SIZE), this.xfSlot * XF_SIZE);
-      this.xfVersion = regs.xfVersion;
-    }
+    if (this.tail - this.base >= sh.cfg.maxJobs || this.inUsed + need > sh.cfg.inWords) onFull();
+    this.publishXf(regs, onFull);
+    const bpAt = this.bpAt = this.regsAt(regs.bp, this.bpAt);
     let w = this.inUsed;
-    const bpAt = w;
-    sh.inU.set(regs.bp.subarray(0, 256), w); w += 256;
     const primAt = w;
     for (let i = 0; i < prims.length; i++) { sh.inI[w++] = prims[i].type; sh.inI[w++] = prims[i].base; sh.inI[w++] = prims[i].count; }
     const vAt = w;
@@ -316,7 +390,7 @@ export class FrontPool {
     }
     this.inUsed = p.end;
     const J = sh.jobs, b = (this.tail % sh.cfg.maxJobs) * JW;
-    J[b + J_LAY0] = lo; J[b + J_LAY1] = hi; J[b + J_XF] = this.xfSlot; J[b + J_BP] = bpAt; J[b + J_NV] = n; J[b + J_VOFF] = vAt;
+    J[b + J_LAY0] = lo; J[b + J_LAY1] = hi; J[b + J_XF] = this.xfLogN; J[b + J_XFGEN] = this.xfGen; J[b + J_BP] = bpAt; J[b + J_NV] = n; J[b + J_VOFF] = vAt;
     J[b + J_PRIMS] = primAt; J[b + J_NPRIMS] = prims.length; J[b + J_ST] = st; J[b + J_OVER] = 0; J[b + J_OUTLEN] = 0; J[b + J_ZFLAG] = 0;
     J[b + J_KIND] = 0;
     this.tail++;
@@ -328,20 +402,14 @@ export class FrontPool {
   /** publish a draw whose vertices are still the command bytes (`segs`: the command's bytes, the offset of its first vertex, its vertex
    *  count, for each draw command of the run; `size` bytes a vertex): the thread that runs it decodes them (RawDecoder), reading the
    *  memory mirror for the indexed attributes. `onFull` drains when the buffer is full. */
-  submitRaw(regs: { bp: Uint32Array; xf: Uint32Array; xfVersion: number; cp: Uint32Array }, vat: number, size: number, n: number, segs: (Uint8Array | number)[], prims: { type: number; base: number; count: number }[], st: number, onFull: () => void): void {
+  submitRaw(regs: XfRegs & { bp: Uint32Array; cp: Uint32Array }, vat: number, size: number, n: number, segs: (Uint8Array | number)[], prims: { type: number; base: number; count: number }[], st: number, onFull: () => void): void {
     const sh = this.sh;
     const need = 512 + 3 * prims.length + ((n * size + 3) >> 2);
-    if (this.tail - this.base >= sh.cfg.maxJobs || this.inUsed + need > sh.cfg.inWords || this.xfUsed >= sh.cfg.xfSlots) onFull();
-    if (this.xfSlot < 0 || this.xfVersion !== regs.xfVersion) {
-      this.xfSlot = this.xfUsed++;
-      sh.xf.set(regs.xf.subarray(0, XF_SIZE), this.xfSlot * XF_SIZE);
-      this.xfVersion = regs.xfVersion;
-    }
+    if (this.tail - this.base >= sh.cfg.maxJobs || this.inUsed + need > sh.cfg.inWords) onFull();
+    this.publishXf(regs, onFull);
+    const bpAt = this.bpAt = this.regsAt(regs.bp, this.bpAt);
+    const cpAt = this.cpAt = this.regsAt(regs.cp, this.cpAt);
     let w = this.inUsed;
-    const bpAt = w;
-    sh.inU.set(regs.bp.subarray(0, 256), w); w += 256;
-    const cpAt = w;
-    sh.inU.set(regs.cp.subarray(0, 256), w); w += 256;
     const primAt = w;
     for (let i = 0; i < prims.length; i++) { sh.inI[w++] = prims[i].type; sh.inI[w++] = prims[i].base; sh.inI[w++] = prims[i].count; }
     const vAt = w;
@@ -354,7 +422,7 @@ export class FrontPool {
     }
     this.inUsed = (o + 3) >> 2;
     const J = sh.jobs, b = (this.tail % sh.cfg.maxJobs) * JW;
-    J[b + J_LAY0] = vat; J[b + J_LAY1] = 0; J[b + J_XF] = this.xfSlot; J[b + J_BP] = bpAt; J[b + J_NV] = n; J[b + J_VOFF] = vAt;
+    J[b + J_LAY0] = vat; J[b + J_LAY1] = 0; J[b + J_XF] = this.xfLogN; J[b + J_XFGEN] = this.xfGen; J[b + J_BP] = bpAt; J[b + J_NV] = n; J[b + J_VOFF] = vAt;
     J[b + J_PRIMS] = primAt; J[b + J_NPRIMS] = prims.length; J[b + J_ST] = st; J[b + J_OVER] = 0; J[b + J_OUTLEN] = 0; J[b + J_ZFLAG] = 0;
     J[b + J_KIND] = 1; J[b + J_CP] = cpAt;
     this.rawSubmitted++;
@@ -373,7 +441,7 @@ export class FrontPool {
       this.stats.memWaits++;
       while (Atomics.load(sh.ctl, C_DECODED) < this.rawSubmitted) {
         const j = claim(sh);
-        if (j >= 0) { doJob(sh, this.ctx, this.rd, this.lq, this.le, j); this.stats.mainJobs++; }
+        if (j >= 0) { doJob(sh, this.ctx, this.rd, this.xv, this.lq, this.le, j); this.stats.mainJobs++; }
       }
       this.stats.memWaitMs += performance.now() - t0;
     }
@@ -381,7 +449,7 @@ export class FrontPool {
     // (a raw job that has not finished may still find the output area full: wait for every job, then let the caller drain)
     while (Atomics.load(sh.ctl, C_DONE) < this.tail) {
       const j = claim(sh);
-      if (j >= 0) { doJob(sh, this.ctx, this.rd, this.lq, this.le, j); this.stats.mainJobs++; }
+      if (j >= 0) { doJob(sh, this.ctx, this.rd, this.xv, this.lq, this.le, j); this.stats.mainJobs++; }
     }
     return true;
   }
@@ -405,7 +473,7 @@ export class FrontPool {
     this.stats.jobs += target - this.base;
     for (;;) {
       const j = claim(sh);
-      if (j >= 0) { doJob(sh, this.ctx, this.rd, this.lq, this.le, j); this.stats.mainJobs++; continue; }
+      if (j >= 0) { doJob(sh, this.ctx, this.rd, this.xv, this.lq, this.le, j); this.stats.mainJobs++; continue; }
       if (Atomics.load(sh.ctl, C_DONE) >= target) break;
     }
     const t1 = performance.now();
@@ -414,7 +482,7 @@ export class FrontPool {
       const b = (j % sh.cfg.maxJobs) * JW;
       if (sh.jobs[b + J_OVER]) {
         // the output area was full: run it again here (its inputs are still in the buffer)
-        runJob(sh, this.ctx, this.rd, this.lq, j, true);
+        runJob(sh, this.ctx, this.rd, this.xv, this.lq, j, true);
         words(this.lq.words.subarray(0, this.lq.n));
         if (zInfo.wrote) { this.zPlane = this.zPlane ?? new Float32Array(3); getLastZ(this.zPlane); this.zFresh = true; }
       } else {
@@ -425,7 +493,7 @@ export class FrontPool {
     }
     this.stats.mergeMs += performance.now() - t1;
     this.base = target;
-    this.inUsed = 0; this.xfUsed = 0; this.xfSlot = -1;
+    this.inUsed = 0; this.xfBased = false; this.bpAt = -1; this.cpAt = -1;
     Atomics.store(sh.ctl, C_RAWOVER, 0);
   }
 }

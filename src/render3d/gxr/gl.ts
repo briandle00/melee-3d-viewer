@@ -102,6 +102,12 @@ export class GxGl implements GxBackend {
   private stateRanges: number[][] = [];
   private lastStateVersion = [-1, -1, -1];
   private lastState = 0;
+  /** what the last state was made from beyond the versions: the registers, their BP content counter, TMEM's version, and the XF
+   *  words the state holds (0x1040 to 0x1047, then 0x101a) */
+  private lastStateRegs: GxRegs | null = null;
+  private lastBpContent = -1;
+  private lastTmem = -1;
+  private lastStateXf = new Uint32Array(9);
   private palMap = new Map<Uint8Array, number>();
   private palNext = 0;
   private attached: Memory | null = null;
@@ -426,6 +432,7 @@ export class GxGl implements GxBackend {
     this.stateCount = 0; this.stateUploaded = 0; this.states.n = 0;
     this.stateIndex.clear(); this.stateRanges = []; this.stateFeatures = [];
     this.lastStateVersion = [-1, -1, -1];
+    this.lastStateRegs = null;
   }
 
   /** the state index for the registers now (queued draws share it until a register changes) */
@@ -458,6 +465,13 @@ export class GxGl implements GxBackend {
     if (this.stateCount > 20000) { this.flush(); this.palMap.clear(); this.palNext = 0; this.resetStates(); }
     const tv = regs.tmemVersion;
     if (this.lastStateVersion[0] === regs.bpVersion && this.lastStateVersion[1] === regs.xfVersion && this.lastStateVersion[2] === tv) return this.lastState;
+    // (registers loaded again with the values they had: the same state)
+    const X = regs.xf, LX = this.lastStateXf;
+    if (this.lastStateRegs === regs && this.lastBpContent === regs.bpContent && this.lastTmem === tv && X[0x101a] === LX[8] && X[0x1040] === LX[0] && X[0x1041] === LX[1] &&
+        X[0x1042] === LX[2] && X[0x1043] === LX[3] && X[0x1044] === LX[4] && X[0x1045] === LX[5] && X[0x1046] === LX[6] && X[0x1047] === LX[7]) {
+      this.lastStateVersion[0] = regs.bpVersion; this.lastStateVersion[1] = regs.xfVersion;
+      return this.lastState;
+    }
     const w = this.wScratch;
     w.fill(0);
     w.set(regs.bp);
@@ -508,6 +522,9 @@ export class GxGl implements GxBackend {
     }
     this.lastStateVersion = [regs.bpVersion, regs.xfVersion, tv];
     this.lastState = found;
+    this.lastStateRegs = regs; this.lastBpContent = regs.bpContent; this.lastTmem = tv;
+    for (let i = 0; i < 8; i++) LX[i] = X[0x1040 + i];
+    LX[8] = X[0x101a];
     return found;
   }
 
