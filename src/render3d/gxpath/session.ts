@@ -4,7 +4,7 @@
  * the frame shown.
  *
  * Seeking (when the module can restart its stream and the renderer can be reset; otherwise the match is started again and played forward
- * through the renderer without drawing), as the app's player does (zekku gxplayer/engine.ts): going far forward steps the simulator alone,
+ * through the renderer without drawing), as a host app's player may do: going far forward steps the simulator alone,
  * then starts the stream again LEAD rows before the target (msl_gxw_restart_stream: every register file and memory block sent again) on
  * the renderer started fresh, and draws those rows, so the screens that show the game's own earlier pictures are as the game had them.
  * Going back rewinds the module to a checkpoint: the memory pages the match changed since its first row (64 KiB pages, a hash each),
@@ -45,7 +45,7 @@ export interface SessionBackend extends GxBackend {
 
 export interface GameFiles { names: string[]; files: Map<string, Uint8Array> }
 
-/** rows drawn before a sought row when the stream starts again there (the app's engine.ts LEAD) */
+/** rows drawn before a sought row when the stream starts again there (as a host app's player draws them) */
 export const SEEK_LEAD = 30;
 /** a seek this close ahead is played and drawn */
 const NEAR = SEEK_LEAD + 6;
@@ -208,7 +208,7 @@ export class GxSession {
     }
   }
 
-  // ---- checkpoints and the stream started again (the app's engine.ts) ----
+  // ---- checkpoints and the stream started again ----
 
   private get wasm(): SeekWasm | null { return (this.core?.mod as unknown as SeekWasm) ?? null; }
   /** the module has the calls and the renderer can start fresh: seeks rewind and restart the stream */
