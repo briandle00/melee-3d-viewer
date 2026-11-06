@@ -1,7 +1,15 @@
 /* A replay played through the game's own draw path: the simulator's graphics build steps the match and runs the game's display pass
  * (core.ts), and the GX renderer (gxr/) draws the stream it hands back. This holds the two together and keeps their order:
  * row i of the tape is stepped, its stream and new memory go to the renderer, and the picture that frame copies to the screen is
- * the frame shown. Seeking back starts the match again (the simulator has no way back) and plays forward without drawing.
+ * the frame shown.
+ *
+ * Seeking (when the module can restart its stream and the renderer can be reset; otherwise the match is started again and played forward
+ * through the renderer without drawing), as the app's player does (zekku gxplayer/engine.ts): going far forward steps the simulator alone,
+ * then starts the stream again LEAD rows before the target (msl_gxw_restart_stream: every register file and memory block sent again) on
+ * the renderer started fresh, and draws those rows, so the screens that show the game's own earlier pictures are as the game had them.
+ * Going back rewinds the module to a checkpoint: the memory pages the match changed since its first row (64 KiB pages, a hash each),
+ * kept at the rows sought to; rewinding writes back the checkpoint's pages and, for every page changed since that it does not hold, the
+ * page as it was after the first row (kept once seen; the first rewind that needs one it does not have opens a fresh instance for it).
  *
  * The renderer is anything with gxr's GxBackend (the CPU reference, the WebGL one); its methods used here are listed in SessionBackend below.
  */
@@ -34,6 +42,17 @@ export interface SessionBackend extends GxBackend {
 }
 
 export interface GameFiles { names: string[]; files: Map<string, Uint8Array> }
+
+/** rows drawn before a sought row when the stream starts again there (the app's engine.ts LEAD) */
+export const SEEK_LEAD = 30;
+/** a seek this close ahead is played and drawn */
+const NEAR = SEEK_LEAD + 6;
+/** checkpoints kept, and rows a checkpoint serves for (none is taken within this many rows after another) */
+const KEEP = 10, SPACING = 300;
+const PAGE = 65536;
+interface Checkpoint { row: number; pages: Map<number, Uint8Array> }
+/** the module's calls the seek uses (in the builds with them) */
+interface SeekWasm { HEAPU8: Uint8Array; _msl_gxw_heap_top?: () => number; _msl_gxw_restart_stream?: () => void }
 
 /** where the frame's time went, ms (the last frame and the means since the match opened) */
 export interface FrameTimes { step: number; handoff: number; render: number }
@@ -83,6 +102,15 @@ export class GxSession {
   private picturedRow = -1;
   private closed = false;
   private firstStepped = false;
+  /** the renderer is fed the stream (false while the simulator is stepped alone, a seek on its way) */
+  private feeding = true;
+  /** page hashes after the first row (the checkpoints' baseline), the pages as they were then, the checkpoints and the rows to keep one at */
+  private base: Uint32Array | null = null;
+  private basePages = new Map<number, Uint8Array>();
+  private checkpoints: Checkpoint[] = [];
+  private marks = new Set<number>();
+  /** (the checks) rewinds, fresh instances they opened, ms spent hashing the module's memory, rows stepped without the renderer */
+  seekStats = { rewinds: 0, fresh: 0, hashMs: 0, simOnly: 0, restarts: 0 };
 
   constructor(private o: SessionOptions) {}
 
@@ -116,6 +144,10 @@ export class GxSession {
     this.firstStepped = true;
     this.gpu = new GxGpu(backend, core.initial() as unknown as Dff);
     backend.prepareMemory?.(this.gpu.mem, this.gpu.regs);
+    this.feeding = true;
+    this.checkpoints = []; this.marks.clear(); this.basePages.clear();
+    // (the checkpoints' baseline is taken at the first seek back, not here: a pass over the module's memory takes a few tenths of a second)
+    this.base = null;
     this.index = 0;
     this.diverged = null;
     this.picturedRow = -1;
@@ -126,16 +158,15 @@ export class GxSession {
   step(draw: boolean): boolean {
     const core = this.core, gpu = this.gpu;
     if (!core || !gpu || this.index >= this.frameCount) return false;
+    this.atMark();
     const i = this.index;
     const t0 = performance.now();
     if (i === 0 && this.firstStepped) this.firstStepped = false;
     else core.step(nativeRow(this.whole!, i));
     const t1 = performance.now();
     this.index = i + 1;
-    if (i > 0 && !this.diverged) {
-      const lane = differs(core.output(), this.o.tape.expected(i));
-      if (lane) this.diverged = { row: i, frame: this.o.tape.gameFrame(i), lane };
-    }
+    this.checkDiverged(i);
+    if (!this.feeding) { this.seekStats.simOnly++; return true; }
     const frame: GxFrame = { fifo: core.stream(), updates: core.updates() };
     const t2 = performance.now();
     // (frame 0 sets the registers up and draws nothing, as the reference player's first frame)
@@ -154,6 +185,136 @@ export class GxSession {
     if (t1 - t0 > T.maxStep) T.maxStep = t1 - t0;
     if (t3 - t0 > T.maxFrame) T.maxFrame = t3 - t0;
     return true;
+  }
+
+  private checkDiverged(i: number): void {
+    if (i > 0 && !this.diverged) {
+      const lane = differs(this.core!.output(), this.o.tape.expected(i));
+      if (lane) this.diverged = { row: i, frame: this.o.tape.gameFrame(i), lane };
+    }
+  }
+
+  // ---- checkpoints and the stream started again (the app's engine.ts) ----
+
+  private get wasm(): SeekWasm | null { return (this.core?.mod as unknown as SeekWasm) ?? null; }
+  /** the module has the calls and the renderer can start fresh: seeks rewind and restart the stream */
+  private get canRewind(): boolean { const m = this.wasm; return !!m && !!m._msl_gxw_heap_top && !!m._msl_gxw_restart_stream && !!this.backend?.reset; }
+
+  /** a hash of each 64 KiB page of the module's memory up to its heap top (four FNV-1a chains over the words in turn, for speed) */
+  private hashes(): Uint32Array {
+    const t0 = performance.now();
+    const m = this.wasm!, top = m._msl_gxw_heap_top!(), n = Math.ceil(top / PAGE), out = new Uint32Array(n);
+    // (whole pages: a page is kept and written back whole)
+    const u32 = new Uint32Array(m.HEAPU8.buffer, 0, Math.min(n * (PAGE / 4), m.HEAPU8.length >> 2));
+    const P = 16777619;
+    for (let p = 0; p < n; p++) {
+      let h0 = 2166136261, h1 = 0x01000193, h2 = 0x9e3779b9, h3 = 0x85ebca6b;
+      const a = p * (PAGE / 4), end = Math.min(a + PAGE / 4, u32.length);
+      let i = a;
+      for (; i + 3 < end; i += 4) { h0 = Math.imul(h0 ^ u32[i], P); h1 = Math.imul(h1 ^ u32[i + 1], P); h2 = Math.imul(h2 ^ u32[i + 2], P); h3 = Math.imul(h3 ^ u32[i + 3], P); }
+      for (; i < end; i++) h0 = Math.imul(h0 ^ u32[i], P);
+      out[p] = Math.imul(h0 ^ (h1 >>> 7 | h1 << 25), P) ^ Math.imul(h2 ^ (h3 >>> 13 | h3 << 19), 0x27d4eb2d);
+    }
+    this.seekStats.hashMs += performance.now() - t0;
+    return out;
+  }
+  private changed(now: Uint32Array): number[] {
+    const out: number[] = [], b = this.base!;
+    for (let p = 0; p < now.length; p++) if (p >= b.length || now[p] !== b[p]) out.push(p);
+    return out;
+  }
+  private page(p: number): Uint8Array { const h = this.wasm!.HEAPU8; return h.slice(p * PAGE, Math.min((p + 1) * PAGE, h.length)); }
+
+  /** keep a checkpoint at row `row` (before it is stepped) when the match gets there */
+  private markAt(row: number): void {
+    const near = (r: number) => r <= row && r > row - SPACING;
+    if (this.base && row >= 1 && !this.checkpoints.some((c) => near(c.row)) && ![...this.marks].some(near)) this.marks.add(row);
+  }
+  private atMark(): void { if (this.marks.delete(this.index)) this.checkpoint(); }
+  /** keep the state before row `index` (the next to step) as a checkpoint */
+  private checkpoint(): void {
+    if (!this.base || this.checkpoints.some((c) => c.row === this.index)) return;
+    const pages = new Map<number, Uint8Array>();
+    for (const p of this.changed(this.hashes())) pages.set(p, this.page(p));
+    this.checkpoints.push({ row: this.index, pages });
+    this.checkpoints.sort((a, b) => a.row - b.row);
+    while (this.checkpoints.length > KEEP) this.checkpoints.splice(Math.floor(Math.random() * this.checkpoints.length), 1);
+  }
+
+  /** the module back to a checkpoint (null: the state after the first row); the renderer is not fed until the stream starts again */
+  private async rewind(c: Checkpoint | null): Promise<void> {
+    this.seekStats.rewinds++;
+    const now = this.changed(this.hashes());
+    const want = c ? c.pages : new Map<number, Uint8Array>();
+    const need = now.filter((p) => !want.has(p) && !this.basePages.has(p));
+    if (need.length) {
+      // pages this instance changed that were never seen as they started: a fresh instance has them
+      this.seekStats.fresh++;
+      const fresh = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), this.o.files.files);
+      fresh.openMatch(this.whole!, this.o.files.names, this.playback);
+      fresh.step(nativeRow(this.whole!, 0));
+      if (this.closed) { fresh.destroy(); return; }
+      const h = (fresh.mod as unknown as SeekWasm).HEAPU8;
+      for (const p of need) this.basePages.set(p, h.slice(p * PAGE, Math.min((p + 1) * PAGE, h.length)));
+      this.core!.destroy();
+      this.core = fresh;
+      for (const [p, bytes] of want) h.set(bytes, p * PAGE);
+    } else {
+      const h = this.wasm!.HEAPU8;
+      for (const p of now) if (!want.has(p)) h.set(this.basePages.get(p)!, p * PAGE);
+      for (const [p, bytes] of want) h.set(bytes, p * PAGE);
+    }
+    this.index = c ? c.row : 1;
+    this.firstStepped = false;
+    this.feeding = false;
+  }
+
+  /** the stream starts again at the next row, on the renderer started fresh (that row sets it up and is not drawn) */
+  private restartFeed(): void {
+    this.atMark();
+    this.seekStats.restarts++;
+    this.wasm!._msl_gxw_restart_stream!();
+    const i = this.index;
+    this.core!.step(nativeRow(this.whole!, i));
+    this.index = i + 1;
+    this.checkDiverged(i);
+    this.feedHere();
+  }
+
+  /** the renderer started fresh on the stream of the row the module last stepped (not drawn) */
+  private feedHere(): void {
+    const b = this.backend!;
+    b.reset!();
+    this.gpu = new GxGpu(b, this.core!.initial() as unknown as Dff);
+    b.prepareMemory?.(this.gpu.mem, this.gpu.regs);
+    b.drawing = false;
+    b.fastForward = false;
+    this.gpu.runFrame({ fifo: this.core!.stream(), updates: this.core!.updates() });
+    this.feeding = true;
+  }
+
+  /** Before showing row `row` behind the match (needsRestart): the module back to the latest checkpoint at or before row - SEEK_LEAD
+   *  (the first row's state when none), or, without checkpoints, the match started again */
+  async rewindFor(row: number): Promise<void> {
+    if (!this.core || !this.canRewind) { await this.start(); return; }
+    if (!this.base) {
+      // the first seek back: the match started again (a fresh instance, its first row stepped) is the baseline; the pages this instance
+      // had changed by now are kept as they are there (the pages a rewind writes back are mostly these)
+      const old = this.hashes();
+      await this.start();
+      if (this.closed || !this.core) return;
+      const b = this.base = this.hashes(), len = this.wasm!.HEAPU8.length;
+      for (let p = 0; p < Math.max(old.length, b.length) && p * PAGE < len; p++) if (old[p] !== b[p]) this.basePages.set(p, this.page(p));
+      this.markAt(row - SEEK_LEAD);
+      return;
+    }
+    const from = row - SEEK_LEAD;
+    const c = [...this.checkpoints].reverse().find((k) => k.row <= Math.max(1, from)) ?? null;
+    await this.rewind(c);
+    if (this.closed) return;
+    // (back at the first rows: the stream from its start again, as when the match opened - row 0 is the hand-over and draws nothing)
+    if (!c && row <= NEAR) { this.feedHere(); this.picturedRow = -1; }
+    this.markAt(from);
   }
 
   /** read pictures back (or not) from now on: the backend's onPicture is set or cleared at once */
@@ -179,6 +340,19 @@ export class GxSession {
   seekStep(row: number, budgetMs = 8, tail = 2): boolean {
     const end = Math.min(row, this.frameCount - 1);
     const t0 = performance.now();
+    if (this.canRewind && this.core) {
+      // (far ahead: a checkpoint here when the match gets there, so going back near here is a rewind)
+      if (this.feeding && end - this.index > NEAR) this.markAt(end - SEEK_LEAD);
+      while (this.index <= end) {
+        if (!this.feeding) {
+          if (this.index < end - SEEK_LEAD) this.step(false);
+          else this.restartFeed();
+        } else if (end - this.index > NEAR) { this.feeding = false; continue; }
+        else this.step(this.index > end - Math.max(tail, SEEK_LEAD));
+        if (performance.now() - t0 > budgetMs && this.index <= end) return false;
+      }
+      return true;
+    }
     while (this.index <= end) {
       this.step(this.index > end - tail);
       if (performance.now() - t0 > budgetMs && this.index <= end) return false;
@@ -190,6 +364,9 @@ export class GxSession {
   needsRestart(row: number): boolean {
     return row < this.index - 1 || !this.core;
   }
+
+  /** (the checks) checkpoints kept and their pages, MiB, with the first row's pages kept */
+  get checkpointMiB(): number { let n = 0; for (const c of this.checkpoints) for (const b of c.pages.values()) n += b.length; for (const b of this.basePages.values()) n += b.length; return n / 1048576; }
 
   /** the whole tape of drive choice d: its config, every row, the trailers; played back `mode`, for a recording without raw C-stick bytes
    *  in playback original, the raw bytes the simulator's fit chooses for that choice (cfit.ts; made once per choice) */

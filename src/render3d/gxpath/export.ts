@@ -170,11 +170,12 @@ export async function exportMp4(o: ExportOptions): Promise<ExportResult> {
     const keyEvery = Math.round(o.fps * 2);
     for (let i = 0; i < total; i++) {
       if (i > 0 && !(await o.next())) repeated++;
-      composer.draw(o.source);
-      o.onComposed?.(composer.canvas, i);
+      // (at 1x without a TV the picture is the frame as it is: taken from the source itself, nothing drawn between)
+      const direct = o.scale === 1 && !o.tv && !o.onComposed;
+      if (!direct) { composer.draw(o.source); o.onComposed?.(composer.canvas, i); }
       // one row, one frame: frame i at i / fps seconds
       const ts = Math.round((i * 1e6) / o.fps), next = Math.round(((i + 1) * 1e6) / o.fps);
-      const frame = new VideoFrame(composer.canvas, { timestamp: ts, duration: next - ts });
+      const frame = new VideoFrame(direct ? o.source : composer.canvas, { timestamp: ts, duration: next - ts });
       encoder.encode(frame, { keyFrame: i % keyEvery === 0 });
       frame.close();
       // (as fast as the encoder takes them, a few frames ahead at most; the page let in now and then)

@@ -19,12 +19,18 @@ export interface GpuEvent {
 /** what the processor needs of a renderer: the draws and the copies. `prims` lists the draw commands of the run, in order
  *  (the primitive type of the opcode, the first vertex and the vertex count); registers are what they were for all of them. */
 export interface GxBackend {
-  draw(regs: GxRegs, mem: Memory, vd: VertexData, tris: number[], lines: number[], points: number[], prims: { type: number; base: number; count: number }[]): void;
+  draw(regs: GxRegs, mem: Memory, vd: VertexData, tris: number[], lines: number[], points: number[], prims: { type: number; base: number; count: number }[], raw?: RawRun | null): void;
   copy(regs: GxRegs, mem: Memory, value: number): { toXfb: boolean; rect: number[]; clear: boolean };
   copyClear(regs: GxRegs): void;
 }
 
 const EMPTY: number[] = [];
+
+/** A run whose vertices were not decoded (the backend asked for it: `rawVertices`): `vd` is set up for the layout and holds no vertices;
+ *  `segs` are the draw commands' vertex bytes (the buffer, the offset of the first vertex, the vertex count, for each command), `n` the
+ *  vertices in all. `decode()` decodes them into `vd` as an ordinary run would have (the memory as it is now: call it before the run's
+ *  draw returns). A memory write inside a run decodes the run's vertices so far first, so the bytes are always read as they were sent. */
+export interface RawRun { vat: number; size: number; n: number; segs: (Uint8Array | number)[]; decode(): void }
 
 export class GxGpu {
   regs: GxRegs;
@@ -40,7 +46,7 @@ export class GxGpu {
   private cpVersion = 0;
   private layouts = new Map<number, { v: number; l: VertexLayout; w0: number; w1: number; w2: number; w3: number; w4: number }>();
   private vd = new VertexData(null as never);
-  private run: { vd: VertexData; tris: number[]; lines: number[]; points: number[]; prims: { type: number; base: number; count: number }[] } | null = null;
+  private run: { vd: VertexData; tris: number[]; lines: number[]; points: number[]; prims: { type: number; base: number; count: number }[]; raw: RawRun | null } | null = null;
 
   constructor(readonly renderer: GxBackend, init: GxInitial, mem1?: Uint8Array | null) {
     this.regs = new GxRegs(init.bp, init.cp, init.xfMem, init.xfRegs);
@@ -83,7 +89,22 @@ export class GxGpu {
     if (!r) return;
     this.run = null;
     this.drawCount++;
-    this.renderer.draw(this.regs, this.mem, r.vd, r.tris, r.lines, r.points, r.prims);
+    this.renderer.draw(this.regs, this.mem, r.vd, r.tris, r.lines, r.points, r.prims, r.raw);
+  }
+
+  /** the raw run's vertices so far decoded into its VertexData (the run goes on decoded) */
+  private decodeRaw(): void {
+    const r = this.run;
+    if (!r || !r.raw) return;
+    const raw = r.raw;
+    r.raw = null;
+    this.decodeSegs(raw.segs, r.vd);
+  }
+
+  private decodeSegs(segs: (Uint8Array | number)[], vd: VertexData): void {
+    const t0 = this.measure ? performance.now() : 0;
+    for (let i = 0; i < segs.length; i += 3) vd.add(segs[i] as Uint8Array, segs[i + 1] as number, segs[i + 2] as number, this.regs.cp, this.mem.data, this.mem.view);
+    if (this.measure) this.timers.vertex += performance.now() - t0;
   }
 
   /** run one frame's commands, applying its memory writes where they were read */
@@ -91,7 +112,11 @@ export class GxGpu {
     const data = frame.fifo, ups = frame.updates;
     let ui = 0;
     const apply = (pos: number) => {
-      while (ui < ups.length && ups[ui].pos <= pos) { const t0 = this.measure ? performance.now() : 0; this.mem.write(ups[ui].addr, ups[ui].data); if (this.measure) this.timers.memory += performance.now() - t0; ui++; }
+      while (ui < ups.length && ups[ui].pos <= pos) {
+        // (a run's undecoded vertices read the memory as it was before this write)
+        if (this.run?.raw) this.decodeRaw();
+        const t0 = this.measure ? performance.now() : 0; this.mem.write(ups[ui].addr, ups[ui].data); if (this.measure) this.timers.memory += performance.now() - t0; ui++;
+      }
     };
     this.execute(data, apply);
     apply(Number.MAX_SAFE_INTEGER);
@@ -125,7 +150,18 @@ export class GxGpu {
           const dflt = [bits(xf[0x1018], 6, 6), bits(xf[0x1018], 12, 6), bits(xf[0x1018], 18, 6), bits(xf[0x1018], 24, 6),
             bits(xf[0x1019], 0, 6), bits(xf[0x1019], 6, 6), bits(xf[0x1019], 12, 6), bits(xf[0x1019], 18, 6)];
           this.vd.setup(L, bits(xf[0x1018], 0, 6), dflt);
-          run = this.run = { vd: this.vd, tris: EMPTY, lines: EMPTY, points: EMPTY, prims: [] };
+          // (a backend that decodes the vertices elsewhere gets the command bytes: frontpool.ts)
+          const raw: RawRun | null = (this.renderer as { rawVertices?: boolean }).rawVertices === true ?
+            { vat, size: L.size, n: 0, segs: [], decode: () => this.decodeSegs(raw!.segs, this.vd) } : null;
+          run = this.run = { vd: this.vd, tris: EMPTY, lines: EMPTY, points: EMPTY, prims: [], raw };
+        }
+        if (run.raw) {
+          const raw = run.raw, base = raw.n;
+          raw.segs.push(data, pos + 3, count);
+          raw.n += count;
+          run.prims.push({ type: prim, base, count });
+          pos = end;
+          continue;
         }
         const base = run.vd.n;
         const tv = this.measure ? performance.now() : 0;

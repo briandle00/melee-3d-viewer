@@ -45,6 +45,13 @@ export class GxRegs {
   xfVersion = 0;
   /** a counter bumped by every BP write (caches of derived state) */
   bpVersion = 0;
+  /** a counter bumped by every BP write that changed a register's value or a TEV bank's, and by every palette load (the BP-side
+   *  state a draw reads is the same while it holds) */
+  bpContent = 0;
+  /** the XF ranges loaded (address, count), kept when a reader asks for them by setting this (frontpool.ts); past 64 Ki numbers they are
+   *  dropped and xfLogLost set (the reader takes the whole unit again) */
+  xfLog: number[] | null = null;
+  xfLogLost = false;
 
   constructor(bp?: ArrayLike<number>, cp?: ArrayLike<number>, xfMem?: ArrayLike<number>, xfRegs?: ArrayLike<number>) {
     if (bp) for (let i = 0; i < 256 && i < bp.length; i++) this.bp[i] = bp[i] & 0xffffff;
@@ -71,11 +78,14 @@ export class GxRegs {
       // TEV color / constant color: the register's kind (bit 23) says which bank, and each bank keeps its own
       const kind = (val >>> 23) & 1;
       const bank = this.tevBank[kind];
+      const ob = bank[addr - 0xe0], op = this.bp[addr];
       bank[addr - 0xe0] = ((bank[addr - 0xe0] & ~mask) | (val & mask)) & 0xffffff;
       this.bp[addr] = (this.bp[addr] & ~mask | val & mask) & 0xffffff;
+      if (bank[addr - 0xe0] !== ob || this.bp[addr] !== op) this.bpContent++;
       return { kind: "none" };
     }
     const nv = ((this.bp[addr] & ~mask) | (val & mask)) & 0xffffff;
+    if (nv !== this.bp[addr] || addr === 0x65) this.bpContent++;
     this.bp[addr] = nv;
     if (addr === 0x65) {
       // LOADTLUT1: a palette from memory (BP 0x64: its address / 32) into TMEM
@@ -99,5 +109,10 @@ export class GxRegs {
       if (a < XF_SIZE) this.xf[a] = values[i] >>> 0;
     }
     this.xfVersion++;
+    const l = this.xfLog;
+    if (l) {
+      if (l.length >= 65536) { l.length = 0; this.xfLogLost = true; }
+      l.push(addr, values.length);
+    }
   }
 }

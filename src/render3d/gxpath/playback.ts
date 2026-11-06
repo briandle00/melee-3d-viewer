@@ -1,7 +1,7 @@
 /* Playback controls over a GxSession: play, pause, speed, pace, frame step, seek. The game runs at 60 frames a second ("60") or at the
  * console's 60000/1001 ("console"); a tick (one display frame of the page) steps and draws every row the time asks for and shows the
- * last. A seek behind the match starts it again
- * and plays forward, a slice of a tick at a time so the page stays alive; a seek ahead plays forward the same way.
+ * last. A seek behind the match rewinds it (session.ts rewindFor) and plays forward, a slice of a tick at a time so the page stays
+ * alive; a seek ahead plays forward the same way.
  */
 import type { GxSession } from "./session";
 
@@ -91,10 +91,11 @@ export class GxPlayback {
         const s = this.session;
         if (s.needsRestart(this.seeking)) {
           this.restarting = true;
-          void s.start().then(() => { this.restarting = false; this.kick(); }, (e) => { this.restarting = false; this.hooks.onError(e); });
+          void s.rewindFor(this.seeking).then(() => { this.restarting = false; this.kick(); }, (e) => { this.restarting = false; this.hooks.onError(e); });
           return;
         }
-        if (s.seekStep(this.seeking)) {
+        // (a seek has the tick to itself: most of it)
+        if (s.seekStep(this.seeking, 14)) {
           this.seeking = null;
           this.hooks.onShown?.();
           const done = this.seekDone; this.seekDone = [];

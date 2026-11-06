@@ -143,12 +143,31 @@ test("the front half gives the same words on worker threads as on one", async ()
   const pool = new FrontPool(2, () => new Worker(new URL("../src/render3d/gxr/frontworker.ts", import.meta.url), { type: "module" }));
   try {
     const got = new Growable();
-    const be = mkBackend((regs: never, vd: never, prims: never) => pool.submit(regs, vd, prims, 7, () => pool.drain((words) => { got.ensure(words.length); got.words.set(words, got.n); got.n += words.length; })));
+    // (each job's words, in draw order: from the output area, or made again when they did not fit)
+    const collect = (g: Growable) => { const add = (words: Uint32Array) => { g.ensure(words.length); g.words.set(words, g.n); g.n += words.length; }; return () => pool.drain((_e, _t, w) => add(w), add); };
+    const drainGot = collect(got);
+    const be = mkBackend((regs: never, vd: never, prims: never) => pool.submit(regs, vd, prims, 7, drainGot));
     new GxGpu(be as never, emptyDff(), null).runFrame({ fifo: stream, updates: [] });
-    pool.drain((words) => { got.ensure(words.length); got.words.set(words, got.n); got.n += words.length; });
+    drainGot();
     assert.ok(want.n > 0);
     assert.equal(got.n, want.n);
     assert.deepEqual(Array.from(got.words.subarray(0, got.n)), Array.from(want.words.subarray(0, want.n)));
+    // the same draws handed over undecoded (gpu.ts RawRun): the threads decode the command bytes, the same words come back
+    const raw = new Growable();
+    pool.resetOut();
+    const take = collect(raw);
+    let mirrored = false;
+    const rb = {
+      ...mkBackend(() => {}), rawVertices: true,
+      draw: (regs: never, mem: { data: Uint8Array }, _vd: never, _t: never, _l: never, _p: never, prims: never, r: { vat: number; size: number; n: number; segs: (Uint8Array | number)[] }) => {
+        if (!mirrored) { pool.writeMirror(mem.data, 0, mem.data.length, take); mirrored = true; }
+        pool.submitRaw(regs, r.vat, r.size, r.n, r.segs, prims, 7, take);
+      },
+    };
+    new GxGpu(rb as never, emptyDff(), null).runFrame({ fifo: stream, updates: [] });
+    take();
+    assert.equal(pool.stats.rawJobs > 0, true);
+    assert.deepEqual(Array.from(raw.words.subarray(0, raw.n)), Array.from(want.words.subarray(0, want.n)));
   } finally {
     pool.dispose();
   }
