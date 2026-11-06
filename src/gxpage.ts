@@ -387,10 +387,12 @@ async function bench(s: GxSession) {
   const gb = glBackend as unknown as import("./render3d/gxr/gl").GxGl | null;
   if (gb && q.get("measure")) { gb.measure = true; const g = gpuOf(); if (g) g.measure = true; }
   if (gb && q.get("timing")) gb.timing = true;
+  // (rows=<n>: only the first n rows after the start, for a run that times the load and the start)
+  const lastRow = q.get("rows") ? Math.min(s.frameCount, s.index + Number(q.get("rows"))) : s.frameCount;
   const t0 = performance.now();
-  while (s.index < s.frameCount) {
+  while (s.index < lastRow) {
     const t = performance.now();
-    while (performance.now() - t < 1 && s.index < s.frameCount) {
+    while (performance.now() - t < 1 && s.index < lastRow) {
       const a = performance.now();
       s.step(true);
       if (q.get("crt")) showShown(); else if (glBackend) glBackend.present();
