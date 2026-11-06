@@ -195,21 +195,8 @@ uint tAddr(MapI mp, uint i) {
 }
 uint tb(MapI mp, uint i) { return mbyte(tAddr(mp, i)); }
 
-int w3(int v) { return (v << 5) | (v << 2) | (v >> 1); }
-int w4(int v) { return v * 17; }
 int w5(int v) { return (v << 3) | (v >> 2); }
 int w6(int v) { return (v << 2) | (v >> 4); }
-
-ivec4 rgb5a3(uint v) {
-  if ((v & 0x8000u) != 0u) return ivec4(w5(bfi(v, 10, 5)), w5(bfi(v, 5, 5)), w5(bfi(v, 0, 5)), 255);
-  return ivec4(w4(bfi(v, 8, 4)), w4(bfi(v, 4, 4)), w4(bfi(v, 0, 4)), w3(bfi(v, 12, 3)));
-}
-
-ivec4 palColor(uint v, uint pf) {
-  if (pf == 0u) { int i = int(v & 255u); return ivec4(i, i, i, int(v >> 8)); }
-  if (pf == 1u) return ivec4(w5(bfi(v, 11, 5)), w6(bfi(v, 5, 6)), w5(bfi(v, 0, 5)), 255);
-  return rgb5a3(v);
-}
 
 void finfo(uint fmt, out int kw, out int kh, out uint bytes) {
   bytes = 32u;
@@ -246,20 +233,36 @@ ivec4 fetchTexel(MapI mp, uint off, int W, int s, int t) {
   if (fmt == 6u || fmt == 14u) { b2 = tb(mp, a0 + d2); b3 = tb(mp, a0 + d2 + 1u); }
   if (fmt == 14u) b4 = tb(mp, a4);
   uint v16 = (b0 << 8) | b1;
-  uint pidx = 0u;
-  bool indexed = false;
+  // the indexed formats (C4, C8, C14X2) read their palette entry, which is then decoded as the direct format it has: IA8 (palette
+  // format 0), RGB565 (1), RGB5A3 (2 and 3); one copy of each decode serves both (a D3D compiler inlines every copy, at a cost in time)
+  bool indexed = fmt == 8u || fmt == 9u || fmt == 10u;
+  if (indexed) {
+    uint pidx = fmt == 8u ? ((tx & 1) == 1 ? (b0 & 15u) : (b0 >> 4)) : (fmt == 9u ? b0 : (v16 & 0x3fffu));
+    uint pe = 0u;
+    if (mp.pal != NO_PAL && pidx * 2u + 1u < mp.palLen) pe = (mbyte(mp.pal + pidx * 2u) << 8) | mbyte(mp.pal + pidx * 2u + 1u);
+    v16 = pe;
+  }
+  uint kind = indexed ? 3u + min(mp.pf, 2u) : fmt;
   ivec4 r = ivec4(0);
-  if (fmt == 0u) { int v = w4((tx & 1) == 1 ? int(b0 & 15u) : int(b0 >> 4)); r = ivec4(v); }
-  else if (fmt == 8u) { pidx = (tx & 1) == 1 ? (b0 & 15u) : (b0 >> 4); indexed = true; }
-  else if (fmt == 1u) r = ivec4(int(b0));
-  else if (fmt == 9u) { pidx = b0; indexed = true; }
-  else if (fmt == 2u) { int i = w4(int(b0 & 15u)); r = ivec4(i, i, i, w4(int(b0 >> 4))); }
-  else if (fmt == 3u) { int i = int(b1); r = ivec4(i, i, i, int(b0)); }
-  else if (fmt == 4u) r = ivec4(w5(bfi(v16, 11, 5)), w6(bfi(v16, 5, 6)), w5(bfi(v16, 0, 5)), 255);
-  else if (fmt == 5u) r = rgb5a3(v16);
-  else if (fmt == 10u) { pidx = v16 & 0x3fffu; indexed = true; }
-  else if (fmt == 6u) r = ivec4(int(b1), int(b2), int(b3), int(b0));
-  else if (fmt == 14u) {
+  if (kind <= 3u) {
+    // I4, I8, IA4, IA8: intensity and alpha
+    int n4 = (tx & 1) == 1 ? int(b0 & 15u) : int(b0 >> 4);
+    int I = kind == 0u ? n4 * 17 : (kind == 1u ? int(b0) : (kind == 2u ? int(b0 & 15u) * 17 : int(v16 & 255u)));
+    int A = kind == 0u ? I : (kind == 1u ? int(b0) : (kind == 2u ? int(b0 >> 4) * 17 : int(v16 >> 8)));
+    r = ivec4(I, I, I, A);
+  } else if (kind <= 5u) {
+    // RGB565, RGB5A3 (opaque 555 or 4443 with alpha)
+    bool c565 = kind == 4u, opq = (v16 & 0x8000u) != 0u;
+    ivec3 c5 = ivec3(int(v16 >> 11) & 31, int(v16 >> 5) & 63, int(v16) & 31);
+    ivec3 c555 = ivec3(int(v16 >> 10) & 31, int(v16 >> 5) & 31, int(v16) & 31);
+    ivec3 c4 = ivec3(int(v16 >> 8) & 15, int(v16 >> 4) & 15, int(v16) & 15) * 17;
+    ivec3 e5 = c565 ? c5 : c555;
+    ivec3 x5 = ivec3((e5.x << 3) | (e5.x >> 2), c565 ? ((e5.y << 2) | (e5.y >> 4)) : ((e5.y << 3) | (e5.y >> 2)), (e5.z << 3) | (e5.z >> 2));
+    int a3 = int(v16 >> 12) & 7;
+    r = (c565 || opq) ? ivec4(x5, 255) : ivec4(c4, (a3 << 5) | (a3 << 2) | (a3 >> 1));
+  }
+  else if (kind == 6u) r = ivec4(int(b1), int(b2), int(b3), int(b0));
+  else if (kind == 14u) {
     uint c1 = v16, c2 = (b2 << 8) | b3;
     int sel = int((b4 >> uint(6 - 2 * (tx & 3))) & 3u);
     ivec3 a = ivec3(w5(bfi(c1, 11, 5)), w6(bfi(c1, 5, 6)), w5(bfi(c1, 0, 5)));
@@ -267,16 +270,10 @@ ivec4 fetchTexel(MapI mp, uint off, int W, int s, int t) {
     if (sel == 0) r = ivec4(a, 255);
     else if (sel == 1) r = ivec4(b, 255);
     else if (c1 > c2) {
-      ivec3 d = b - a;
-      ivec3 th = ivec3(0);
-      for (int c = 0; c < 3; c++) { uint du = uint(d[c]); th[c] = int((du >> 1) - (du >> 3)); }
+      uvec3 du = uvec3(b - a);
+      ivec3 th = ivec3((du >> 1) - (du >> 3));
       r = sel == 2 ? ivec4((a + th) & 255, 255) : ivec4((b - th) & 255, 255);
     } else r = ivec4((a + b + 1) >> 1, sel == 2 ? 255 : 0);
-  }
-  if (indexed) {
-    uint pe = 0u;
-    if (mp.pal != NO_PAL && pidx * 2u + 1u < mp.palLen) pe = (mbyte(mp.pal + pidx * 2u) << 8) | mbyte(mp.pal + pidx * 2u + 1u);
-    r = palColor(pe, mp.pf);
   }
   return r;
 }
@@ -356,7 +353,9 @@ uint planeAt(uint k, uint dx, uint dy) {
   // a plane with no slope (both differences zero) is its own constant: adding the zero products changes nothing in a finite non-zero value
   uint ex = (p.x >> 23) & 255u;
   if ((p.y & 0x7f800000u) == 0u && (p.z & 0x7f800000u) == 0u && ex != 0u && ex != 255u) return p.x;
-  return f_add(f_add(p.x, f_mul(p.y, dx)), f_mul(p.z, dy));
+  uint acc = p.x;
+  for (int i = 0; i < uK.w; i++) acc = f_add(acc, f_mul(i == 0 ? p.y : p.z, i == 0 ? dx : dy));
+  return acc;
 }
 
 // s and t of generator n at pixel (px, py)
@@ -367,11 +366,17 @@ void genST(uint n, int px, int py, out uint s, out uint t) {
   bool projective = ((S(272u) >> n) & 1u) == 1u;
   int nPlanes = projective ? uK.x : uK.x - 1;
   for (int k = 0; k < nPlanes; k++) pv[k] = planeAt(k == 0 ? 0u : 9u + n * 3u + uint(k), dx, dy);
-  uint iw = f_div(F_ONE, pv[0]);
-  uint proj = iw;
-  if (projective) {
-    uint q = f_mul(pv[3], iw);
-    proj = f_iszero(q) ? iw : f_div(iw, q);
+  // 1/w, then (projective, q not zero) (1/w) / q, through one copy of the division (a loop with a run-time bound)
+  uint iw = 0u, proj = 0u, dn = F_ONE, dd = pv[0];
+  for (int i = 0; i < uK.w; i++) {
+    uint r = f_div(dn, dd);
+    if (i == 0) {
+      iw = r; proj = r;
+      if (!projective) break;
+      uint q = f_mul(pv[3], iw);
+      if (f_iszero(q)) break;
+      dn = iw; dd = q;
+    } else proj = r;
   }
   s = f_mul(pv[1], proj);
   t = f_mul(pv[2], proj);
@@ -465,7 +470,7 @@ void indirectOffsets(uint ind, ivec4 tx, int cs, int ct, int prevS, int prevT, o
 // ---------------------------------------------------------------------------------------------------------------------
 // TEV (spec 10)
 
-int gRegs[16];
+ivec4 gR[4];     // the TEV registers (r, g, b, a): 0 PREV, 1-3 REG0-REG2
 int gKk[16];
 int gTex[4];
 int gRas[4];
@@ -538,7 +543,8 @@ bool compareCond(int mode, ivec3 A, ivec3 B, int k) {
   return A[k] == B[k];
 }
 
-int ksel8(int i) { return i == 0 ? 255 : (i == 1 ? 223 : (i == 2 ? 191 : (i == 3 ? 159 : (i == 4 ? 128 : (i == 5 ? 96 : (i == 6 ? 64 : 32)))))); }
+const int KSEL8[8] = int[8](255, 223, 191, 159, 128, 96, 64, 32);
+int ksel8(int i) { return KSEL8[i]; }
 
 ivec3 konstColor(int ks) {
   if (ks < 8) return ivec3(ksel8(ks));
@@ -555,39 +561,6 @@ int konstAlpha(int ks) {
   return gKk[k + comp];
 }
 
-ivec3 csel(int k) {
-  switch (k) {
-    case 0: return ivec3(gRegs[0], gRegs[1], gRegs[2]);
-    case 1: return ivec3(gRegs[3]);
-    case 2: return ivec3(gRegs[4], gRegs[5], gRegs[6]);
-    case 3: return ivec3(gRegs[7]);
-    case 4: return ivec3(gRegs[8], gRegs[9], gRegs[10]);
-    case 5: return ivec3(gRegs[11]);
-    case 6: return ivec3(gRegs[12], gRegs[13], gRegs[14]);
-    case 7: return ivec3(gRegs[15]);
-    case 8: return ivec3(gTex[0], gTex[1], gTex[2]);
-    case 9: return ivec3(gTex[3]);
-    case 10: return ivec3(gRas[0], gRas[1], gRas[2]);
-    case 11: return ivec3(gRas[3]);
-    case 12: return ivec3(255);
-    case 13: return ivec3(128);
-  }
-  return ivec3(0);
-}
-
-int asel(int k, int kas) {
-  switch (k) {
-    case 0: return gRegs[3];
-    case 1: return gRegs[7];
-    case 2: return gRegs[11];
-    case 3: return gRegs[15];
-    case 4: return gTex[3];
-    case 5: return gRas[3];
-    case 6: return konstAlpha(kas);
-  }
-  return 0;
-}
-
 void swz(uint t, int v[4], out int o4[4]) {
   uint w0 = S(0xf6u + 2u * t), w1 = S(0xf7u + 2u * t);
   o4[0] = v[bfi(w0, 0, 2)]; o4[1] = v[bfi(w0, 2, 2)]; o4[2] = v[bfi(w1, 0, 2)]; o4[3] = v[bfi(w1, 2, 2)];
@@ -596,8 +569,7 @@ void swz(uint t, int v[4], out int o4[4]) {
 void loadColorRegs() {
   for (uint r = 0u; r < 4u; r++) {
     uint ra = S(0xe0u + 2u * r), bg = S(0xe1u + 2u * r);
-    gRegs[int(r) * 4] = sx11(ra & 0x7ffu); gRegs[int(r) * 4 + 3] = sx11((ra >> 12) & 0x7ffu);
-    gRegs[int(r) * 4 + 2] = sx11(bg & 0x7ffu); gRegs[int(r) * 4 + 1] = sx11((bg >> 12) & 0x7ffu);
+    gR[r] = ivec4(sx11(ra & 0x7ffu), sx11((bg >> 12) & 0x7ffu), sx11(bg & 0x7ffu), sx11((ra >> 12) & 0x7ffu));
     uint ka = S(256u + 2u * r), kb = S(257u + 2u * r);
     gKk[int(r) * 4] = sx11(ka & 0x7ffu); gKk[int(r) * 4 + 3] = sx11((ka >> 12) & 0x7ffu);
     gKk[int(r) * 4 + 2] = sx11(kb & 0x7ffu); gKk[int(r) * 4 + 1] = sx11((kb >> 12) & 0x7ffu);
@@ -666,17 +638,25 @@ void fogPixel(uint fsel, int z, int x, inout ivec4 c) {
   uint Bm = S(0xefu);
   int Bs = int(S(0xf0u) & 31u);
   uint ze;
-  if (bf(S(0xf1u), 20, 1) == 0u) ze = f_div(f_mul(A, 0x4b7fffffu), f_from_int(int(Bm) - (z >> Bs)));
-  else ze = f_mul(A, f_div(f_from_int(z), 0x4b7fffffu));
+  // perspective: A * 0xffffff / (B - (z >> shift)); orthographic: A * (z / 0xffffff); through one copy of the division
+  bool persp = bf(S(0xf1u), 20, 1) == 0u;
+  uint fn = f_from_int(persp ? int(Bm) - (z >> Bs) : z);
+  uint fq = f_div(persp ? f_mul(A, 0x4b7fffffu) : fn, persp ? fn : 0x4b7fffffu);
+  ze = persp ? fq : f_mul(A, fq);
 #ifdef FOG_EXTRA
   if (bf(S(0xe8u), 10, 1) == 1u) {
     uint o = f_div(f_from_int(x - (bfi(S(0xe8u), 0, 10) - 342)), S(273u));
     uint fidx = f_sub(0x41100000u, f_mul(f_abs(o), 0x41100000u));
     fidx = f_lt(fidx, 0u) ? 0u : (f_gt(fidx, 0x41100000u) ? 0x41100000u : fidx);
     int lo = f_trunc(fidx), up = lo + 1;
-    uint wlo = S(0xe9u + uint(lo >> 1)), wup = S(0xe9u + uint(up >> 1));
-    uint Klo = f_mul(f_div(f_from_int(int((lo & 1) == 1 ? (wlo & 0xfffu) : ((wlo >> 12) & 0xfffu))), 0x43800000u), 0x40800000u);
-    uint Kup = f_mul(f_div(f_from_int(int((up & 1) == 1 ? (wup & 0xfffu) : ((wup >> 12) & 0xfffu))), 0x43800000u), 0x40800000u);
+    // the table's entries at lo and up, through one copy (a loop with a run-time bound)
+    uint Kv[2];
+    for (int j = 0; j < uK.w; j++) {
+      int li = lo + j;
+      uint wj = S(0xe9u + uint(li >> 1));
+      Kv[j] = f_mul(f_div(f_from_int(int((li & 1) == 1 ? (wj & 0xfffu) : ((wj >> 12) & 0xfffu))), 0x43800000u), 0x40800000u);
+    }
+    uint Klo = Kv[0], Kup = Kv[1];
     uint factor = f_sub(f_from_int(up), fidx);
     uint k = f_add(f_mul(Klo, factor), f_mul(Kup, f_sub(F_ONE, factor)));
     ze = f_mul(ze, f_div(f_sqrt(f_add(f_mul(o, o), f_mul(k, k))), k));
@@ -685,10 +665,15 @@ void fogPixel(uint fsel, int z, int x, inout ivec4 c) {
   ze = f_sub(ze, C);
   uint fog = f_lt(ze, 0u) ? 0u : (f_gt(ze, F_ONE) ? F_ONE : ze);
 #ifdef FOG_EXTRA
-  if (fsel == 4u) fog = f_sub(F_ONE, f_exp2(f_mul(0xc1000000u, fog)));
-  else if (fsel == 5u) fog = f_sub(F_ONE, f_exp2(f_mul(f_mul(0xc1000000u, fog), fog)));
-  else if (fsel == 6u) fog = f_exp2(f_mul(0xc1000000u, f_sub(F_ONE, fog)));
-  else if (fsel == 7u) { uint g = f_sub(F_ONE, fog); fog = f_exp2(f_mul(f_mul(0xc1000000u, g), g)); }
+  // 4: 1 - 2^(-8 fog), 5: 1 - 2^(-8 fog fog), 6: 2^(-8 (1 - fog)), 7: 2^(-8 (1 - fog) (1 - fog)); one copy of the power
+  if (fsel >= 4u) {
+    bool inv = fsel >= 6u;
+    uint g = inv ? f_sub(F_ONE, fog) : fog;
+    uint ar = f_mul(0xc1000000u, g);
+    ar = (fsel & 1u) == 1u ? f_mul(ar, g) : ar;
+    uint ex = f_exp2(ar);
+    fog = inv ? ex : f_sub(F_ONE, ex);
+  }
 #endif
   int fi = f_trunc(f_mul(fog, 0x43800000u));
   uint fc = S(0xf2u);
@@ -696,30 +681,9 @@ void fogPixel(uint fsel, int z, int x, inout ivec4 c) {
   c.rgb = (c.rgb * (256 - fi) + fr * fi) >> 8;
 }
 
+// the compare codes are their bits: 1 less, 2 equal, 4 greater (0 never, 3 less or equal, 5 not equal, 6 greater or equal, 7 always)
 bool cmpOp(uint code, int a, int b) {
-  switch (code) {
-    case 0u: return false;
-    case 1u: return a < b;
-    case 2u: return a == b;
-    case 3u: return a <= b;
-    case 4u: return a > b;
-    case 5u: return a != b;
-    case 6u: return a >= b;
-  }
-  return true;
-}
-
-int blendFactor(uint code, int self, ivec4 s, ivec4 d, bool isDst) {
-  switch (code) {
-    case 0u: return 0;
-    case 1u: return 255;
-    case 2u: return isDst ? self : self;
-    case 3u: return 255 - self;
-    case 4u: return s.a;
-    case 5u: return 255 - s.a;
-    case 6u: return d.a;
-  }
-  return 255 - d.a;
+  return ((code & 1u) != 0u && a < b) || ((code & 2u) != 0u && a == b) || ((code & 4u) != 0u && a > b);
 }
 
 ivec4 blendPixel(uint mode, uint dstAlpha, ivec4 s, ivec4 d) {
@@ -729,35 +693,21 @@ ivec4 blendPixel(uint mode, uint dstAlpha, ivec4 s, ivec4 d) {
   if (enable) {
     if (sub) r = max(ivec4(0), d - s);
     else {
-      for (int k = 0; k < 4; k++) {
-        int fs = blendFactor(sfc, d[k], s, d, false);
-        int fd = blendFactor(dfc, s[k], s, d, true);
-        fs += fs >> 7; fd += fd >> 7;
-        r[k] = min(255, (s[k] * fs + d[k] * fd) >> 8);
-      }
+      // the factors (0, 1, the other's color, one minus it, source alpha, one minus it, destination alpha, one minus it) on all four components
+      ivec4 fsv[8] = ivec4[8](ivec4(0), ivec4(255), d, 255 - d, ivec4(s.a), ivec4(255 - s.a), ivec4(d.a), ivec4(255 - d.a));
+      ivec4 fdv[8] = ivec4[8](ivec4(0), ivec4(255), s, 255 - s, ivec4(s.a), ivec4(255 - s.a), ivec4(d.a), ivec4(255 - d.a));
+      ivec4 fs = fsv[sfc], fd = fdv[dfc];
+      fs += fs >> 7; fd += fd >> 7;
+      r = min(ivec4(255), (s * fs + d * fd) >> 8);
     }
   } else if (logic) {
     uint Sw = uint(s.a) | (uint(s.b) << 8) | (uint(s.g) << 16) | (uint(s.r) << 24);
     uint Dw = uint(d.a) | (uint(d.b) << 8) | (uint(d.g) << 16) | (uint(d.r) << 24);
-    uint w;
-    switch (lop) {
-      case 0u: w = 0u; break;
-      case 1u: w = Sw & Dw; break;
-      case 2u: w = Sw & ~Dw; break;
-      case 3u: w = Sw; break;
-      case 4u: w = ~Sw & Dw; break;
-      case 5u: w = Dw; break;
-      case 6u: w = Sw ^ Dw; break;
-      case 7u: w = Sw | Dw; break;
-      case 8u: w = ~(Sw | Dw); break;
-      case 9u: w = ~(Sw ^ Dw); break;
-      case 10u: w = ~Dw; break;
-      case 11u: w = Sw | ~Dw; break;
-      case 12u: w = ~Sw; break;
-      case 13u: w = ~Sw | Dw; break;
-      case 14u: w = ~(Sw & Dw); break;
-      default: w = 0xffffffffu;
-    }
+    // the 16 operations are their truth tables: bit 0 of the code is the result where S and D are set, bit 1 S and not D, bit 2 D and
+    // not S, bit 3 neither (0 clear, 1 and, 3 copy, 5 keep, 6 xor, 7 or, 8 nor, 10 invert, 15 set, ...)
+    uint m11 = (lop & 1u) != 0u ? 0xffffffffu : 0u, m10 = (lop & 2u) != 0u ? 0xffffffffu : 0u;
+    uint m01 = (lop & 4u) != 0u ? 0xffffffffu : 0u, m00 = (lop & 8u) != 0u ? 0xffffffffu : 0u;
+    uint w = (Sw & Dw & m11) | (Sw & ~Dw & m10) | (~Sw & Dw & m01) | (~Sw & ~Dw & m00);
     r = ivec4(int(w >> 24), int((w >> 16) & 255u), int((w >> 8) & 255u), int(w & 255u));
   } else r = s;
   if (((dstAlpha >> 8) & 1u) == 1u) r.a = int(dstAlpha & 255u);
@@ -801,20 +751,24 @@ void shade(int x, int y, inout uint col, inout uint dep) {
   bool zEarly = ((b43 >> 6) & 1u) == 1u && zEnable;
 
   uint dx = f_add(gOx, f_from_int(x - gXi)), dy = f_add(gOy, f_from_int(y - gYi));
-  uint zf = planeAt(1u, dx, dy);
-  int z = f_trunc(f_gt(zf, 0x4b7fffffu) ? 0x4b7fffffu : (f_lt(zf, 0u) ? 0u : zf)) & 0xffffff;
   int stored = int(dep);
   uint newDep = dep;
-  if (zEarly) {
-    if (!cmpOp(zFunc, z, stored)) return;
-    if (zUpdate) newDep = uint(z);
-  }
-  // raster colors
+  int z = 0;
   for (int i = 0; i < 8; i++) gRasCh[i] = 0;
-  for (int i = 0; i < numCols * 4; i++) {
-    int tv = f_trunc(planeAt(uint(2 + i), dx, dy));
-    int v16 = tv & 0xffff;
-    gRasCh[i] = (v16 & ~(v16 >> 8)) & 0xff;
+  // plane 1 the depth (clamped to 0 .. 0xffffff, then the early depth test), planes 2.. the raster colors: one copy of planeAt and f_trunc
+  for (int i = 0; i <= numCols * 4; i++) {
+    uint pv = planeAt(uint(1 + i), dx, dy);
+    int tv = f_trunc(i == 0 ? (f_gt(pv, 0x4b7fffffu) ? 0x4b7fffffu : (f_lt(pv, 0u) ? 0u : pv)) : pv);
+    if (i == 0) {
+      z = tv & 0xffffff;
+      if (zEarly) {
+        if (!cmpOp(zFunc, z, stored)) return;
+        if (zUpdate) newDep = uint(z);
+      }
+    } else {
+      int v16 = tv & 0xffff;
+      gRasCh[i - 1] = (v16 & ~(v16 >> 8)) & 0xff;
+    }
   }
   loadColorRegs();
   for (int i = 0; i < 4; i++) { gLastTex[i] = 0; gTex[i] = 0; }
@@ -888,19 +842,22 @@ void shade(int x, int y, inout uint col, inout uint dep) {
       int bv = rasSel == 5u ? bump : (bump | (bump >> 5));
       gRas[0] = bv; gRas[1] = bv; gRas[2] = bv; gRas[3] = bv;
     }
-    ivec3 ca = csel(bfi(cc, 12, 4)), cb = csel(bfi(cc, 8, 4)), ccc = csel(bfi(cc, 4, 4)), cd = csel(bfi(cc, 0, 4));
-    if (bfi(cc, 12, 4) == 14) ca = konstColor(kcs);
-    if (bfi(cc, 8, 4) == 14) cb = konstColor(kcs);
-    if (bfi(cc, 4, 4) == 14) ccc = konstColor(kcs);
-    if (bfi(cc, 0, 4) == 14) cd = konstColor(kcs);
+    // the combiner's inputs (10.2): the selections from arrays filled once per stage (switch functions at each input took the
+    // D3D compiler a long time: it inlines every call)
+    ivec3 cIn[16];
+    for (int r = 0; r < 4; r++) { cIn[2 * r] = gR[r].rgb; cIn[2 * r + 1] = gR[r].aaa; }
+    cIn[8] = ivec3(gTex[0], gTex[1], gTex[2]); cIn[9] = ivec3(gTex[3]);
+    cIn[10] = ivec3(gRas[0], gRas[1], gRas[2]); cIn[11] = ivec3(gRas[3]);
+    cIn[12] = ivec3(255); cIn[13] = ivec3(128); cIn[14] = konstColor(kcs); cIn[15] = ivec3(0);
+    ivec3 ca = cIn[bfi(cc, 12, 4)], cb = cIn[bfi(cc, 8, 4)], ccc = cIn[bfi(cc, 4, 4)], cd = cIn[bfi(cc, 0, 4)];
     int cbias = bfi(cc, 16, 2), cop = bfi(cc, 18, 1), cclamp = bfi(cc, 19, 1), cscale = bfi(cc, 20, 2), cdest = bfi(cc, 22, 2);
-    int aa = asel(bfi(ac, 13, 3), kas), ab = asel(bfi(ac, 10, 3), kas), ac_ = asel(bfi(ac, 7, 3), kas), ad = asel(bfi(ac, 4, 3), kas);
+    int aIn[8] = int[8](gR[0].a, gR[1].a, gR[2].a, gR[3].a, gTex[3], gRas[3], konstAlpha(kas), 0);
+    int aa = aIn[bfi(ac, 13, 3)], ab = aIn[bfi(ac, 10, 3)], ac_ = aIn[bfi(ac, 7, 3)], ad = aIn[bfi(ac, 4, 3)];
     int abias = bfi(ac, 16, 2), aop = bfi(ac, 18, 1), aclamp = bfi(ac, 19, 1), ascale = bfi(ac, 20, 2), adest = bfi(ac, 22, 2);
     ivec3 rcv;
     ivec3 dv = ivec3(sx11(uint(cd.x) & 0x7ffu), sx11(uint(cd.y) & 0x7ffu), sx11(uint(cd.z) & 0x7ffu));
     if (cbias == 3) rcv = clampTev3(dv + ivec3(compare3((cscale << 1) | cop, ca & 255, cb & 255)) * (ccc & 255), cclamp);
     else rcv = tevColor3(ca & 255, cb & 255, ccc & 255, dv, cbias, cop, cscale, cclamp);
-    int rc[3] = int[3](rcv.x, rcv.y, rcv.z);
     int ra;
     if (abias == 3) {
       int mode = (ascale << 1) | aop;
@@ -909,11 +866,11 @@ void shade(int x, int y, inout uint col, inout uint dep) {
       else cond = compareCond(mode, ca & 255, cb & 255, 0);
       ra = clampTev(sx11(uint(ad) & 0x7ffu) + (cond ? (ac_ & 255) : 0), aclamp);
     } else ra = tevRegular(true, aa & 255, ab & 255, ac_ & 255, sx11(uint(ad) & 0x7ffu), abias, aop, ascale, aclamp);
-    gRegs[cdest * 4] = rc[0]; gRegs[cdest * 4 + 1] = rc[1]; gRegs[cdest * 4 + 2] = rc[2];
-    gRegs[adest * 4 + 3] = ra;
+    gR[cdest].rgb = rcv;
+    gR[adest].a = ra;
   }
   int lastC = bfi(S(0xc0u + uint(2 * (nStages - 1))), 22, 2), lastA = bfi(S(0xc1u + uint(2 * (nStages - 1))), 22, 2);
-  ivec4 src = ivec4(gRegs[lastC * 4] & 255, gRegs[lastC * 4 + 1] & 255, gRegs[lastC * 4 + 2] & 255, gRegs[lastA * 4 + 3] & 255);
+  ivec4 src = ivec4(gR[lastC].rgb & 255, gR[lastA].a & 255);
   // alpha test
   uint at = S(0xf3u);
   bool a0 = cmpOp(bf(at, 16, 3), src.a, bfi(at, 0, 8)), a1 = cmpOp(bf(at, 19, 3), src.a, bfi(at, 8, 8));
@@ -938,7 +895,7 @@ void shade(int x, int y, inout uint col, inout uint dep) {
   col = writeColor(col, pixFmt, S(0x41u), res);
 #ifdef DEBUG_REGS
   // a test aid: the color word carries two of the TEV registers' components instead of the pixel
-  col = (uint(gRegs[DEBUG_A] & 0xfff) << 12) | uint(gRegs[DEBUG_B] & 0xfff);
+  col = (uint(gR[DEBUG_A >> 2][DEBUG_A & 3] & 0xfff) << 12) | uint(gR[DEBUG_B >> 2][DEBUG_B & 3] & 0xfff);
 #endif
   dep = newDep;
 }

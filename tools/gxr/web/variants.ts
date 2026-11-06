@@ -19,7 +19,7 @@ export const variants: Record<string, (fs: string) => string> = {
   notex: (s) => rep(s, "bool texEn = bf(ord, 6, 1) == 1u;", "bool texEn = false;"),
   nocomb: (s) => rep(s, "    ivec3 ca = csel(", "    gRegs[0] = int(cc); continue;\n    ivec3 ca = csel("),
   nosample: (s) => rep(s, "      ivec4 tx = sampleMap(mp, cS, cT, lod, lin);", "      ivec4 tx = ivec4(cS, cT, lod, lin ? 1 : 0);"),
-  nocoords: (s) => rep(s, "  for (int j = 0; j < uK.x; j++) genST(n, bx + (j & 1), by + (j >> 1), sv[j], tv[j]);", "  for (int j = 0; j < uK.x; j++) { sv[j] = uint(bx + j); tv[j] = uint(by + j); }"),
+  nocoords: (s) => rep(s, "if (!constLod || j == me) genST(n, bx + (j & 1), by + (j >> 1), sv[j], tv[j]);", "sv[j] = uint(bx + j); tv[j] = uint(by + j);"),
   nofetch: (s) => rep(s, "      sum += fetchTexel(mp, off, W, wrapC(s0 + dx, W, mp.ws), wrapC(t0 + dy, H, mp.wt)) * wgt;", "      sum += ivec4(wrapC(s0 + dx, W, mp.ws), wrapC(t0 + dy, H, mp.wt), int(off), 0) * wgt;"),
 };
 variants.nocsel = (s) => rep(s, "    ivec3 ca = csel(bfi(cc, 12, 4)), cb = csel(bfi(cc, 8, 4)), ccc = csel(bfi(cc, 4, 4)), cd = csel(bfi(cc, 0, 4));", "    ivec3 ca = ivec3(bfi(cc, 12, 4)), cb = ivec3(bfi(cc, 8, 4)), ccc = ivec3(bfi(cc, 4, 4)), cd = ivec3(bfi(cc, 0, 4));");

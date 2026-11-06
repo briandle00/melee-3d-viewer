@@ -20,7 +20,7 @@ import type { GxInitial } from "./dff";
 import { bits, GxRegs } from "./state";
 import { formatInfo, levelOffset } from "./texunit";
 import { VertexData } from "./vertex";
-import { checkOps, checkPixels, checkScene } from "./floatcheck";
+import { checkOps, checkPixels, checkReference, checkScene } from "./floatcheck";
 import { binTriangles, Entries } from "./bin";
 import type { FloatOps } from "./glsl-float";
 
@@ -236,11 +236,15 @@ export class GxGl implements GxBackend {
         ops = checkOps(this.gl);
         ms += performance.now() - t0;
         if (ops === 0) {
-          // (the scene is drawn by the base pixel program: its compile is waited for, not counted)
+          // (the scene's expected pixels from the CPU reference while the base pixel program compiles; then the scene is drawn by that
+          // program: its compile is waited for, not counted)
+          t0 = performance.now();
+          const ref = checkReference();
+          ms += performance.now() - t0;
           const c = this.pending.get("pixel");
           while (c && !compileDone(this.gl, c)) await new Promise((r) => setTimeout(r, 10));
           t0 = performance.now();
-          pixels = checkPixels(this);
+          pixels = checkPixels(this, ref);
           ms += performance.now() - t0;
         }
       } catch (e) { error = String((e as Error)?.message ?? e); }

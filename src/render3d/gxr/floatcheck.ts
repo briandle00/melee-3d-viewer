@@ -210,16 +210,22 @@ export function checkScene(): { stream: Uint8Array; mem: Uint8Array; init: Dff }
   return { stream: w.bytes(), mem, init };
 }
 
-/** check 2: `checkScene` through the renderer `be` (its pixel program as it will draw) and through the CPU reference; returns the pixels
- *  whose color or depth differ. The renderer is reset before and after (nothing of the scene stays). */
-export function checkPixels(be: GxGl): number {
+/** check 2's expected pixels: `checkScene` through the CPU reference (no graphics card needed: the renderer computes it while its pixel
+ *  program compiles) */
+export function checkReference(): { color: ArrayLike<number>; depth: ArrayLike<number> } {
   const sc = checkScene();
   let ref!: GxGpu;
   const cpu = new CpuBackend(() => ({ mem: ref.mem.data, tmem: ref.regs.tmem, tluts: ref.regs.tluts }));
   ref = new GxGpu(cpu, sc.init, sc.mem);
   cpu.drawing = true;
   ref.runFrame({ fifo: sc.stream, updates: [] });
-  const a = cpu.efb;
+  return cpu.efb;
+}
+
+/** check 2: `checkScene` through the renderer `be` (its pixel program as it will draw) against the CPU reference (`checkReference`);
+ *  returns the pixels whose color or depth differ. The renderer is reset before and after (nothing of the scene stays). */
+export function checkPixels(be: GxGl, a = checkReference()): number {
+  const sc = checkScene();
   const draws = be.draws, drawing = be.drawing, ff = be.fastForward;
   be.floatChecking_ = true;
   try {

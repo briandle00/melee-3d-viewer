@@ -108,7 +108,11 @@ const glEarly: Promise<{ b: import("./render3d/gxr/gl").GxGl; gl: WebGL2Renderin
   const fo = q.get("floatops");
   const b = new GxGl(gl, { floatOps: fo === "soft" || fo === "fast" || fo === "dual" ? fo : "auto" }, { workers: Math.max(0, Number(q.get("workers") ?? Math.min(3, Math.max(0, (navigator.hardwareConcurrency || 4) - 2)))) });
   // (then its built-in scene drawn a few times: the draw path is compiled by the JavaScript engine before the first frame of a replay)
-  const ready = b.prepare().then(() => { loadTimes.shadersReady = performance.now() - pageStart; b.warmUp(); loadTimes.warmedRenderer = performance.now() - pageStart; });
+  // (then the optional shader variants start compiling in the background, one after another, so that a draw needing one later finds it ready)
+  const ready = b.prepare().then(() => {
+    loadTimes.shadersReady = performance.now() - pageStart; b.warmUp(); loadTimes.warmedRenderer = performance.now() - pageStart;
+    void b.warm().then(() => { loadTimes.variantsReady = performance.now() - pageStart; }).catch(() => {});
+  });
   ready.catch(() => {});
   return { b, gl, ready };
 })();
@@ -131,8 +135,6 @@ async function makeBackend(env: ConstructorParameters<typeof CpuBackend>[0]): Pr
         loadTimes.floatFast = b.floatOps === "fast" ? 1 : 0;
         loadTimes.floatCheckMs = b.floatCheck?.ms ?? 0;
         if (b.floatCheck && (b.floatCheck.ops || b.floatCheck.pixels || b.floatCheck.error)) console.log("gx: the card's float arithmetic differs (" + JSON.stringify(b.floatCheck) + "): the renderer uses its whole-number float functions");
-        // (the optional shader variants compile in the background: a draw that needs one waits for it)
-        void b.warm();
         glBackend = b;
         screen.setGlMode(true);
         const dbg = gl.getExtension("WEBGL_debug_renderer_info");
@@ -384,10 +386,12 @@ async function bench(s: GxSession) {
   const gb = glBackend as unknown as import("./render3d/gxr/gl").GxGl | null;
   if (gb && q.get("measure")) { gb.measure = true; const g = gpuOf(); if (g) g.measure = true; }
   if (gb && q.get("timing")) gb.timing = true;
+  // (rows=<n>: only the first n rows, for load-time runs)
+  const maxRows = Number(q.get("rows") ?? Infinity);
   const t0 = performance.now();
-  while (s.index < s.frameCount) {
+  while (s.index < s.frameCount && total.length < maxRows) {
     const t = performance.now();
-    while (performance.now() - t < 1 && s.index < s.frameCount) {
+    while (performance.now() - t < 1 && s.index < s.frameCount && total.length < maxRows) {
       const a = performance.now();
       s.step(true);
       if (q.get("crt")) showShown(); else if (glBackend) glBackend.present();
@@ -403,7 +407,7 @@ async function bench(s: GxSession) {
     gpuMs: gb.timing ? gb.collectTimes() : null, stats: { ...gb.stats }, timers: { ...(gpuOf()?.timers ?? {}) },
     draws: gb.draws, tris: gb.tris, passes: gb.passes, compileWaits: gb.compileWaits, floatOps: gb.floatOps, floatCheck: gb.floatCheck,
   } : null;
-  const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
+  const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, compileWaits: gb?.compileWaits ?? null, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
   // (tape=1: the whole tape the match played, for the native recorder to play the same one)
   if (q.get("tape") && s.wholeTape) await fetch("/save/tape.bin", { method: "POST", body: s.wholeTape as unknown as BodyInit });
   await fetch("/bench", { method: "POST", body });
