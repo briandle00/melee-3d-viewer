@@ -381,18 +381,21 @@ async function bench(s: GxSession) {
   // (crt=<preset>: the rows shown on that TV the way play shows them, the picture's way to the TV included)
   s.setPictures(q.get("crt") ? screen.needsPixels : false);
   // (nostart=1: the rows after the one the load showed, as a person pressing play would get them: the first rows' times after a load)
+  // (restartMs: what that start took: the match from its first row again, as a seek back does)
+  const r0 = performance.now();
   if (!q.get("nostart")) await s.start();
+  const restartMs = q.get("nostart") ? null : performance.now() - r0;
   // (measure=1: the renderer's own counters; timing=1: the GPU's time per pass kind, timer queries)
   const gpuOf = () => (s as unknown as { gpu?: { measure: boolean; timers: Record<string, number> } }).gpu;
   const gb = glBackend as unknown as import("./render3d/gxr/gl").GxGl | null;
   if (gb && q.get("measure")) { gb.measure = true; const g = gpuOf(); if (g) g.measure = true; }
   if (gb && q.get("timing")) gb.timing = true;
-  // (rows=<n>: only the first n rows, for load-time runs)
-  const maxRows = Number(q.get("rows") ?? Infinity);
+  // (rows=<n>: only the first n rows after the start, for a run that times the load and the start)
+  const lastRow = q.get("rows") ? Math.min(s.frameCount, s.index + Number(q.get("rows"))) : s.frameCount;
   const t0 = performance.now();
-  while (s.index < s.frameCount && total.length < maxRows) {
+  while (s.index < lastRow) {
     const t = performance.now();
-    while (performance.now() - t < 1 && s.index < s.frameCount && total.length < maxRows) {
+    while (performance.now() - t < 1 && s.index < lastRow) {
       const a = performance.now();
       s.step(true);
       if (q.get("crt")) showShown(); else if (glBackend) glBackend.present();
@@ -408,7 +411,7 @@ async function bench(s: GxSession) {
     gpuMs: gb.timing ? gb.collectTimes() : null, stats: { ...gb.stats }, timers: { ...(gpuOf()?.timers ?? {}) },
     draws: gb.draws, tris: gb.tris, passes: gb.passes, compileWaits: gb.compileWaits, floatOps: gb.floatOps, floatCheck: gb.floatCheck,
   } : null;
-  const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, compileWaits: gb?.compileWaits ?? null, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
+  const body = JSON.stringify({ extra, rows: total.length, seconds: (performance.now() - t0) / 1000, isolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true, total, step, render, wasmHeap: s.memoryBytes, jsHeap: heap, diverged: s.diverged, playback: s.playback, hashes, loadTimes, restartMs, compileWaits: gb?.compileWaits ?? null, pool: (s as unknown as { backend?: { poolStats?: unknown } }).backend?.poolStats ?? null });
   // (tape=1: the whole tape the match played, for the native recorder to play the same one)
   if (q.get("tape") && s.wholeTape) await fetch("/save/tape.bin", { method: "POST", body: s.wholeTape as unknown as BodyInit });
   await fetch("/bench", { method: "POST", body });

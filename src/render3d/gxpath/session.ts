@@ -9,7 +9,9 @@
  * the renderer started fresh, and draws those rows, so the screens that show the game's own earlier pictures are as the game had them.
  * Going back rewinds the module to a checkpoint: the memory pages the match changed since its first row (64 KiB pages, a hash each),
  * kept at the rows sought to; rewinding writes back the checkpoint's pages and, for every page changed since that it does not hold, the
- * page as it was after the first row (kept once seen; the first rewind that needs one it does not have opens a fresh instance for it).
+ * page as it was after the first row (kept once seen; the first rewind that needs one it does not have opens the match again for it).
+ * Starting the match again puts the module back to its state right after the game files loaded (GxCore.rewind) and opens the match
+ * again, in milliseconds; a fresh instance only when the module cannot be put back.
  *
  * The renderer is anything with gxr's GxBackend (the CPU reference, the WebGL one); its methods used here are listed in SessionBackend below.
  */
@@ -119,17 +121,29 @@ export class GxSession {
   get playback(): PlaybackMode { return this.o.playback ?? "slippi"; }
   get core_(): GxCore | null { return this.core; }
 
-  /** the match from its first row (a fresh instance of the module; the renderer back to its start) */
+  /** The match of `whole` opened, played back `mode`: in `reuse` rewound when it can be (GxCore.rewind: the game data kept from its
+   *  first load), else in a fresh instance that loads the game data (GxCore.loadGame). */
+  private async openIn(reuse: GxCore | null, whole: Uint8Array, mode: PlaybackMode): Promise<GxCore> {
+    let core = reuse;
+    if (!core?.rewind()) {
+      core?.destroy();
+      core = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), this.o.files.files);
+      core.loadGame(this.o.files.names);
+    }
+    core.openMatch(whole, this.o.files.names, mode);
+    return core;
+  }
+
+  /** the match from its first row (the module rewound, or a fresh instance; the renderer back to its start) */
   async start(): Promise<void> {
     const { tape, files } = this.o;
-    this.core?.destroy();
+    const old = this.core;
     this.core = null;
-    const core = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), files.files);
-    if (this.closed) { core.destroy(); return; }
     const whole = await this.tapeFor(this.driveIndex);
+    if (this.closed) { old?.destroy(); return; }
+    const core = await this.openIn(old, whole, this.playback);
     if (this.closed) { core.destroy(); return; }
     this.whole = whole;
-    core.openMatch(whole, files.names, this.playback);
     this.core = core;
     if (this.backend?.reset) this.backend.reset();
     else this.backend = await this.o.makeBackend(() => {
@@ -248,16 +262,18 @@ export class GxSession {
     const want = c ? c.pages : new Map<number, Uint8Array>();
     const need = now.filter((p) => !want.has(p) && !this.basePages.has(p));
     if (need.length) {
-      // pages this instance changed that were never seen as they started: a fresh instance has them
+      // pages this instance changed that were never seen as they started: the match opened again has them (openIn: this module rewound
+      // to its state after the game files loaded, or a fresh instance that loads them - the same bytes as the instance the baseline came
+      // from; a fresh instance without the game data kept would lay its memory out differently), its first row stepped
       this.seekStats.fresh++;
-      const fresh = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), this.o.files.files);
-      fresh.openMatch(this.whole!, this.o.files.names, this.playback);
-      fresh.step(nativeRow(this.whole!, 0));
-      if (this.closed) { fresh.destroy(); return; }
-      const h = (fresh.mod as unknown as SeekWasm).HEAPU8;
+      const old = this.core!;
+      this.core = null;
+      const core = await this.openIn(old, this.whole!, this.playback);
+      core.step(nativeRow(this.whole!, 0));
+      this.core = core;
+      if (this.closed) { core.destroy(); this.core = null; return; }
+      const h = (core.mod as unknown as SeekWasm).HEAPU8;
       for (const p of need) this.basePages.set(p, h.slice(p * PAGE, Math.min((p + 1) * PAGE, h.length)));
-      this.core!.destroy();
-      this.core = fresh;
       for (const [p, bytes] of want) h.set(bytes, p * PAGE);
     } else {
       const h = this.wasm!.HEAPU8;
@@ -412,11 +428,13 @@ export class GxSession {
     this.retried = true;
     const { tape, files } = this.o;
     const choices = driveOrder(tape, this.o.maxDrives ?? 3);
+    // (one module for the drives, rewound between them)
+    let driveCore: GxCore | null = null;
     const reach = async (d: number): Promise<number> => {
-      const core = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), files.files);
+      let core: GxCore | null = null;
       try {
         const whole = await this.tapeFor(d, "original");
-        core.openMatch(whole, files.names, "original");
+        core = driveCore = await this.openIn(driveCore, whole, "original");
         core.setDisplay(false); // (only the gameplay rows matter)
         let t0 = now();
         for (let i = 0; i < tape.count; i++) {
@@ -426,24 +444,28 @@ export class GxSession {
         }
         return tape.count;
       } catch {
+        (core ?? driveCore)?.destroy();
+        driveCore = null;
         return 0; // (a build that cannot play this choice)
-      } finally {
-        core.destroy();
       }
     };
-    onProgress?.(`checking this replay's game settings against the recording`);
-    const current = this.playback === "original" ? this.diverged?.row ?? tape.count : await reach(this.driveIndex);
-    this.drivesTried = [{ index: this.driveIndex, row: current }];
-    let best = this.drivesTried[0];
-    for (let d = 0; d < choices.length && best.row < tape.count; d++) {
-      if (d === this.driveIndex) continue;
-      onProgress?.(`trying game setting ${d + 1} of ${choices.length}`);
-      const row = await reach(d);
-      if (this.closed) return null;
-      this.drivesTried.push({ index: d, row });
-      if (row > best.row) best = this.drivesTried[this.drivesTried.length - 1];
+    try {
+      onProgress?.(`checking this replay's game settings against the recording`);
+      const current = this.playback === "original" ? this.diverged?.row ?? tape.count : await reach(this.driveIndex);
+      this.drivesTried = [{ index: this.driveIndex, row: current }];
+      let best = this.drivesTried[0];
+      for (let d = 0; d < choices.length && best.row < tape.count; d++) {
+        if (d === this.driveIndex) continue;
+        onProgress?.(`trying game setting ${d + 1} of ${choices.length}`);
+        const row = await reach(d);
+        if (this.closed) return null;
+        this.drivesTried.push({ index: d, row });
+        if (row > best.row) best = this.drivesTried[this.drivesTried.length - 1];
+      }
+      return best.index === this.driveIndex ? null : best.index;
+    } finally {
+      (driveCore as GxCore | null)?.destroy();
     }
-    return best.index === this.driveIndex ? null : best.index;
   }
 
   /** play drive choice d from now on: the match starts again from its first row (the caller seeks back) */
