@@ -51,6 +51,10 @@ export const SEEK_LEAD = 30;
 const NEAR = SEEK_LEAD + 6;
 /** checkpoints kept, and rows a checkpoint serves for (none is taken within this many rows after another) */
 const KEEP = 10, SPACING = 300;
+/** a checkpoint kept for a place sought to is this many rows before the row its stream starts again at, and another SPACING further:
+ *  a step back from there, up to two seconds (a player's J key), still finds one near (one kept at that row exactly served that place
+ *  alone - a frame further back needs one SEEK_LEAD rows before that frame - and each step back played the match from the first row) */
+const BACK = 4 * SEEK_LEAD;
 const PAGE = 65536;
 interface Checkpoint { row: number; pages: Map<number, Uint8Array> }
 /** the module's calls the seek uses (in the builds with them) */
@@ -248,6 +252,12 @@ export class GxSession {
     if (this.base && row >= 1 && !this.checkpoints.some((c) => near(c.row)) && ![...this.marks].some(near)) this.marks.add(row);
   }
   private atMark(): void { if (this.marks.delete(this.index)) this.checkpoint(); }
+  /** checkpoints to keep before row `from`, where the stream starts again for a place sought to: BACK rows before it and SPACING
+   *  further (each a pass over the module's memory when the match gets there) */
+  private backMarks(from: number): void {
+    this.markAt(from - BACK - SPACING);
+    this.markAt(from - BACK);
+  }
   /** keep the state before row `index` (the next to step) as a checkpoint */
   private checkpoint(): void {
     if (!this.base || this.checkpoints.some((c) => c.row === this.index)) return;
@@ -327,7 +337,7 @@ export class GxSession {
       if (this.closed || !this.core) return;
       const b = this.base = this.hashes(), len = this.wasm!.HEAPU8.length;
       for (let p = 0; p < Math.max(old.length, b.length) && p * PAGE < len; p++) if (old[p] !== b[p]) this.basePages.set(p, this.page(p));
-      this.markAt(row - SEEK_LEAD);
+      this.backMarks(row - SEEK_LEAD);
       return;
     }
     const from = row - SEEK_LEAD;
@@ -337,7 +347,8 @@ export class GxSession {
     // (back at the first rows: the stream from its start again, as when the match opened - row 0 is the hand-over and draws nothing;
     // its copy to the screen, of the frame buffer the renderer starts with, is row 0's picture as when the match opened: the row shown)
     if (!c && row <= NEAR) this.picturedRow = this.feedHere() ? 0 : -1;
-    this.markAt(from);
+    // (going back here again, or a few frames further, is then a rewind to one of these, not a play from further back)
+    this.backMarks(from);
   }
 
   /** read pictures back (or not) from now on: the backend's onPicture is set or cleared at once */
@@ -364,8 +375,8 @@ export class GxSession {
     const end = Math.min(row, this.frameCount - 1);
     const t0 = performance.now();
     if (this.canRewind && this.core) {
-      // (far ahead: a checkpoint here when the match gets there, so going back near here is a rewind)
-      if (this.feeding && end - this.index > NEAR) this.markAt(end - SEEK_LEAD);
+      // (far ahead: checkpoints a little before here when the match gets there, so going back near here is a rewind)
+      if (this.feeding && end - this.index > NEAR) this.backMarks(end - SEEK_LEAD);
       while (this.index <= end) {
         if (!this.feeding) {
           if (this.index < end - SEEK_LEAD) this.step(false);

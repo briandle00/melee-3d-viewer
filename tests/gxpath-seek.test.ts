@@ -1,6 +1,6 @@
-// The gx player's seeking (src/render3d/gxpath/session.ts) on a stand-in simulator module: a seek back to the first row, sought rows
-// against the rows of a straight play, and a first open against a match opened again.
-// With MELEE_ASSETS (tests/game-files.ts) the same first-open check runs on the real module (public/gx).
+// The gx player's seeking (src/render3d/gxpath/session.ts) on a stand-in simulator module: a seek back to the first row, a frame back
+// and the J key's two seconds back from far in the game, sought rows against the rows of a straight play, and a first open against a
+// match opened again. With MELEE_ASSETS (tests/game-files.ts) the same first-open check runs on the real module (public/gx).
 //   deno test -A --no-check --sloppy-imports tests/gxpath-seek.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -189,6 +189,24 @@ test("a seek back to the first row shows the first row (the stream's start: its 
     await seekTo(s, 1);
     assert.equal(s.shown, 1, `the second row drawn from the first (from ${from})`);
   }
+  s.close();
+});
+
+test("a frame back and the J key's two seconds back from far in the game rewind to a checkpoint near them", async () => {
+  const tape = tapeOf(ROWS);
+  const { s } = fakeSession(tape);
+  await s.warmup();
+  await seekTo(s, 3000);
+  const steps: { row: number; simOnly: number }[] = [];
+  for (const row of [2999, 2998, 2997, 2877, 2757, 2637]) {
+    const before = s.seekStats.simOnly;
+    await seekTo(s, row);
+    assert.equal(s.shown, row);
+    steps.push({ row, simOnly: s.seekStats.simOnly - before });
+  }
+  // (the first step back may play from the start: before it nothing was kept; every later one rewinds to a checkpoint at most a
+  // checkpoint's spacing and the stream's lead before it)
+  for (const k of steps.slice(1)) assert.ok(k.simOnly <= 300 + 4 * SEEK_LEAD, `back to ${k.row}: ${k.simOnly} rows stepped alone`);
   s.close();
 });
 
