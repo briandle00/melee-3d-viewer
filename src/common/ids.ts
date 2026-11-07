@@ -78,7 +78,6 @@ export const characterNameByInternalId = [
   "Giga Bowser", // 31, 0x1f
   "Sandbag", // 32, 0x20
 ] as const;
-export type InternalCharacterNames = typeof characterNameByInternalId[number];
 
 /**
  * Does not yet include single player stages (ids 33-285)
@@ -154,7 +153,6 @@ export const stageNameByInternalId = [
   "Yoshi's Island (64)", // 29, 0x1d
   "Kongo Jungle (64)", // 30, 0x1e
 ] as const;
-export type InternalStageName = typeof stageNameByInternalId[number];
 
 /**
  * Does not include character-specific actions, and some characters may use
@@ -865,7 +863,6 @@ export const itemNamesById = [
   "Great Fox's Laser", // 0xEB
   "Birdo's Egg", // 0xEC
 ] as const;
-export type ItemName = typeof itemNamesById[number];
 
 /** a player's character as the HUD names it - the one on screen
  *  (Zelda or Sheik, whichever they are now), and the pair as Ice Climbers,
