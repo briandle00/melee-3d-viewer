@@ -219,3 +219,11 @@ test("the encoder's own error ends the export with it, the encoder closed", asyn
   await assert.rejects(exportMp4(options({ to: 20 }).opts), /the encoder broke/);
   assert.equal(seen.encoders[0].state, "closed");
 });
+
+test("a TV without WebGL 2 says the TV cannot be drawn, and the encoder is closed", async () => {
+  withBrowser();
+  const { opts, calls } = options({ tv: { preset: "trinitron", curve: 0 } });
+  await assert.rejects(exportMp4(opts), /cannot draw the TV \(WebGL 2\)/);
+  assert.deepEqual(calls.seek, []);
+  assert.equal(seen.encoders[0].state, "closed");
+});

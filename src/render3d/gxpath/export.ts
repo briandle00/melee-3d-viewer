@@ -161,7 +161,9 @@ export async function exportMp4(o: ExportOptions): Promise<ExportResult> {
     error: (e) => { failed = e instanceof Error ? e : new Error(String(e)); },
   });
   encoder.configure(config);
-  const composer = new Composer(width, height, o.tv);
+  // (a TV the browser cannot draw: the encoder made above is closed, not left holding the graphics card's encoder)
+  let composer: Composer;
+  try { composer = new Composer(width, height, o.tv); } catch (e) { encoder.close(); throw e; }
   const check = () => {
     if (failed) throw failed;
     if (o.signal?.aborted) throw new ExportCanceled();
