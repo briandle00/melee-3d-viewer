@@ -38,14 +38,14 @@ test('consumer early return and capture errors release the backend', async () =>
   assert.equal(f.destroyed, 1);
   const g = fixture();
   g.backend.capture = async () => { throw new Error('capture failed'); };
-  await assert.rejects(async () => { for await (const _ of captureAudio(async () => g.backend, 10, 12)) {} }, /capture failed/);
+  await assert.rejects(async () => { for await (const _ of captureAudio(async () => g.backend, 10, 12)) { /* (each chunk read and dropped) */ } }, /capture failed/);
   assert.equal(g.destroyed, 1);
 });
 
 test('aborting during capture discards the result and releases the backend', async () => {
   const f = fixture(), controller = new AbortController();
   f.backend.capture = async gameFrame => { controller.abort(); return { gameFrame, pcm: new Int16Array(2) }; };
-  await assert.rejects(async () => { for await (const _ of captureAudio(async () => f.backend, 10, 12, controller.signal)) {} }, { name: 'AbortError' });
+  await assert.rejects(async () => { for await (const _ of captureAudio(async () => f.backend, 10, 12, controller.signal)) { /* (each chunk read and dropped) */ } }, { name: 'AbortError' });
   assert.equal(f.destroyed, 1);
 });
 
@@ -53,7 +53,7 @@ test('invalid PCM and mismatched frames are rejected before encoding', async () 
   for (const result of [{ gameFrame: 11, pcm: new Int16Array(2) }, { gameFrame: 10, pcm: new Int16Array(1) }]) {
     const f = fixture();
     f.backend.capture = async () => result;
-    await assert.rejects(async () => { for await (const _ of captureAudio(async () => f.backend, 10, 10)) {} }, /invalid frame or PCM/);
+    await assert.rejects(async () => { for await (const _ of captureAudio(async () => f.backend, 10, 10)) { /* (each chunk read and dropped) */ } }, /invalid frame or PCM/);
     assert.equal(f.destroyed, 1);
   }
 });

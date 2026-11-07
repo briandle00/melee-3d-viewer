@@ -51,7 +51,6 @@ const specials = [0, -0, 1, -1, 0.5, 2, 3, 1e-30, 1e30, 3.4e38, -3.4e38, Infinit
 
 const N = W * H;
 const data = new Uint32Array(N * 4);
-const exp: number[] = [];
 const ops: number[] = [];
 for (let i = 0; i < N; i++) {
   const op = i % 8;
@@ -59,7 +58,8 @@ for (let i = 0; i < N; i++) {
   if (rnd() < 0.05) a = specials[Math.floor(rnd() * specials.length)];
   if (rnd() < 0.05) b = specials[Math.floor(rnd() * specials.length)];
   a = Math.fround(a); b = Math.fround(b);
-  let ia = bitsOf(a), ib = bitsOf(b);
+  let ia = bitsOf(a);
+  const ib = bitsOf(b);
   if (op === 4) { ia = (Math.floor(rnd() * 33554432) - 16777216) | 0; }
   data[i * 4] = ia >>> 0; data[i * 4 + 1] = ib; data[i * 4 + 2] = op;
   ops.push(op);
@@ -94,7 +94,7 @@ for (let i = 0; i < N; i++) {
   if ((op < 4) && (isDenorm(ia) || isDenorm(ib) || isDenorm(want))) continue;
   if (op === 5 && isDenorm(ia)) continue;
   tested[op] = (tested[op] ?? 0) + 1;
-  let got = out[i * 4];
+  const got = out[i * 4];
   const nanW = op < 4 && Number.isNaN(fromBits(want)), nanG = op < 4 && Number.isNaN(fromBits(got));
   if (nanW && nanG) continue;
   if (got !== want >>> 0) {

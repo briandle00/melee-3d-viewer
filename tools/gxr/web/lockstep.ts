@@ -16,8 +16,8 @@ const dff = parseDff(await get("/spec/" + (dffPath ?? w.recording)));
 const mem1 = dffPath ? new Uint8Array(0x1800000) : await get("/spec/" + w.memory);
 const fromFrame = Number(q.get("from") ?? 1);
 const toFrame = Number(q.get("to") ?? dff.frames.length - 1);
-const frameSel = Number(q.get("frame") ?? 1);
 const gpuBe = new GxGl(gl, {}, { workers: Number(q.get("workers") ?? 0), factory: () => new Worker("/frontworker.js", { type: "module" }) });
+// deno-lint-ignore prefer-const -- (assigned once, after the backend that reads it through a closure is made)
 let gpu!: GxGpu;
 const cpuMem = new Uint8Array(0x1800000);
 const cpuBe = new CpuBackend(() => ({ mem: cpuMem, tmem: gpu.regs.tmem, tluts: gpu.regs.tluts }));

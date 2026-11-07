@@ -3,7 +3,7 @@
 // What needs a GPU (the shader against the CPU reference) or the spec author's files is in gxr-gpu.test.ts and gxr-spec-vectors.test.ts.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { basicScene, colorVertices, FifoWriter } from "../src/render3d/gxr/encode.ts";
+import { basicScene, colorVertices } from "../src/render3d/gxr/encode.ts";
 import { copyParams, encodeCopy } from "../src/render3d/gxr/copy.ts";
 import { Efb, EFB_W, fogShape } from "../src/render3d/gxr/raster.ts";
 import { bitsOf, f, fromBits } from "../src/render3d/gxr/f32.ts";

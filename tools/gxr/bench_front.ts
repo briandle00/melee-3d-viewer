@@ -16,10 +16,10 @@ const dst = new Float32Array(1 << 20);
 const trip: number[] = [];
 let need = new Uint8Array(4096);
 const be: any = {
-  draw(regs: any, mem: any, vd: any, _a: any, _b: any, _c: any, prims: any[]) {
+  draw(regs: any, _mem: any, vd: any, _a: any, _b: any, _c: any, prims: any[]) {
     if (frame === 0) return;
     pool.clear();
-    let t0 = performance.now();
+    const t0 = performance.now();
     const x = xfDraw(regs, vd);
     trip.length = 0;
     for (const p of prims) assemble(p.type, p.count, p.base, trip);
@@ -27,10 +27,10 @@ const be: any = {
     need.fill(0, 0, vd.n);
     for (let i = 0; i < trip.length; i++) need[trip[i]] = 1;
     for (let i = 0; i < vd.n; i++) t.used += need[i];
-    let t1 = performance.now(); t.asm += t1 - t0;
+    const t1 = performance.now(); t.asm += t1 - t0;
     const base = transformVertices(x, regs, vd, pool, need);
     t.verts += vd.n;
-    let t2 = performance.now(); t.xf += t2 - t1;
+    const t2 = performance.now(); t.xf += t2 - t1;
     const sc = setupCtx(regs.bp);
     const cull = bits(regs.bp[0], 14, 2);
     const mark = pool.n;
