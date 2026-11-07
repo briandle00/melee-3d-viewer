@@ -128,7 +128,10 @@ export class GxSession {
     if (!core?.rewind()) {
       core?.destroy();
       core = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), this.o.files.files);
-      core.loadGame(this.o.files.names);
+      // (and put back to the state the load kept at once: the load's own call frees memory after it keeps the state, so a match opened
+      // straight after it has its allocator elsewhere - pages of the match's memory differ from those of every later opening of this
+      // instance, which all follow a rewind; the first match is then one of those)
+      if (core.loadGame(this.o.files.names)) core.rewind();
     }
     core.openMatch(whole, this.o.files.names, mode);
     return core;
