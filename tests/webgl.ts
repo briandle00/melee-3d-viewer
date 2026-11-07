@@ -25,8 +25,9 @@ export function browser(): string | null {
   return found;
 }
 
-/** run `script` in a page (it writes its answer with `done(value)`), and return that value */
-export function runPage<T>(script: string): T {
+/** run `script` in a page (it writes its answer with `done(value)`), and return that value; `window` is the browser
+ *  window's size in CSS pixels (the page's viewport), Chrome's default without it */
+export function runPage<T>(script: string, opts: { window?: [number, number] } = {}): T {
   const exe = browser();
   if (!exe) throw new Error("no browser");
   const dir = mkdtempSync(join(tmpdir(), "webgl-"));
@@ -40,6 +41,7 @@ try { ${script}
     const html = execFileSync(exe, [
       "--headless=new", "--no-sandbox", "--disable-gpu-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
       "--ignore-gpu-blocklist", `--user-data-dir=${join(dir, "profile")}`, "--virtual-time-budget=20000", "--dump-dom",
+      ...(opts.window ? [`--window-size=${opts.window[0]},${opts.window[1]}`, "--force-device-scale-factor=1"] : []),
       `file://${page}`,
     ], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 1 << 28, timeout: 120000 });
     const m = html.match(/<pre id="out">([\s\S]*?)<\/pre>/);
