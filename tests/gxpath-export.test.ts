@@ -65,11 +65,11 @@ class FakeCanvas {
   constructor(readonly width: number, readonly height: number) {}
   getContext(kind: string) {
     if (kind !== "2d") return null; // (no WebGL 2 here)
-    const canvas = this, c = { w: this.width, h: this.height } as Seen["canvases"][number];
+    const c = { w: this.width, h: this.height } as Seen["canvases"][number];
     seen.canvases.push(c);
     return {
       set imageSmoothingEnabled(v: boolean) { c.smoothing = v; },
-      drawImage: (...a: unknown[]) => { seen.draws.push([canvas, ...a]); },
+      drawImage: (...a: unknown[]) => { seen.draws.push([this, ...a]); },
     };
   }
 }
