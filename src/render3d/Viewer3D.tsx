@@ -3397,7 +3397,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     crtHash: async (preset: "trinitron" | "pvm", curve: number, w: number, h: number) => {
       const px = renderer?.crtPixels(preset, curve, w, h);
       if (!px) return null;
-      const d = new Uint8Array(await crypto.subtle.digest("SHA-256", px));
+      const d = new Uint8Array(await crypto.subtle.digest("SHA-256", px as BufferSource));
       return [...d].map((b) => b.toString(16).padStart(2, "0")).join("");
     },
     /** draw now and read a block of the canvas: x, y, w, h in its pixels
