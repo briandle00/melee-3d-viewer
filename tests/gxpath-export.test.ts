@@ -8,7 +8,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BITS_PER_PIXEL, ExportCanceled, MAX_BITRATE, exportMp4, videoName, type ExportOptions } from "../src/render3d/gxpath/export.ts";
+import { BITS_PER_PIXEL, ExportCanceled, MAX_BITRATE, exportMp4, timescaleOf, videoName, type ExportOptions } from "../src/render3d/gxpath/export.ts";
+import { mp4Samples } from "../src/render3d/gxpath/exportcheck.ts";
 
 type Config = { codec: string; width: number; height: number; bitrate: number; framerate: number; hardwareAcceleration: string };
 
@@ -131,6 +132,21 @@ test("one row, one frame: at i / fps seconds, durations adding up to the stretch
   assert.equal(new TextDecoder().decode(head.subarray(4, 8)), "ftyp");
   assert.deepEqual([r.width, r.height], [640, 480]);
   assert.equal(seen.encoders[0].state, "closed");
+});
+
+test("the console's 60000/1001 (Speed: Console): the file's clock is 60000 ticks a second and every frame is 1001 of them", async () => {
+  assert.equal(timescaleOf(60), 60);
+  assert.equal(timescaleOf(60000 / 1001), 60000);
+  for (const [fps, ticks, each] of [[60000 / 1001, 60000, 1001], [60, 60, 1]] as const) {
+    withBrowser();
+    const r = await exportMp4(options({ from: 0, to: 299, fps }).opts);
+    const m = mp4Samples(new Uint8Array(await r.file.arrayBuffer()));
+    assert.equal(m.timescale, ticks, `${fps}: timescale`);
+    assert.equal(m.samples, 300, `${fps}: samples`);
+    assert.deepEqual([...new Set(m.durations)], [each], `${fps}: durations`);
+    // (and the bitrate at that rate)
+    assert.equal(r.bitrate, Math.round(640 * 480 * fps * BITS_PER_PIXEL));
+  }
 });
 
 test("2x and 4x: the picture drawn scaled pixel for pixel (no smoothing) at 1280 x 960 and 2560 x 1920", async () => {
