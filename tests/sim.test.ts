@@ -14,6 +14,7 @@ import { SimViewer, writeGameFiles, dropGameFiles, type SimModule } from "../src
 import { runDrives } from "../src/sim/drive.ts";
 import type { FromWorker } from "../src/sim/protocol.ts";
 import { shouldPublish, LEAD, LOW } from "../src/sim/policy.ts";
+import { makeReplay } from "./replay-fixture.ts";
 
 test("wire rows are wire.h's sizes and offsets", () => {
   assert.equal(CONFIG.size, 64);
@@ -36,62 +37,7 @@ test("sticks and triggers as the validator reads them", () => {
   assert.equal(triggerByte(0.5), 70);
 });
 
-// ---- a small replay: two players on Battlefield, frames -123..-120, frame -121 played twice (a rollback)
-const SIZES: [number, number][] = [[0x36, 0x1a4], [0x37, 0x42], [0x38, 0x48], [0x3a, 0x8], [0x3f, 0x9]];
-function makeReplay(opts: { stage?: number; withGap?: boolean } = {}): Uint8Array {
-  const parts: Uint8Array[] = [];
-  const head = new Uint8Array(2 + 3 * SIZES.length);
-  head[0] = 0x35; head[1] = 1 + 3 * SIZES.length;
-  SIZES.forEach(([c, n], i) => { head[2 + 3 * i] = c; head[3 + 3 * i] = n >> 8; head[4 + 3 * i] = n & 0xff; });
-  parts.push(head);
-  const ev = (cmd: number, fill: (v: DataView) => void) => {
-    const n = SIZES.find(([c]) => c === cmd)![1];
-    const b = new Uint8Array(n + 1); b[0] = cmd;
-    fill(new DataView(b.buffer));
-    parts.push(b);
-  };
-  ev(0x36, (v) => {
-    v.setUint8(1, 3); v.setUint8(2, 18); v.setUint8(3, 0);
-    v.setUint16(0x13, opts.stage ?? 31);
-    v.setFloat32(0x35, 1);
-    for (let i = 0; i < 4; i++) {
-      const b = 0x65 + 0x24 * i;
-      v.setUint8(b + 1, i < 2 ? 0 : 3);
-      v.setUint8(b + 2, 4);
-      v.setUint8(0x6d + 0x24 * i, 9);
-    }
-    v.setUint32(0x13d, 0xdeadbeef);
-    v.setUint8(0x1a4, 8);
-  });
-  const frame = (f: number, mainX: number, x: number) => {
-    ev(0x3a, (v) => { v.setInt32(1, f); v.setUint32(5, 1000 + f); });
-    if (f === -122) ev(0x3f, (v) => { v.setInt32(1, f); v.setUint8(5, 1); v.setFloat32(6, 20); });
-    for (let p = 0; p < 2; p++) {
-      ev(0x37, (v) => {
-        v.setInt32(1, f); v.setUint8(5, p); v.setUint32(7, 500 + f);
-        v.setFloat32(0x19, 0.5); v.setFloat32(0x33, 0.5);
-        v.setInt8(0x3b, mainX); v.setInt8(0x40, -3); v.setInt8(0x41, 7); v.setInt8(0x42, -7);
-      });
-      ev(0x38, (v) => {
-        v.setInt32(1, f); v.setUint8(5, p); v.setUint8(7, 1); v.setUint16(8, 14);
-        v.setFloat32(0xa, x + p); v.setFloat32(0xe, 0); v.setFloat32(0x12, p ? -1 : 1);
-        v.setFloat32(0x16, 0); v.setUint8(0x21, 4);
-      });
-    }
-  };
-  frame(-123, 1, 0);
-  frame(-122, 2, 1);
-  frame(-121, 99, 99);  // the first pass, rolled back
-  frame(-121, 3, 2);    // the one that counts
-  if (!opts.withGap) frame(-120, 4, 3);
-  else frame(-119, 4, 3);
-  const n = parts.reduce((s, p) => s + p.length, 0);
-  const out = new Uint8Array(n);
-  let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.length; }
-  return out;
-}
-
+// ---- a small replay (tests/replay-fixture.ts): two players on Battlefield, frames -123..-120, frame -121 played twice (a rollback)
 test("a replay read into the simulator's config and rows", () => {
   const tape = readTape(makeReplay(), { playedOn: "dolphin" });
   assert.equal(tape.count, 4);
