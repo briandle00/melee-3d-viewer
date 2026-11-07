@@ -110,6 +110,7 @@ import { diagLoaded, diagLoading, diagRunning, diagView } from "~/diag";
 import { fileListSource, prefetchReplay, setFileSource, setTrackUrl, status } from "~/render3d/files";
 import { simAsked, simForReplay } from "~/sim/embed";
 import { mark } from "~/render3d/startup";
+import { askedMode, chooseMode, type Mode } from "~/embedmode";
 import { precompilePrograms } from "~/render3d/renderer";
 import "~/state/fileStore";
 import "~/state/replayStore";
@@ -309,10 +310,6 @@ function fullKey(e: KeyboardEvent) {
 }
 document.addEventListener("keydown", fullKey);
 
-/** the page's drawing: 3D (failed: it cannot run here at all, `reason`
- *  says why), the line art, or not known yet */
-type Mode = { renderer: "pending" | "3d" | "svg"; reason: string | null; failed: boolean };
-
 /** whether this browser can draw WebGL 2 at all */
 function webgl2(): boolean {
   try {
@@ -364,16 +361,9 @@ function Embed() {
   const [mode, setMode] = createSignal<Mode>({ renderer: "pending", reason: null, failed: false });
   const forced = params.get("renderer");
   const [st, setSt] = createSignal<Awaited<ReturnType<typeof status>>>();
-  // 3D chosen: drawn by the 3D player, whatever happens to it. Only
-  // when it cannot run here at all (no WebGL 2, no game files) does the
-  // player say so, plainly, where the picture would be (failed, its reason)
-  const pick3d = (s: Awaited<ReturnType<typeof status>>): Mode => {
-    const why = !s.available ? s.reason : webgl2() ? null : "this browser cannot draw WebGL 2";
-    return { renderer: "3d", reason: why, failed: why !== null };
-  };
+  // (3D chosen: drawn by the 3D player whatever happens to it, saying why only when it cannot run here at all: embedmode.ts)
   const check = () => status().then((s) => {
-    const want = forced === "svg" ? false : forced === "3d" ? true : s.enabled;
-    setMode(want && asked() !== "svg" ? pick3d(s) : { renderer: "svg", reason: "line art asked for", failed: false });
+    setMode(chooseMode(s, forced, asked(), webgl2));
     if (!lookAsked) setLook480(s.look480 === true);
     if (!crtAsked && isCrtPreset(s.crt)) { setCrtPreset(s.crt); setCrtCurve(curveOf(s.curve)); }
     if (!controllersAsked) setOverlay(isOverlayShow(s.controller_overlay) ? s.controller_overlay : "off");
@@ -386,7 +376,7 @@ function Embed() {
   createEffect(() => {
     const a = asked(), s = st();
     if (a === null || !s) return;
-    setMode(a === "3d" ? pick3d(s) : { renderer: "svg", reason: "line art asked for", failed: false });
+    setMode(askedMode(s, a, webgl2));
   });
   // The 3D player never gives up and never switches to the line art itself.
   // One that fails, stalls or loses its picture is tried again: before its
