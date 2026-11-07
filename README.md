@@ -26,14 +26,32 @@ works too: `npm install`, then `npm run dev` / `npm run build`).
 deno install --allow-scripts
 deno run -A node_modules/vite/bin/vite.js            # dev server, http://127.0.0.1:5173/dev.html
 deno run -A node_modules/vite/bin/vite.js build      # static build into dist/
-deno test --no-check --sloppy-imports tests/         # tests
+deno task check                                      # type check, lint and tests (below)
 ```
 
-A few tests read your game files (see below). They run when `MELEE_ASSETS`
-names that folder and may be read, and are skipped otherwise:
+### Tests and the check
+
+`deno task check` (`scripts/check.ts`) is the one command to run before
+publishing: it checks that `node_modules` matches `package.json` (a stale one
+says to run `deno install --allow-scripts`), then runs the type check (`tsc`),
+the lint and the tests, and prints a line for each; the exit code is 1 when any
+failed. `deno task check --build` also makes the static build. The tests alone:
 
 ```
-MELEE_ASSETS=<folder> deno test --no-check --sloppy-imports --allow-env --allow-read tests/
+deno test --no-check --sloppy-imports -A tests/
+```
+
+Some tests need more than Deno and skip themselves (with a message) without it:
+
+| Tests | Need | How |
+| --- | --- | --- |
+| the C references (`tests/c/`: GX math, camera and fog against the SDK's C, bit for bit) | a C compiler | `cc`, `gcc` or `clang` on the `PATH`, or `CC=<compiler>` |
+| shaders, fog, lighting, TEV, the picture's 73:60 (`tests/aspect.test.ts`) | a Chromium-based browser | found where Chrome, Chromium or Edge installs itself, or `CHROMIUM=<browser>` |
+| the ones that read the game's own data | your game files | `MELEE_ASSETS=<folder>` (the folder "Your game files" describes) |
+| the GX renderer's raster spec vectors | the spec's vector files | `GX_SPEC_VECTORS=<folder>` |
+| the GX renderer's shader against its CPU reference (a few minutes) | a GPU and Chrome | `GX_GPU_TESTS=1` (`CHROME=<browser>` if not at the usual place) |
+
+```
 deno run --sloppy-imports --allow-read scripts/check-effect-assets.ts <folder>   # every effect's model or generator is in your files
 ```
 
@@ -82,6 +100,61 @@ Slippi Lab's line-art view draws characters from animation zips
 derived from the game's animation data. Slippi Lab's repository has them in
 its `public/zips/` folder; copy them to `public/zips/` (in `.gitignore`) if
 you want the Simple view. The 3D views do not need them.
+
+## The replays it plays
+
+Slippi replays (`.slp`), from a URL (`replayUrl`, a `load` message) or a file
+picked on the dev page. Each player says why when it does not play one,
+instead of showing nothing:
+
+- **The player (`embed.html`: 3D, Console and Simple views).** Replays of any
+  Slippi version its reader knows (before 3.0 too), between people, on the six
+  tournament stages (Battlefield, Final Destination, Dream Land, Yoshi's Story,
+  Fountain of Dreams, Pokemon Stadium). A CPU player, another stage, a damaged
+  file or a URL that cannot be fetched is said where the picture would be ("The
+  replay could not be read: ...") and posted to the page as
+  `{type: "failed", reason}`.
+- **The GX player (`gx.html`).** Replays from Slippi 3.0 on, from the match's
+  start, on the stages the simulator plays (the six above), with two or four
+  players (a CPU with its level; four-player teams with Team Attack on), NTSC.
+  Anything else is refused with the reason (`src/sim/tape.ts` readTape:
+  "replay older than Slippi 3.0", "PAL game", "3 players ...").
+- **Game files.** Your own NTSC 1.02 disc's (see "Your game files"); a missing
+  file is named.
+- **Browsers.** WebGL 2 for the 3D views and the GX player (without it the
+  player says "3D can't run here: this browser cannot draw WebGL 2"); WebCodecs'
+  H.264 encoder for Export Video. The picture is always the game's 73:60, with
+  bars when the page's box has another shape (`src/common/aspect.ts`).
+
+`tests/replay-errors.test.ts`, `tests/embed-mode.test.ts` and
+`tests/aspect.test.ts` check these.
+
+## Exactness: the game's draws
+
+The bar for the renderer (`src/render3d/`) is the game itself: every draw the
+viewer makes, its commands, matrices and vertex values, equal to what the game
+sends to the GameCube's graphics processor for the same frame, as float32 bits,
+with no tolerance. Its math follows the game's own functions (named as the
+[Melee decompilation](https://github.com/doldecomp/melee) names them) with the
+game's operation order and fused multiply-adds (`src/render3d/gxmath.ts`).
+
+The exactness gate renders a fixed set of windows (frames of public and bot
+replays across the stages and characters) with a branch and compares every
+field of every draw against captures of the game running those replays,
+counting the values that are bit-equal; a branch that changes `src/render3d/`
+is merged only when no window gets worse. The captures are made from the game
+and hold its data, so they and the tool that reads them are not in this
+repository; maintainers run the gate before merging.
+
+What anyone can run, and what a change must keep passing:
+
+- `deno task check`: the unit tests, including the C references (the SDK's
+  matrix, camera and fog math, bit for bit) and the shader checks in a browser
+  when a compiler and a browser are there.
+- The GX renderer's own checks (`docs/gx-renderer.md`: spec vectors, the shader
+  against the CPU reference on random scenes, `GX_GPU_TESTS=1`).
+- Export Video's checks (`src/render3d/gxpath/exportcheck.ts`: every video
+  frame equal to the player's picture before encoding).
 
 ## Viewer tracks from the simulator
 
@@ -280,7 +353,8 @@ It is driven by `postMessage`: `load` (`url`, `name`, `frame`, `trackUrl`),
 `gameFiles` (`files`: `File[]`), `seek`, `play`, `pause`, `toggle`, `range`,
 `ghosts` (other replays drawn over this one, see-through), `renderer`, `view`
 (`simple`, `3d`, `console`), `look`, `crt`, `controllers`, `hudslots`. It
-posts `frame`, `loaded`, `renderer`, `track`, `warming`, `viewKey` and
+posts `frame`, `loaded`, `failed` (a replay it cannot show, and why),
+`renderer`, `track`, `warming`, `viewKey` and
 `fullKey` (F, W or Esc pressed on the player: the page may make it Full
 Screen or Full Window, as the dev page does; the 3D view draws at the size it
 is given) back to the parent. The full list, with fields, is at the top of
@@ -420,7 +494,7 @@ asset routes are not included here.
 
 ## Credits
 
-- [Slippi Lab](https://github.com/frankborden/slippilab) by Frank Borden (MIT):
+- [Slippi Lab](https://github.com/frankborden/slippilab) by frankborden (MIT):
   the replay viewer this is forked from, its parser, line-art viewer and
   controls. Slippi Lab itself thanks:
   [Project Slippi](https://github.com/project-slippi) (Fizzi and the Project
@@ -430,9 +504,9 @@ asset routes are not included here.
 - Lucky Stats by petey (0xburn): the fighters' native effect callbacks, Fox
   and Falco's up-B fire, item animations and effect lifetimes, and the
   projectile joint fixes were ported from its viewer.
-- [melee-sim-light](https://github.com/kyhavlov/melee-sim-light) by kyhavlov
-  (Kyle Havlovitz), with Vlad Firoiu, KeithG33 and Bradley Lewis Fargo among
-  its contributors: the simulator that writes viewer tracks, that the viewer
+- [melee-sim-light](https://github.com/kyhavlov/melee-sim-light) by enzyme
+  (kyhavlov), with xpilot (vladfi1), blasphemetheus and KeithG33 among its
+  contributors: the simulator that writes viewer tracks, that the viewer
   can run in the browser as WebAssembly (`src/sim/`), and whose graphics build
   runs the game's drawing code for the GX player (`public/gx/`, built from the
   fork named in `public/gx/BUILD.txt`). `src/sim/tape.ts` follows its replay
@@ -454,8 +528,8 @@ asset routes are not included here.
   GameCube graphics emulation was a reference for the GX player's behavior
   only; no Dolphin code is used, and the GX renderer is written from a
   specification of the hardware's behavior.
-- [noclip.website](https://github.com/magcius/noclip.website) by Jasper St.
-  Pierre (magcius) (MIT): its SYSDOLPHIN loader was a reference for
+- [noclip.website](https://github.com/magcius/noclip.website) by magcius
+  (MIT): its SYSDOLPHIN loader was a reference for
   `src/render3d/hsd.ts`, and its keyframe decoding is adapted there. Its
   notice is `src/render3d/LICENSE-noclip.txt`.
 - [M'Overlay](https://github.com/bkacjios/m-overlay) by Bkacjios (MIT): its
@@ -465,9 +539,9 @@ asset routes are not included here.
 - The CRT look of the Console view follows techniques from crt-geom (cgwg),
   crt-royale (TroggleMonkey) and Timothy Lottes' CRT shader; none of their code
   is used.
-- Icons in `src/components/common/icons.tsx` are from Bootstrap Icons,
-  Heroicons and Phosphor Icons, as in Slippi Lab; the Material Icons fonts come
-  from npm (`@fontsource/material-icons`).
+- Icons in `src/components/common/icons.tsx` are from
+  [Heroicons](https://heroicons.com) (MIT), as in Slippi Lab; the Material Icons
+  fonts (Google, Apache 2.0) come from npm (`@fontsource/material-icons`).
 
 ## License
 
