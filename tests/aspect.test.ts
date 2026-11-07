@@ -67,6 +67,8 @@ for (const [w, h] of [[1280, 720], [800, 1000], [1920, 1080], [500, 400]] as con
     assert.ok(g.cw > 0 && g.ch > 0, `${at}: no picture (${JSON.stringify(g)})`);
     near(g.cw / g.ch, GAME_ASPECT, 0.005, `${at}: the picture's shape`);
     near(g.cw, g.vw, 0.5, `${at}: the picture's width`);
+    // (the view is the picture: the controller overlays are placed on the view, from its bottom)
+    near(g.ch, g.vh, 0.5, `${at}: the view's height is not the picture's`);
     near(g.dx, 0, 0.5, `${at}: the picture's left`);
     near(g.dy, 0, 0.5, `${at}: the picture's top`);
     assert.ok(g.cw <= g.sw + 0.5, `${at}: wider than the page (${g.cw} > ${g.sw})`);
