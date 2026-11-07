@@ -1,5 +1,6 @@
 /* The embeddable player's choices that need no page (embed.tsx; tests/embed-mode.test.ts): which renderer draws and,
- * when 3D cannot run here at all, why.
+ * when 3D cannot run here at all, why; and what the player says where the picture would be while there is no replay
+ * to show.
  */
 
 /** the page's drawing: 3D (failed: it cannot run here at all, `reason` says why), the line art, or not known yet */
@@ -28,4 +29,28 @@ export function chooseMode(s: FilesStatus, forced: string | null, asked: "3d" | 
 /** the page's 3D / Simple choice, switched on the spot */
 export function askedMode(s: FilesStatus, asked: "3d" | "svg", webgl2: () => boolean): Mode {
   return asked === "3d" ? pick3d(s, webgl2) : { renderer: "svg", reason: LINE_ART_ASKED, failed: false };
+}
+
+/** how a replay's load ended: its file not found or not read (failed), or read and not one these players play
+ *  (skipped: a CPU player, a stage other than the six the line art has, a character the game has no fighter for) */
+export interface LoadOutcome { status?: number; failed: number; skipped: number; loaded: number }
+
+/** why a replay that was asked for is not shown, or null when it is */
+export function loadProblem(o: LoadOutcome): string | null {
+  if (o.status !== undefined && (o.status < 200 || o.status > 299)) return `The replay could not be fetched (HTTP ${o.status}).`;
+  if (o.loaded > 0) return null;
+  if (o.failed > 0) return "The replay could not be read: the file is damaged or not a Slippi replay.";
+  if (o.skipped > 0) return "This viewer does not play this replay: it has a CPU player or a stage other than the six tournament stages.";
+  return "The replay could not be read.";
+}
+
+/** a load that stopped with an error (the network, the reader) */
+export function loadError(e: unknown): string {
+  const m = e instanceof Error ? e.message : String(e);
+  return `The replay could not be opened: ${m}`;
+}
+
+/** what the player says where the picture would be while there is no replay to show */
+export function waitingText(parseProgress: number, problem: string | null): string {
+  return problem ?? (parseProgress > 0 ? "Reading replay…" : "No replay loaded");
 }

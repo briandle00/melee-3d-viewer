@@ -1,13 +1,15 @@
 // The embeddable player's renderer choice (src/embedmode.ts, used by embed.tsx): 3D unless the line art is asked for;
 // when 3D cannot run here at all it says why where the picture would be (no game files: the files' reason; no WebGL 2:
 // "this browser cannot draw WebGL 2") and never switches to the line art by itself; ?renderer= wins over the page's
-// choice, which wins over the setting; and WebGL is not probed when it is not needed (probing makes a context).
+// choice, which wins over the setting; and WebGL is not probed when it is not needed (probing makes a context). And a
+// replay it cannot show: the player says why where the picture would be (and posts {type: "failed", reason}) instead of
+// "Reading replay…" for good.
 //
 //   deno test -A --no-check --sloppy-imports tests/embed-mode.test.ts
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { askedMode, chooseMode, LINE_ART_ASKED, NO_WEBGL2, pick3d, type FilesStatus } from "../src/embedmode.ts";
+import { askedMode, chooseMode, LINE_ART_ASKED, loadError, loadProblem, NO_WEBGL2, pick3d, waitingText, type FilesStatus } from "../src/embedmode.ts";
 
 const ready: FilesStatus = { available: true, enabled: true, reason: null };
 const noFiles: FilesStatus = { available: false, enabled: true, reason: "PlCo.dat could not be read" };
@@ -47,4 +49,20 @@ test("?renderer=3d wins over the setting; the page's svg choice wins over both",
   assert.equal(chooseMode(off, "3d", null, yes).renderer, "3d");
   assert.equal(chooseMode(off, "3d", "svg", yes).renderer, "svg");
   assert.equal(chooseMode(ready, null, "3d", yes).renderer, "3d");
+});
+
+test("a replay it cannot show says why: not fetched, not read, not one it plays; one that is shown says nothing", () => {
+  assert.equal(loadProblem({ status: 404, failed: 0, skipped: 0, loaded: 0 }), "The replay could not be fetched (HTTP 404).");
+  assert.match(loadProblem({ failed: 1, skipped: 0, loaded: 0 })!, /could not be read: the file is damaged or not a Slippi replay/);
+  assert.match(loadProblem({ failed: 0, skipped: 1, loaded: 0 })!, /does not play this replay: it has a CPU player or a stage/);
+  assert.match(loadProblem({ failed: 0, skipped: 0, loaded: 0 })!, /could not be read/);
+  assert.equal(loadProblem({ status: 200, failed: 0, skipped: 0, loaded: 1 }), null);
+  assert.equal(loadError(new TypeError("Failed to fetch")), "The replay could not be opened: Failed to fetch");
+});
+
+test("where the picture would be: the problem, else Reading replay while it reads, else No replay loaded", () => {
+  assert.equal(waitingText(0, null), "No replay loaded");
+  assert.equal(waitingText(1, null), "Reading replay…");
+  // (a replay read and refused: its reason, not "Reading replay…" for good)
+  assert.equal(waitingText(1, "The replay could not be read."), "The replay could not be read.");
 });

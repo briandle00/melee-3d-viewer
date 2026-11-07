@@ -8,12 +8,17 @@ export interface FileStore {
   stubs: ReplayStub[];
   parseProgress: number;
   urlStartFrame?: number;
+  /** the last load's files that could not be read, and how many were read but are not ones these players play */
+  failed: string[];
+  skipped: number;
 }
 
 const [state, setState] = createStore<FileStore>({
   files: [],
   stubs: [],
   parseProgress: 0,
+  failed: [],
+  skipped: 0,
 });
 
 export const fileStore = state;
@@ -23,6 +28,8 @@ export async function load(files: File[], startFrame?: number): Promise<void> {
 
   const {
     goodFilesAndSettings,
+    skipCount,
+    failedFilenames,
   }: {
     goodFilesAndSettings: Array<[File, ReplayStub]>;
     failedFilenames: string[];
@@ -31,6 +38,8 @@ export async function load(files: File[], startFrame?: number): Promise<void> {
 
   // Save results to the store
   batch(() => {
+    setState("failed", failedFilenames);
+    setState("skipped", skipCount);
     setState(
       "stubs",
       goodFilesAndSettings.map(([, settings]) => settings)

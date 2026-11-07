@@ -65,6 +65,10 @@
  * Messages out (to the parent):
  *   {type: "frame", frame, running}      whenever the frame changes
  *   {type: "loaded", frames}             after a replay is ready
+ *   {type: "failed", reason}             a replay asked for cannot be shown:
+ *                                        not fetched, not read, or not one
+ *                                        this viewer plays (the player says
+ *                                        the same where the picture would be)
  *   {type: "renderer", renderer, reason} which viewer is drawing ("3d" or
  *                                        "svg") and, when 3D cannot run, why
  *   {type: "track", state}               the viewer track: "ready",
@@ -110,7 +114,7 @@ import { diagLoaded, diagLoading, diagRunning, diagView } from "~/diag";
 import { fileListSource, prefetchReplay, setFileSource, setTrackUrl, status } from "~/render3d/files";
 import { simAsked, simForReplay } from "~/sim/embed";
 import { mark } from "~/render3d/startup";
-import { askedMode, chooseMode, type Mode } from "~/embedmode";
+import { askedMode, chooseMode, loadError, loadProblem, waitingText, type Mode } from "~/embedmode";
 import { precompilePrograms } from "~/render3d/renderer";
 import "~/state/fileStore";
 import "~/state/replayStore";
@@ -159,24 +163,35 @@ let seekAfterLoad: number | null = null;
 // the viewer track the page gave for the replay shown (the simulator makes none then)
 let givenTrack: string | null = null;
 
+// why the replay last asked for is not shown (null: it is, or it is on its way): said where the picture would be
+const [problem, setProblem] = createSignal<string | null>(null);
+function failed(reason: string) {
+  loading = false;
+  setProblem(reason);
+  post({ type: "failed", reason });
+}
+
 async function loadUrl(url: string, name: string, frame?: number, trackUrl?: string | null) {
   loading = true;
   seekAfterLoad = null;
+  setProblem(null);
   setTrackUrl(url, trackUrl ?? null);
   givenTrack = trackUrl ?? null;
   simForReplay(url, givenTrack);
   try {
     await loadReplay(url, name, frame);
   } catch (e) {
-    loading = false;
-    throw e;
+    failed(loadError(e));
   }
 }
 
 async function loadReplay(url: string, name: string, frame?: number) {
   mark("replayRequested");
   diagLoading();
-  const blob = await (await fetch(url)).blob();
+  const res = await fetch(url);
+  // (a replay the server does not have is said as that, not as the bytes of its error page failing to read)
+  if (!res.ok) { failed(loadProblem({ status: res.status, failed: 0, skipped: 0, loaded: 0 })!); return; }
+  const blob = await res.blob();
   // (the game's files are asked for now, while the replay is read)
   void blob.slice(0, 2048).arrayBuffer().then((head) => { if (!LINE_ART) prefetchReplay(head); }).catch(() => {});
   const start = frame === undefined ? 0 : toIndex(frame);
@@ -187,7 +202,9 @@ async function loadReplay(url: string, name: string, frame?: number) {
   await load([new File([blob], name)], start === 0 ? 1 : start);
   mark("replayParsed");
   const stub = fileStore.stubs[0];
-  if (stub !== undefined) await localLibrary.select(stub);
+  // (not read, or not one these players play: said, rather than "Reading replay…" for good)
+  if (stub === undefined) { failed(loadProblem({ failed: fileStore.failed.length, skipped: fileStore.skipped, loaded: 0 })!); return; }
+  await localLibrary.select(stub);
   // (once it is in: the 3D viewer finds its viewer track by it)
   setSource(url);
 }
@@ -434,7 +451,7 @@ function Embed() {
           when={replayStore.replayData && mode().renderer !== "pending"}
           fallback={
             <div class="flex h-full items-center justify-center text-slate-500">
-              {fileStore.parseProgress > 0 ? "Reading replay…" : "No replay loaded"}
+              {waitingText(fileStore.parseProgress, problem())}
             </div>
           }
         >
