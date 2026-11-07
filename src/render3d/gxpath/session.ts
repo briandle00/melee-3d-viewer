@@ -8,8 +8,9 @@
  * then starts the stream again LEAD rows before the target (msl_gxw_restart_stream: every register file and memory block sent again) on
  * the renderer started fresh, and draws those rows, so the screens that show the game's own earlier pictures are as the game had them.
  * Going back rewinds the module to a checkpoint: the memory pages the match changed since its first row (64 KiB pages, a hash each),
- * kept at the rows sought to; rewinding writes back the checkpoint's pages and, for every page changed since that it does not hold, the
- * page as it was after the first row (kept once seen; the first rewind that needs one it does not have opens the match again for it).
+ * kept a little before the rows sought to (so a frame back or two seconds back finds one near); rewinding writes back the checkpoint's
+ * pages and, for every page changed since that it does not hold, the page as it was after the first row (kept once seen; the first
+ * rewind that needs one it does not have opens the match again for it).
  * Starting the match again puts the module back to its state right after the game files loaded (GxCore.rewind) and opens the match
  * again, in milliseconds; a fresh instance only when the module cannot be put back.
  *
@@ -167,8 +168,11 @@ export class GxSession {
     backend.prepareMemory?.(this.gpu.mem, this.gpu.regs);
     this.feeding = true;
     this.checkpoints = []; this.marks.clear(); this.basePages.clear();
-    // (the checkpoints' baseline is taken at the first seek back, not here: a pass over the module's memory takes a few tenths of a second)
-    this.base = null;
+    // the checkpoints' baseline, the module's pages after the first row: taken here (a pass over the module's memory, a tenth of a
+    // second or two), so a far seek forward keeps checkpoints on its way and the first seek back from there is a rewind to one near.
+    // (Taken at the first seek back instead, that seek played the match from the first row with the simulator alone: seconds far in
+    // the game. The first open is a reopen's match - openIn - so a reopen's pages are this baseline's.)
+    this.base = this.canRewind ? this.hashes() : null;
     this.index = 0;
     this.diverged = null;
     this.picturedRow = -1;
@@ -328,18 +332,7 @@ export class GxSession {
   /** Before showing row `row` behind the match (needsRestart): the module back to the latest checkpoint at or before row - SEEK_LEAD
    *  (the first row's state when none), or, without checkpoints, the match started again */
   async rewindFor(row: number): Promise<void> {
-    if (!this.core || !this.canRewind) { await this.start(); return; }
-    if (!this.base) {
-      // the first seek back: the match started again (a fresh instance, its first row stepped) is the baseline; the pages this instance
-      // had changed by now are kept as they are there (the pages a rewind writes back are mostly these)
-      const old = this.hashes();
-      await this.start();
-      if (this.closed || !this.core) return;
-      const b = this.base = this.hashes(), len = this.wasm!.HEAPU8.length;
-      for (let p = 0; p < Math.max(old.length, b.length) && p * PAGE < len; p++) if (old[p] !== b[p]) this.basePages.set(p, this.page(p));
-      this.backMarks(row - SEEK_LEAD);
-      return;
-    }
+    if (!this.core || !this.canRewind || !this.base) { await this.start(); return; }
     const from = row - SEEK_LEAD;
     const c = [...this.checkpoints].reverse().find((k) => k.row <= Math.max(1, from)) ?? null;
     await this.rewind(c);

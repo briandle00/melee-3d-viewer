@@ -204,9 +204,20 @@ test("a frame back and the J key's two seconds back from far in the game rewind 
     assert.equal(s.shown, row);
     steps.push({ row, simOnly: s.seekStats.simOnly - before });
   }
-  // (the first step back may play from the start: before it nothing was kept; every later one rewinds to a checkpoint at most a
-  // checkpoint's spacing and the stream's lead before it)
-  for (const k of steps.slice(1)) assert.ok(k.simOnly <= 300 + 4 * SEEK_LEAD, `back to ${k.row}: ${k.simOnly} rows stepped alone`);
+  // (each rewinds to a checkpoint at most a checkpoint's spacing and the stream's lead before it: the far seek forward kept two)
+  for (const k of steps) assert.ok(k.simOnly <= 300 + 4 * SEEK_LEAD, `back to ${k.row}: ${k.simOnly} rows stepped alone`);
+  s.close();
+});
+
+test("a far seek forward keeps checkpoints behind the place sought: the first step back from there is near", async () => {
+  const tape = tapeOf(ROWS);
+  const { s } = fakeSession(tape);
+  await s.warmup();
+  await seekTo(s, 3500);
+  const before = s.seekStats.simOnly;
+  await seekTo(s, 3499);
+  assert.equal(s.shown, 3499);
+  assert.ok(s.seekStats.simOnly - before <= 300 + 4 * SEEK_LEAD, `${s.seekStats.simOnly - before} rows stepped alone`);
   s.close();
 });
 
