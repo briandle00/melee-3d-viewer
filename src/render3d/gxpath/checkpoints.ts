@@ -47,8 +47,10 @@ export class Checkpoints {
   /** rows to keep a checkpoint at when the match gets there */
   private marks = new Set<number>();
 
-  /** `back`: the rows between a place's restart row and the nearer of the two checkpoints kept for it (backMarks) */
-  constructor(readonly back: number) {}
+  /** `back`: the rows between a place's restart row and the nearer of the two checkpoints kept for it (backMarks). `keepEarliest`: when
+   *  more than KEEP are kept, the earliest is never the one dropped (a host that goes back to one place again and again, the start of a
+   *  range it loops, marks it first: each loop back stays a rewind to it) */
+  constructor(readonly back: number, readonly keepEarliest = false) {}
 
   /** a baseline is taken: checkpoints can be kept and rewound to */
   get ready(): boolean { return this.base !== null; }
@@ -101,8 +103,12 @@ export class Checkpoints {
     for (const p of this.changed(this.hashes(m))) pages.set(p, this.page(m, p));
     this.kept.push({ row: index, pages });
     this.kept.sort((a, b) => a.row - b.row);
-    while (this.kept.length > KEEP) this.kept.splice(Math.floor(Math.random() * this.kept.length), 1);
+    const from = this.keepEarliest ? 1 : 0;
+    while (this.kept.length > KEEP) this.kept.splice(from + Math.floor(Math.random() * (this.kept.length - from)), 1);
   }
+
+  /** (the checks) the pages that differ from the baseline now: after the match is opened again, those it does not put back */
+  differs(m: CheckpointMemory): number[] { return this.changed(this.hashes(m)); }
 
   /** the latest checkpoint at or before row `row` and after row `after` (null: none) */
   latest(row: number, after = -1): Checkpoint | null {
