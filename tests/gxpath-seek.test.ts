@@ -1,5 +1,6 @@
-// The gx player's match (src/render3d/gxpath/session.ts) on a stand-in simulator module: a first open against a match opened again.
-// With MELEE_ASSETS (tests/game-files.ts) the same check runs on the real module (public/gx).
+// The gx player's seeking (src/render3d/gxpath/session.ts) on a stand-in simulator module: a seek back to the first row, sought rows
+// against the rows of a straight play, and a first open against a match opened again.
+// With MELEE_ASSETS (tests/game-files.ts) the same first-open check runs on the real module (public/gx).
 //   deno test -A --no-check --sloppy-imports tests/gxpath-seek.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -173,6 +174,38 @@ async function straight(tape: Tape, last: number): Promise<number[]> {
   s.close();
   return out;
 }
+
+test("a seek back to the first row shows the first row (the stream's start: its copy of the empty frame buffer)", async () => {
+  const tape = tapeOf(800);
+  const { s } = fakeSession(tape);
+  await s.warmup();
+  await seekTo(s, 0);
+  assert.equal(s.shown, 0, "at load");
+  for (const from of [500, 20, 1]) {
+    await seekTo(s, from);
+    assert.equal(s.shown, from);
+    await seekTo(s, 0);
+    assert.equal(s.shown, 0, `back to the first row from ${from}`);
+    await seekTo(s, 1);
+    assert.equal(s.shown, 1, `the second row drawn from the first (from ${from})`);
+  }
+  s.close();
+});
+
+test("every sought row shows the straight play's picture of it", async () => {
+  const tape = tapeOf(ROWS);
+  const rows = [3000, 2999, 2880, 2760, 1000, 3600, 3550, 200, 20, 0, 1, 2000, 2010, 3900, 3899, 3779, 3659, 5, 3000];
+  const ref = await straight(tape, Math.max(...rows));
+  const { s, backend } = fakeSession(tape);
+  await s.warmup();
+  const differ: string[] = [];
+  for (const row of rows) {
+    await seekTo(s, row);
+    if (s.shown !== row || backend.last !== ref[row]) differ.push(`${row}: shown ${s.shown}, ${backend.last} against ${ref[row]}`);
+  }
+  assert.deepEqual(differ, []);
+  s.close();
+});
 
 /** the module's pages that differ between two of its snapshots */
 function pagesDiffer(a: { length: number; pages: Map<number, Uint8Array> }, b: { length: number; pages: Map<number, Uint8Array> }): number[] {

@@ -300,16 +300,19 @@ export class GxSession {
     this.feedHere();
   }
 
-  /** the renderer started fresh on the stream of the row the module last stepped (not drawn) */
-  private feedHere(): void {
+  /** the renderer started fresh on the stream of the row the module last stepped (not drawn); true when that row's copy to the screen
+   *  made a picture */
+  private feedHere(): boolean {
     const b = this.backend!;
     b.reset!();
     this.gpu = new GxGpu(b, this.core!.initial() as unknown as Dff);
     b.prepareMemory?.(this.gpu.mem, this.gpu.regs);
     b.drawing = false;
     b.fastForward = false;
+    const before = b.pictures;
     this.gpu.runFrame({ fifo: this.core!.stream(), updates: this.core!.updates() });
     this.feeding = true;
+    return b.pictures > before;
   }
 
   /** Before showing row `row` behind the match (needsRestart): the module back to the latest checkpoint at or before row - SEEK_LEAD
@@ -331,8 +334,9 @@ export class GxSession {
     const c = [...this.checkpoints].reverse().find((k) => k.row <= Math.max(1, from)) ?? null;
     await this.rewind(c);
     if (this.closed) return;
-    // (back at the first rows: the stream from its start again, as when the match opened - row 0 is the hand-over and draws nothing)
-    if (!c && row <= NEAR) { this.feedHere(); this.picturedRow = -1; }
+    // (back at the first rows: the stream from its start again, as when the match opened - row 0 is the hand-over and draws nothing;
+    // its copy to the screen, of the frame buffer the renderer starts with, is row 0's picture as when the match opened: the row shown)
+    if (!c && row <= NEAR) this.picturedRow = this.feedHere() ? 0 : -1;
     this.markAt(from);
   }
 
