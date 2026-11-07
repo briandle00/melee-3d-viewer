@@ -43,3 +43,27 @@ test("other speeds draw every frame too", () => {
   assert.ok(Math.abs(steps - 1200) <= 2, `${steps}`);
   assert.equal(undrawn, 0);
 });
+
+test("Play pressed while a seek is on its way says playing at once and plays from the row sought when it lands", () => {
+  let now = 0, landed = false, steps = 0;
+  const session = {
+    index: 0, frameCount: 1e9, shown: -1, wantsRetry: false, onPicture: null,
+    needsRestart: () => false,
+    // (the seek lands on its fourth call: a far seek takes several ticks)
+    calls: 0,
+    seekStep(row: number) { if (++this.calls < 4) return false; this.index = row + 1; this.shown = row; landed = true; return true; },
+    step() { this.index++; this.shown = this.index - 1; steps++; return true; },
+  };
+  const p = new GxPlayback(session as unknown as GxSession, { onPicture() {}, onState() {}, onError(e) { throw e; } }, () => now);
+  void p.seek(5000);
+  p.tick(); now += 1000 / 60;
+  p.play();
+  assert.equal(p.playing, true, "playing at once, the seek still on its way");
+  p.play(); // (a second play, as a host's message: never calls it off)
+  assert.equal(p.playing, true);
+  for (let i = 0; i < 3; i++) { now += 1000 / 60; p.tick(); }
+  assert.equal(landed, true);
+  assert.equal(steps, 0, "no row played before the seek landed");
+  for (let i = 0; i < 60; i++) { now += 1000 / 60; p.tick(); }
+  assert.ok(steps >= 55 && session.shown > 5000, `${steps} rows played from 5000 (at ${session.shown})`);
+});
