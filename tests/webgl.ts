@@ -3,10 +3,11 @@
 // browser is the one CHROMIUM names, else the one Playwright keeps in /opt/pw-browsers, else one on the PATH;
 // without any, `browser()` is null and the tests that need it are skipped.
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { removeDir } from "./tmpdir.ts";
 
 let found: string | null | undefined;
 
@@ -44,6 +45,6 @@ try { ${script}
     if (v && typeof v === "object" && "error" in v) throw new Error(v.error);
     return v as T;
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 }
