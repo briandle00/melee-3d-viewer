@@ -72,9 +72,10 @@ export function runCFile(name: string, input: Uint8Array | string, args: string[
   return new Uint8Array(readFileSync(outPath));
 }
 
-/** the same, text in and text out */
+/** the same, text in and text out (its lines end in "\n" on every system: a reference that writes its file in C's text
+ *  mode writes "\r\n" on Windows) */
 export function runC(name: string, input: string): string {
-  return new TextDecoder().decode(runCFile(name, input));
+  return new TextDecoder().decode(runCFile(name, input)).replace(/\r\n/g, "\n");
 }
 
 /** the build directory let go of (a test's after) */

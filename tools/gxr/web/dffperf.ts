@@ -29,6 +29,6 @@ be.finish();
 const n = loops * (to - from + 1);
 const per = (performance.now() - t0) / n;
 await log(`${q.get("dff")} frames ${from}..${to}: ${per.toFixed(1)} ms per frame; tris/frame ${((be.tris - tris0) / n) | 0}, passes/frame ${((be.passes - passes0) / n).toFixed(1)}, vertex decode ${(gpu.timers.vertex / n).toFixed(2)} ms, memory writes ${(gpu.timers.memory / n).toFixed(2)} ms, front half ${(be.stats.cpuMs / n).toFixed(2)} ms, bin+upload ${(be.stats.flushMs / n).toFixed(2)} ms, list entries ${(be.stats.listEntries / n) | 0}, mem upload ${(be.stats.memBytes / n / 1024) | 0} KiB`);
-const ps = be.poolStats; if (ps) await log(`pool: ${JSON.stringify(ps, (k, v) => typeof v === "number" ? Math.round(v * 10) / 10 : v)} over ${n} frames`);
+const ps = be.poolStats; if (ps) await log(`pool: ${JSON.stringify(ps, (_k, v) => typeof v === "number" ? Math.round(v * 10) / 10 : v)} over ${n} frames`);
 if (q.get("timing") === "1") await log(JSON.stringify(be.collectTimes()));
 await fetch("/done", { method: "POST", body: "ok" });

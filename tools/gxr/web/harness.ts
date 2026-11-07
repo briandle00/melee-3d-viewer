@@ -79,7 +79,7 @@ for (const w of manifest.windows) {
       for (let y = 0; y < 480; y++) for (let x = 0; x < 640; x++) for (let c = 0; c < 3; c++) if (px[((479 - y) * 640 + x) * 4 + c] !== pic[(y * 640 + x) * 4 + c]) bad++;
       await log(`present: ${bad} differing values of ${640 * 480 * 3}`);
     }
-    await log(`${w.name}: ${(performance.now() - t1).toFixed(0)} ms, frames ${frameMs.map((x) => x.toFixed(0)).join("/")} ms, tris ${be.tris}, passes ${be.passes}, per drawn frame: vertex decode ${(vtxAcc / 4).toFixed(1)} ms, memory writes ${(memAcc / 4).toFixed(1)} ms, front half ${(cpuAcc / 4).toFixed(1)} ms, bin+upload ${(flushAcc / 4).toFixed(1)} ms, gpu wait ${(gpuAcc / 4).toFixed(1)} ms, gpu passes ${JSON.stringify(gpuTimes, (k, v) => typeof v === "number" ? Math.round(v * 10) / 10 : v)}`);
+    await log(`${w.name}: ${(performance.now() - t1).toFixed(0)} ms, frames ${frameMs.map((x) => x.toFixed(0)).join("/")} ms, tris ${be.tris}, passes ${be.passes}, per drawn frame: vertex decode ${(vtxAcc / 4).toFixed(1)} ms, memory writes ${(memAcc / 4).toFixed(1)} ms, front half ${(cpuAcc / 4).toFixed(1)} ms, bin+upload ${(flushAcc / 4).toFixed(1)} ms, gpu wait ${(gpuAcc / 4).toFixed(1)} ms, gpu passes ${JSON.stringify(gpuTimes, (_k, v) => typeof v === "number" ? Math.round(v * 10) / 10 : v)}`);
   } catch (e) {
     failed = true;
     await log(`${w.name}: ERROR ${(e as Error).stack}`);

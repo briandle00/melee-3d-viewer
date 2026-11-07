@@ -4,9 +4,10 @@
 // at the usual place): `GX_GPU_TESTS=1 deno test -A --no-check --sloppy-imports tests/gxr-gpu.test.ts`.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeDir } from "./tmpdir.ts";
 
 const on = (() => { try { return Deno.env.get("GX_GPU_TESTS") === "1"; } catch { return false; } })();
 
@@ -20,7 +21,7 @@ function page(name: string, args: string[]): void {
     const text = new TextDecoder().decode(r.stdout) + new TextDecoder().decode(r.stderr);
     assert.ok(r.success, text.slice(-2000));
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 }
 

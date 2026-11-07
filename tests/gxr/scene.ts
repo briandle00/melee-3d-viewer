@@ -10,6 +10,7 @@ export function emptyDff(): Dff {
 
 /** run a command stream (one frame) on a fresh processor; returns it and its CPU backend */
 export function runStream(w: FifoWriter | Uint8Array): { gpu: GxGpu; be: CpuBackend } {
+  // deno-lint-ignore prefer-const -- (assigned once, after the backend that reads it through a closure is made)
   let gpu!: GxGpu;
   const be = new CpuBackend(() => ({ mem: gpu.mem.data, tmem: gpu.regs.tmem, tluts: gpu.regs.tluts }));
   gpu = new GxGpu(be, emptyDff(), null);

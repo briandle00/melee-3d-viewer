@@ -108,37 +108,6 @@ export function setLineArt(on: boolean): void {
   setLineArtSignal(on);
 }
 
-export function selectCustomAttack(attackName: AttackName) {
-  setReplayState("customAttack", attackName);
-  if (replayState.replayData) {
-    setReplayState("highlights", (highlights) => ({
-      ...highlights,
-      customAttack: search(replayState.replayData!, [
-        { predicate: landsAttack(replayState.customAttack) },
-      ]),
-    }));
-  }
-}
-
-export function selectCustomAction(actionName: ActionName) {
-  setReplayState("customAction", actionName);
-  if (replayState.replayData) {
-    setReplayState("highlights", (highlights) => ({
-      ...highlights,
-      customAction: search(replayState.replayData!, [
-        { predicate: action(replayState.customAction) },
-      ]),
-    }));
-  }
-}
-
-export function selectHighlight(nameAndHighlight: [string, Highlight]) {
-  batch(() => {
-    setReplayState("selectedHighlight", nameAndHighlight);
-    jump(nameAndHighlight[1].startFrame - 30);
-  });
-}
-
 export function nextHighlight() {
   ensureHighlights();
   const highlights = Object.entries(replayState.highlights).flatMap(
@@ -148,7 +117,7 @@ export function nextHighlight() {
   const currentIndex =
     replayState.selectedHighlight !== undefined
       ? highlights.findIndex(
-          ([name, highlight]) => replayState.selectedHighlight![1] === highlight
+          ([, highlight]) => replayState.selectedHighlight![1] === highlight
         )
       : -1;
   const nextIndex = wrapHighlight(replayState, currentIndex + 1);
@@ -167,7 +136,7 @@ export function previousHighlight() {
   const currentIndex =
     replayState.selectedHighlight !== undefined
       ? highlights.findIndex(
-          ([name, highlight]) => replayState.selectedHighlight![1] === highlight
+          ([, highlight]) => replayState.selectedHighlight![1] === highlight
         )
       : 1;
   const previousIndex = wrapHighlight(replayState, currentIndex - 1);
@@ -709,7 +678,7 @@ function wrapFrame(replayState: ReplayStore, frame: number): number {
 
 function wrapHighlight(replayState: ReplayStore, highlight: number): number {
   const length = Object.entries(replayState.highlights).flatMap(
-    ([name, highlights]) => highlights
+    ([, highlights]) => highlights
   ).length;
   return (highlight + length) % length;
 }

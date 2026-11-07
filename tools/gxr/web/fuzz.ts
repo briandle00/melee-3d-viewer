@@ -1,11 +1,11 @@
 // Random scenes through the CPU reference and the GPU backend: both must produce the same frame buffer (colors and depths).
 // Exercises everything the 22 recorded windows do not: all texel formats, filters and wrap modes, TEV scales, biases and compare modes,
 // blend factors and logic ops, fog forms, depth functions, the alpha test, the depth texture, the indirect unit.
-import { Dff, Memory } from "../../../src/render3d/gxr/dff.ts";
+import { Dff } from "../../../src/render3d/gxr/dff.ts";
 import { GxGpu } from "../../../src/render3d/gxr/gpu.ts";
 import { GxGl } from "../../../src/render3d/gxr/gl.ts";
 import { CpuBackend } from "../../../src/render3d/gxr/cpu.ts";
-import { basicScene, FifoWriter } from "../../../src/render3d/gxr/encode.ts";
+import { basicScene } from "../../../src/render3d/gxr/encode.ts";
 
 const q = new URLSearchParams(location.search);
 const log = (s: string) => fetch("/log", { method: "POST", body: s });
@@ -160,6 +160,7 @@ function buildScene(seed: number, o: Opts): { stream: Uint8Array; mem: Uint8Arra
 const stageOrd: number[] = [];
 
 function runCpu(sc: { stream: Uint8Array; mem: Uint8Array }) {
+  // deno-lint-ignore prefer-const -- (assigned once, after the backend that reads it through a closure is made)
   let gpu!: GxGpu;
   const cpu = new CpuBackend(() => ({ mem: gpu.mem.data, tmem: gpu.regs.tmem, tluts: gpu.regs.tluts }));
   gpu = new GxGpu(cpu, emptyDff(), sc.mem);

@@ -13,6 +13,7 @@ for (const w of manifest.windows) {
   const t0 = performance.now();
   const dff = parseDff(Deno.readFileSync(`${SPEC}/${w.recording}`));
   const mem1 = Deno.readFileSync(`${SPEC}/${w.memory}`);
+  // deno-lint-ignore prefer-const -- (assigned once, after the backend that reads it through a closure is made)
   let gpu!: GxGpu;
   const be = new CpuBackend(() => ({ mem: gpu.mem.data, tmem: gpu.regs.tmem, tluts: gpu.regs.tluts }));
   gpu = new GxGpu(be, dff, mem1);

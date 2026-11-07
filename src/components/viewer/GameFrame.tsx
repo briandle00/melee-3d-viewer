@@ -1,11 +1,8 @@
 import type { JSX } from "solid-js";
-
-/** The game's picture is 73:60 (its camera's shape, the TV's 4:3 with the
- *  console's pixels): 1.2167 across for 1 down. */
-export const GAME_ASPECT = 73 / 60;
+import { FRAME_INNER_SIZE, FRAME_OUTER_STYLE } from "~/common/aspect";
 
 /**
- * The game's picture at the game's own shape, always.
+ * The game's picture at the game's own shape (73:60, common/aspect.ts), always.
  *
  * Whatever the box a page gives the player, the picture inside is the
  * largest 73:60 rectangle that fits, centered; the rest of the box is left to
@@ -15,9 +12,9 @@ export const GAME_ASPECT = 73 / 60;
  */
 export function GameFrame(props: { children: JSX.Element; class?: string }) {
   return (
-    <div class="relative min-h-0 w-full flex-1" style="container-type: size" data-game-frame>
+    <div class="relative min-h-0 w-full flex-1" style={FRAME_OUTER_STYLE} data-game-frame>
       <div class={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 overflow-hidden ${props.class ?? ""}`}
-           style={{ width: "min(100cqw, calc(100cqh * 73 / 60))", height: "min(100cqh, calc(100cqw * 60 / 73))" }}>
+           style={FRAME_INNER_SIZE}>
         {props.children}
       </div>
     </div>

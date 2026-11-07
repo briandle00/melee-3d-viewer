@@ -64,6 +64,11 @@ export class ExportCanceled extends Error {
   constructor() { super("the export was canceled"); this.name = "ExportCanceled"; }
 }
 
+/** the video track's timescale, ticks a second (mp4-muxer's frameRate, which must be a whole number): the frame rate when it is
+ *  one (60: a frame is one tick), else the NTSC rate's numerator (the console's 60000/1001: 60000 ticks a second, each frame exactly
+ *  1001 of them) */
+export const timescaleOf = (fps: number) => (Number.isInteger(fps) ? fps : Math.round(fps * 1001));
+
 /** whether this browser can make a video at all (WebCodecs' H.264 encoder) */
 export const canExport = () => typeof VideoEncoder !== "undefined" && typeof VideoFrame !== "undefined";
 
@@ -148,7 +153,7 @@ export async function exportMp4(o: ExportOptions): Promise<ExportResult> {
     onData: (data, position) => { if (position !== at) outOfOrder = true; at = position + data.length; parts.push(new Blob([data.slice() as unknown as BlobPart])); },
     chunked: true, chunkSize: 8 << 20,
   });
-  const muxer = new Muxer({ target, video: { codec: "avc", width, height, frameRate: o.fps }, fastStart: "fragmented", minFragmentDuration: 1,
+  const muxer = new Muxer({ target, video: { codec: "avc", width, height, frameRate: timescaleOf(o.fps) }, fastStart: "fragmented", minFragmentDuration: 1,
                             firstTimestampBehavior: "offset" });
   let failed: Error | null = null;
   const encoder = new VideoEncoder({
@@ -156,7 +161,9 @@ export async function exportMp4(o: ExportOptions): Promise<ExportResult> {
     error: (e) => { failed = e instanceof Error ? e : new Error(String(e)); },
   });
   encoder.configure(config);
-  const composer = new Composer(width, height, o.tv);
+  // (a TV the browser cannot draw: the encoder made above is closed, not left holding the graphics card's encoder)
+  let composer: Composer;
+  try { composer = new Composer(width, height, o.tv); } catch (e) { encoder.close(); throw e; }
   const check = () => {
     if (failed) throw failed;
     if (o.signal?.aborted) throw new ExportCanceled();

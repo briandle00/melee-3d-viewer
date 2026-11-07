@@ -54,7 +54,7 @@ export function psnrY(a: Uint8Array | Uint8ClampedArray, b: Uint8Array | Uint8Cl
 
 /** the MP4's boxes: a video track's samples and their durations, in its timescale (mdhd) - from the sample table (stsz, stts) of a
  *  file with its index at the front, or from the fragments (moof: tfhd's default duration, trun's samples) of a fragmented one */
-function mp4Samples(bytes: Uint8Array): { samples: number; durations: number[]; timescale: number } {
+export function mp4Samples(bytes: Uint8Array): { samples: number; durations: number[]; timescale: number } {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const out = { samples: 0, durations: [] as number[], timescale: 0 };
   let stsz = -1, defaultDuration = 0;

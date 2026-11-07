@@ -87,7 +87,8 @@ await log(`check scene vs CPU reference: ${pix}`);
   new GxGpu(be, sc.init, sc.mem.slice()).runFrame({ fifo: sc.stream, updates: [] });
   be.flush();
   const e = be.readEfb();
-  let lit = 0, depths = new Set<number>(), colors = new Set<number>();
+  let lit = 0;
+  const depths = new Set<number>(), colors = new Set<number>();
   for (let i = 0; i < e.color.length; i++) if (e.color[i] !== 0 || e.depth[i] !== 0) { lit++; depths.add(e.depth[i]); colors.add(e.color[i]); }
   await log(`check scene: ${lit} pixels drawn, ${colors.size} colors, ${depths.size} depths, ${be.tris} triangles`);
 }
