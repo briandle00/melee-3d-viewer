@@ -2975,6 +2975,11 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const data = replayStore.replayData;
     if (!fxw || !data || benchFrame !== null || performance.now() - lastDrawAt < 50) return;
     fillChecks(fxw, data, ready(), IDLE_FILL_MS);
+    // (a far jump is drawn from a short warm-up when no checkpoint is near it, which is not the game's effects: once
+    // the checkpoints made since come within CATCH_UP of the frame shown, it is drawn again, exactly. Until
+    // 2026-11-08 a paused picture kept the warm-up's effects until the next frame was asked for)
+    const c = checks(fxw), f = fxw.frame;
+    if (!c.exact && f === replayStore.frame && f - Math.max(c.store.nearest(f).frame, 0) <= CATCH_UP) schedule();
   }, 60);
   onCleanup(() => clearInterval(idleFill));
   /** checkpoints ahead of the ones playing has made, in `ms` of a frame's spare time: the world as it stands is
