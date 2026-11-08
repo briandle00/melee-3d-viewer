@@ -13,6 +13,7 @@ import { K, Particle } from "./particles";
 import type { Sprite } from "./bank";
 import { appExtents, appMatrix, drawPoint, followMatrix, mtxDir, mtxPoint } from "./appsrt";
 import { PSMTXInverse, PSMTXMultVec, mtxFromGL } from "../gxmath";
+import { cosf, sinf, tanf } from "./gamemath";
 
 export const FLOATS = 17; // pos 3, uv 2, prim 4, env 4, alpha-compare 3, textured 1
 
@@ -59,6 +60,29 @@ const curV = [0, 0, 0], prevV = [0, 0, 0], curW = [0, 0, 0], prevW = [0, 0, 0];
 // (the game skips a particle smaller than this: psDispParticles' FLT_EPSILON; and FLT_MIN, below which a
 // motion's up part counts as none)
 const FLT_EPSILON = 1.1920929e-7, FLT_MIN = 1.1754944e-38;
+
+const lastT = [0, 0, 0];
+/** where a tornado particle was a step back (psdisp.c calcTornadoLastPos): its angle round its generator and its
+ *  way along less a step of its generator's, in its generator's space - its trail's tail and its way across the
+ *  picture are drawn from it (a tornado's velocity is no motion). Until 2026-11-09 they were drawn from its
+ *  velocity as any particle's: the KO blast's two spirals (common 0xD8) 30 to 50 pixels off */
+export function tornadoLast(p: Particle, out: number[]): number[] {
+  const g = p.gen;
+  // (the game reads a generator it does not have here: never so in its lists)
+  if (!g) { out[0] = p.px; out[1] = p.py; out[2] = p.pz; return out; }
+  const f32 = Math.fround;
+  const sina = sinf(p.grav), sinb = sinf(p.fric), cosa = cosf(p.grav), cosb = cosf(p.fric);
+  const vz0 = f32(p.vz - (g.aux[0] ?? 0)), vx0 = f32(p.vx - g.grav);
+  let radius = Math.abs(g.radius);
+  radius = f32(radius + f32(vz0 * tanf(Math.abs(g.angle))));
+  radius = f32(radius * p.vy);
+  const px = f32(radius * cosf(vx0)), py = f32(radius * sinf(vx0)), pz = vz0;
+  out[0] = f32(f32(f32(px * cosb) + f32(pz * sinb)) + g.px);
+  out[1] = f32(f32(f32(f32(-px * sina) * sinb) + f32(py * cosa)) + f32(f32(pz * sina) * cosb)) + g.py;
+  out[2] = f32(f32(f32(f32(-px * cosa) * sinb) - f32(py * sina)) + f32(f32(pz * cosa) * cosb)) + g.pz;
+  out[1] = f32(out[1]); out[2] = f32(out[2]);
+  return out;
+}
 
 /** the particles as quads, in the order the game draws them (psDispParticles: the lists' particles that
  *  write depth, TexEdge, in the edge pass, then the rest in the see-through pass, each in its list's order),
@@ -112,8 +136,16 @@ export function buildParticles(list: Particle[],
     // tall as |its second column| times it (appsrt.ts); under a generator's own transform that only
     // follows (its kind's 0x20000: the game's xA2), the quad is sized the same way but the particle's place
     // and motion are in the camera's axes from the transform's place, not turned or scaled by it
+    // (its motion: its velocity, or a tornado's - whose velocity holds its angle round its generator, how far out
+    // and how far along - from where it was a step back, calcTornadoLastPos)
+    let lvx = p.vx, lvy = p.vy, lvz = p.vz;
+    const tornado = (p.kind & K.TORNADO) !== 0;
+    if (tornado) {
+      tornadoLast(p, lastT);
+      lvx = Math.fround(p.px - lastT[0]); lvy = Math.fround(p.py - lastT[1]); lvz = Math.fround(p.pz - lastT[2]);
+    }
     let cx = p.px, cy = p.py, cz = p.pz, ex = p.size, ey = p.size;
-    let wx = p.vx, wy = p.vy, wz = p.vz;
+    let wx = lvx, wy = lvy, wz = lvz;
     const srt = p.srt;
     if (srt) {
       if (srt.view && haveView) {
@@ -123,7 +155,8 @@ export function buildParticles(list: Particle[],
         [ex, ey] = appExtents(appMatrix(srt), p.size, axes.view);
         followMatrix(srt, viewG, followM);
         drawPoint(followM, p.px, p.py, p.pz, curV);
-        const dz = Math.fround(p.pz - p.vz), dx = Math.fround(p.px - p.vx), dy = Math.fround(p.py - p.vy);
+        const dz = tornado ? lastT[2] : Math.fround(p.pz - p.vz), dx = tornado ? lastT[0] : Math.fround(p.px - p.vx);
+        const dy = tornado ? lastT[1] : Math.fround(p.py - p.vy);
         drawPoint(followM, dx, dy, dz, prevV);
         PSMTXMultVec(viewInv, curV, curW);
         PSMTXMultVec(viewInv, prevV, prevW);
@@ -135,14 +168,14 @@ export function buildParticles(list: Particle[],
         cx = srt.tx + p.px * R[0] + p.py * U[0] + p.pz * B0;
         cy = srt.ty + p.px * R[1] + p.py * U[1] + p.pz * B1;
         cz = srt.tz + p.px * R[2] + p.py * U[2] + p.pz * B2;
-        wx = p.vx * R[0] + p.vy * U[0] + p.vz * B0;
-        wy = p.vx * R[1] + p.vy * U[1] + p.vz * B1;
-        wz = p.vx * R[2] + p.vy * U[2] + p.vz * B2;
+        wx = lvx * R[0] + lvy * U[0] + lvz * B0;
+        wy = lvx * R[1] + lvy * U[1] + lvz * B1;
+        wz = lvx * R[2] + lvy * U[2] + lvz * B2;
       } else {
         const m = appMatrix(srt);
         [ex, ey] = appExtents(m, p.size, axes.view);
         [cx, cy, cz] = mtxPoint(m, p.px, p.py, p.pz);
-        [wx, wy, wz] = mtxDir(m, p.vx, p.vy, p.vz);
+        [wx, wy, wz] = mtxDir(m, lvx, lvy, lvz);
       }
     }
     // (drawn somewhere else than the game has it: the HUD's, at this player's own HUD's place)
