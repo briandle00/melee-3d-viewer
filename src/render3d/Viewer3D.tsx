@@ -68,6 +68,7 @@ import type { ColAnimTables, Tint as ColTint } from "./fx/colanim";
 import { BgFlash, FLASH_CAMERA, flashQuad } from "./fx/bgflash";
 import { itemAnimation, itemAnimationIndex } from "./item-animation";
 import { samusBombClocks, samusBombRotation } from "./item-facing";
+import { shyGuyAnim, shyGuyClock } from "./shyguy";
 import { THUNDERS, thunderScaleY } from "./thunder";
 import { itemSource } from "./item-source";
 import { chargeShotScale, isShadowBall, shadowBallScale } from "./shadow-ball";
@@ -4235,7 +4236,7 @@ function drawShyGuys(r: Renderer, sg: { prop: Prop; prop2: Prop | null; scale: n
     if (it.typeId !== SHY_GUY) continue;
     const t = shyGuyClock(data, frame, it);
     // (animation 2's in state 4, and on through the states that keep the animation playing: it_803F83F0's -1)
-    const prop = shyClocks.get(data)?.get(it.spawnId)?.anim === 2 && sg.prop2 ? sg.prop2 : sg.prop;
+    const prop = shyGuyAnim(data, it.spawnId) === 2 && sg.prop2 ? sg.prop2 : sg.prop;
     const turn = turnOf?.(it.spawnId);
     if (turn) prop.pose(t, it.xPosition, it.yPosition, 2, sg.scale, turn[1], true, turn[2], turn[0]);
     else prop.pose(t, it.xPosition, it.yPosition, 2, sg.scale, it.facingDirection < 0 ? Math.PI : 0, true);
@@ -4409,46 +4410,6 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
 };
 type ReplayItem = NonNullable<ReplayData["frames"][number]["items"]>[number];
 
-// A Shy Guy's animation is its own (itheiho.c): set from its start when it
-// begins to fly (state 1, it_802D8918) or flees (state 4, at twice the rate:
-// itHeiho_UnkMotion4_Anim), from the start again when it ends (256 frames:
-// it_80272C6C), and each time it lands on a floor (itHeiho_UnkMotion1_Coll:
-// it_8026DA70) - the frame the replay has its speed across as 0, its speed
-// being recomputed from its bone that frame (it_802D98C4); in the states
-// without an animation (0, 2, 3) it holds where it was. Stepped frame by frame
-// from the last one it was asked for (a seek walks it again from the item's
-// first frame).
-const SHY_FLY = new Set([1, 4]);
-const shyClocks = new WeakMap<ReplayData, Map<number, { at: number; state: number; t: number; anim: number }>>();
-function shyGuyClock(data: ReplayData, frame: number, it: ReplayItem): number {
-  let clocks = shyClocks.get(data);
-  if (!clocks) shyClocks.set(data, (clocks = new Map()));
-  let c = clocks.get(it.spawnId);
-  if (!c || c.at > frame || frame - c.at > 1) {
-    let f = frame;
-    while (f > 0 && data.frames[f - 1]?.items?.some((q) => q.spawnId === it.spawnId)) f--;
-    c = { at: f - 1, state: -1, t: 0, anim: 0 };
-    clocks.set(it.spawnId, c);
-  }
-  for (let f = c.at + 1; f <= frame; f++) {
-    const q = f === frame ? it : data.frames[f]?.items?.find((x) => x.spawnId === it.spawnId);
-    if (!q) continue;
-    const rate = q.state === 4 ? 2 : 1;
-    if (q.state !== c.state) {
-      if (SHY_FLY.has(q.state)) c.t = 0;
-      // (states 1 and 4 start their animations, 0 and 2; the others keep the one playing)
-      if (q.state === 1) c.anim = 0;
-      else if (q.state === 4) c.anim = 2;
-    }
-    else if (SHY_FLY.has(q.state)) {
-      if (Math.abs(q.xVelocity) < 1e-6) c.t = 0;
-      else { c.t += rate; if (c.t >= 256) c.t = 0; }
-    }
-    c.state = q.state;
-    c.at = f;
-  }
-  return c.t;
-}
 // Kirby's hats on the last frame drawn (the checks read them)
 let drawnKirbyHats: { player: number; kind: number; loaded: boolean }[] = [];
 // the articles hung on a fighter on the last frame drawn (the checks read them)
