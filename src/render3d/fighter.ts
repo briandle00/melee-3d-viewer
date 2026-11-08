@@ -598,6 +598,25 @@ export class Fighter {
     return out;
   }
 
+  /** a model its article's special attributes keep (+`offset`), whole, with the material animation they keep at
+   *  +`matAt` (a pointer to it: Ness's yo-yo ball's, +0x58, which it_802BE5D8 adds to it); null without one */
+  articleModelMat(index: number, offset: number, matAt: number): Prop | null {
+    const key = `${index}:${offset}:mat${matAt}`;
+    if (this.articleModels.has(key)) return this.articleModels.get(key)!;
+    const a = this.pl;
+    const list = ptr(a, this.ftData + 0x48);
+    const art = list === null ? null : ptr(a, list + index * 4);
+    const special = art === null ? null : ptr(a, art + 0x04);
+    const joint = special === null ? null : ptr(a, special + offset);
+    const mat = special === null ? null : ptr(a, special + matAt);
+    let out: Prop | null = null;
+    if (joint !== null) {
+      try { out = new Prop(a, joint, null, mat, `article:${this.internalId}:${index}:+${offset}`, true); } catch { out = null; }
+    }
+    this.articleModels.set(key, out);
+    return out;
+  }
+
   /** one of an article's models - its own (`at` null) or one its special
    *  attributes keep (`at`: their offset) - from its first child down, with
    *  the animations its special attributes keep at `anim` (joint, material:

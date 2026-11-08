@@ -328,6 +328,23 @@ export class Prop {
     this.place.set(m.subarray(0, 16));
     sk.update(this.place);
   }
+  /** after the pose, joints below the root laid as given (by preorder index, the root 0 left out; the nine values
+   *  rot, scale, trans, a value never sent NaN: kept) - a chain link's tree as the track has it ("lj") */
+  layJoints(joints: Map<number, Float32Array>) {
+    const sk = this.skeleton;
+    let any = false;
+    for (const [j, v] of joints) {
+      if (j <= 0 || j >= sk.n) continue;
+      for (let k = 0; k < 3; k++) {
+        if (!Number.isNaN(v[k])) sk.rot[j * 3 + k] = v[k];
+        if (!Number.isNaN(v[3 + k])) sk.scale[j * 3 + k] = v[3 + k];
+        if (!Number.isNaN(v[6 + k])) sk.trans[j * 3 + k] = v[6 + k];
+      }
+      any = true;
+    }
+    if (any) sk.update(this.place);
+  }
+
   /** the track's joints over the animation's (its root is the item's place, never in it) */
   private layTrackPose() {
     const tp = this.trackPose;

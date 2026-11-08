@@ -53,7 +53,7 @@ import { ChargeAttrs, storedAnim, storedCharges, storedFromTrack } from "./fx/ch
 import { invincibilityAsked, timedInvincible } from "./fx/invincible";
 import { launchSmokes } from "./fx/launchsmoke";
 import { WAIT, waitSubactions } from "./waitanim";
-import { fetchTrack, replayPath, TrackData, ViewerTrack, type TrackPose } from "./track";
+import { fetchTrack, LINK_JOINTS, replayPath, TrackData, ViewerTrack, type TrackPose } from "./track";
 import { SHIELD_MODEL } from "./fx/dispatch";
 import { pageCache } from "../state/pageCache";
 import { SHIELD_FX, trackFilesOf, trackShapes, type TrackShapes } from "./fx/drawn";
@@ -2238,7 +2238,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         if (!trackChains.has(it.spawnId)) continue;
         const links = trNow!.pose("lm", String(it.spawnId), fno - 123);
         const f = articleFighter(data, fs, it, fno);
-        if (links && f) drawTrackChain(r, f, it, links, trackArticles.get(data)?.get(it.typeId), chainClock(data, fno, it), pass);
+        if (links && f) {
+          // (version 3: each link's tree below its root, "lj", and the material frame its code laid, "lmat")
+          const below = trNow!.pose("lj", String(it.spawnId), fno - 123)?.joints ?? null;
+          drawTrackChain(r, f, it, links, trackArticles.get(data)?.get(it.typeId), chainClock(data, fno, it), pass,
+                         below, (k) => trNow!.linkMaterial(it.spawnId, k, fno - 123));
+        }
       }
     };
     // (their first opaque copy, under the stage's lights, then the second, under the fighters')
@@ -4701,11 +4706,13 @@ const CHAINS: Record<number, { art: number; itemType?: number; glowAnim?: number
 // model, always drawn. The track's link 0 is that end. By the owner's character: its article, the link
 // models' attribute offsets, the end's.
 const TRACK_CHAINS: Record<number, { art: number; link: (i: number) => number; end: number;
-                                      linkAnim?: (i: number) => number; endAnim?: number }> = {
+                                      linkAnim?: (i: number) => number; endAnim?: number;
+                                      /** the end's material animation, a pointer at this offset of the special attributes */
+                                      endMat?: number }> = {
   6: { art: 2, link: (i) => (i % 2 ? 0x54 : 0x58), end: 0x5c },
   20: { art: 2, link: (i) => (i % 2 ? 0x54 : 0x58), end: 0x5c },
   7: { art: -1, link: () => 0x64, end: 0x68 },
-  8: { art: 10, link: () => 0x50, end: 0x54 },
+  8: { art: 10, link: () => 0x50, end: 0x54, endMat: 0x58 },
   // (the grapple's links: three models in turn by i, each with its own animation (+0x74, +0x80, +0x8C), and
   // the claw (+0x70) with its own (+0x98), from when the item is made: itsamusgrapple.c it_802B743C)
   13: { art: 3, link: (i) => [0x64, 0x68, 0x6c][i % 3], end: 0x70, linkAnim: (i) => [0x74, 0x80, 0x8c][i % 3],
@@ -4716,7 +4723,8 @@ const TRACK_CHAINS: Record<number, { art: number; link: (i: number) => number; e
 const trackLinkMtx = new Float32Array(16);
 
 function drawTrackChain(r: Renderer, f: Fighter, it: ReplayItem, links: TrackPose, said: number | undefined,
-                        age: number, pass: "opa" | "xlu") {
+                        age: number, pass: "opa" | "xlu", below: Map<number, Float32Array> | null = null,
+                        matOf: ((link: number) => number | null) | null = null) {
   const c = TRACK_CHAINS[f.internalId];
   if (!c) return;
   const art = said ?? c.art;
@@ -4735,7 +4743,9 @@ function drawTrackChain(r: Renderer, f: Fighter, it: ReplayItem, links: TrackPos
     if (v.some(Number.isNaN)) continue;
     const anim = k === 0 ? c.endAnim : c.linkAnim?.(i);
     const off = k === 0 ? c.end : c.link(i);
-    const p = anim !== undefined ? f.articleAnimated(art, off, anim) : f.articleModel(art, off);
+    const mat = k === 0 ? c.endMat : undefined;
+    const p = anim !== undefined ? f.articleAnimated(art, off, anim)
+      : mat !== undefined ? f.articleModelMat(art, off, mat) : f.articleModel(art, off);
     if (!p) continue;
     // (rows 0-2 of the 3x4, as the renderer's column-major 4x4)
     for (let row = 0; row < 3; row++) for (let col = 0; col < 4; col++) trackLinkMtx[col * 4 + row] = v[row * 4 + col];
@@ -4743,7 +4753,16 @@ function drawTrackChain(r: Renderer, f: Fighter, it: ReplayItem, links: TrackPos
     trackLinkMtx[15] = 1;
     // (a link with animations is its model's root's child, posed by them under the link's matrix)
     if (anim !== undefined) p.poseUnderMatrix(trackLinkMtx, age);
+    // (a material animation its code lays at a frame and leaves: Ness's yo-yo ball, it_802BE5D8 - 1 while it
+    // spins, 0 once let go; 0 until the track says)
+    else if (mat !== undefined) p.poseMatrix(trackLinkMtx, matOf?.(k) ?? 0);
     else p.poseMatrix(trackLinkMtx);
+    // (and the link's joints below its root as the item's code turned them: the yo-yo ball's spin, "lj")
+    if (below) {
+      const mine = new Map<number, Float32Array>();
+      for (const [key, v] of below) if (Math.floor(key / LINK_JOINTS) === k) mine.set(key % LINK_JOINTS, v);
+      if (mine.size) p.layJoints(mine);
+    }
     r.drawSkeletonTrsp(p.skeleton, TRSP[pass]);
   }
   void it;
