@@ -1156,9 +1156,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   const edgeView = mat(), edgeProj = mat(), edgeVP = mat(), edgeGx = new Float32Array(16);
   const edgeEye = [0, 0, 0], edgeAt = [0, 0, 0], edgeKinds = [0, 0, 0, 0, 0, 0];
   const edgeKindsOf = (data: ReplayData, g: number): number[] | null => {
-    // (only frames the camera run has done: a jump doesn't run it ahead - the idle time does)
+    // (the viewer track's camera has every frame; a camera this player runs, only the frames the run has done: a jump
+    // doesn't run it ahead - the idle time does. Until 2026-11-08 the track's camera counted as none, so after a jump
+    // every arrow stood where the frame's own magnifiers put it, not where the game had last left it)
     const track = camTrack(), fs = ready();
-    if (!track || !fs || !camRun || camRun.out !== track || g >= camRun.done || (g + 1) * CAM_STRIDE > track.length) return null;
+    if (!track || !fs || (g + 1) * CAM_STRIDE > track.length) return null;
+    if (camRun && camRun.out === track ? g >= camRun.done : viewerTrack()?.diverges && g >= viewerTrack()!.until + 123) return null;
     const t = g * CAM_STRIDE;
     for (let i = 0; i < 3; i++) { edgeEye[i] = track[t + i]; edgeAt[i] = track[t + 3 + i]; }
     gameView(edgeView, edgeEye, edgeAt);
