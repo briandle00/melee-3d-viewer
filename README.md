@@ -81,6 +81,12 @@ and give the viewer one flat folder holding:
 Copying the whole extracted `files/` folder plus `main.dol` is simplest; the
 viewer only reads the files it needs, by name.
 
+For the GX player's sound, keep the disc's `audio` folder as it is inside that
+folder (`audio/us/smash2.sem`, `audio/us/*.ssm`, `audio/*.ssm`, `audio/*.hps`):
+the sound reads the files the game names for a match (its sound macros, the
+common banks, the fighters' and the stage's banks, the stage's music) when the
+match opens. Without the folder the player plays without sound.
+
 How the viewer gets them (`src/render3d/files.ts`):
 
 - the dev and preview servers serve a `game/` folder in the repository root at
@@ -314,6 +320,9 @@ How to use it:
   a second. Every frame is drawn in both.
 - Play, pause, seek, frame step (arrow keys), and the slower and faster speeds
   work as in the other player.
+- **Sound** and **Music**: the game's own sound (see "The game's sound" below).
+  Sound starts it (browsers start audio only from a click); Music turns the
+  game's music off and on, the rest of the sound staying.
 
 Hosting: the page and its scripts (including the worker script) must be sent
 with `Cross-Origin-Opener-Policy: same-origin` and
@@ -329,7 +338,9 @@ renderer's shader (10 to 20 seconds, once per browser).
 and TV. Every frame is drawn offscreen as fast as the graphics card allows (not in real time) by the same renderer the player uses,
 encoded with the browser's own H.264 encoder (WebCodecs; the graphics card's encoder when it has one) and put in an MP4 by
 [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) (MIT). The file is made in the browser and saved to its downloads; nothing is
-uploaded. There is no sound yet.
+uploaded. With the player's sound on the video has the game's sound (**Sound**: *The game's sound* or *None*): the sound the player
+plays, row for row, as an AAC track at 48 kHz (Opus where the browser has no AAC encoder), each row's samples played at the
+video's rate.
 
 The video is the game's own 640 x 480 picture, or that finished picture scaled up 2x or 4x with each pixel made a square (nearest,
 nothing blended). The game is never drawn at another internal resolution, so the pixels are the game's at every size. A TV is a
@@ -340,6 +351,27 @@ The code is `src/render3d/gxpath/export.ts`; `exportcheck.ts` holds the checks: 
 player draws for that row (pixel for pixel; at 2x and 4x each block is one of the picture's pixels), the first and last frames are the
 stretch's first and last rows, the file's sample count and durations are one per row, and the encoding's loss as PSNR of the frames
 decoded back.
+### The game's sound
+
+The GX player's sound is made the way its picture is: by the game's own code. The simulator's module (`public/gx/BUILD.txt`) has a
+sound core: the game's sound code from the decompilation - `lbaudio_ax.c` (which sounds the game asks for, when, at what volume,
+pan and pitch; the sound objects that follow a fighter across the screen; the banks a match loads; the stage's music), HSD's
+`synth.c` and `axdriver.c` (the sound macros of `smash2.sem`, the sample banks in ARAM, voices and envelopes, the music stream) and
+the Dolphin SDK's AX library and its reverb and delay - compiled into the module beside the drawing code. Only the hardware is
+written for it: the DSP's work (sample fetch and DSP-ADPCM decoding, sample rate conversion, volume, mixing, the aux effects'
+buses) and the console around it (ARAM, the disc). The module's sound is 32 kHz stereo, made with each frame it plays, so a seek, a
+step back or a rewind finds the sound exactly as a straight play has it.
+
+Exact: which sounds play and when (the game frame of every request), every value the game computes for them, the samples, the
+music and its loop points, the reverb and delay (the SDK's code). Not: the DSP's resampling filter (its coefficients are in the
+DSP's ROM; the module uses a windowed sinc), where the DSP's 5 ms frames fall inside a game frame, and the alternate stage music
+(the game picks it at random before the match, which the replay does not record: the main track plays).
+
+The page plays the sound behind the picture (an AudioWorklet, `src/render3d/gxpath/soundout.ts`), at the player's pace and speed;
+`?sound=0` starts the match without it. `tests/gx-sound.test.ts` (with `MELEE_ASSETS` and `MELEE_AUDIO`, a folder holding the
+disc's `audio` folder) checks that the match sounds the same twice and after a seek back, and that the game's first requests are the
+ones the decompilation has it make.
+
 ## Embedding
 
 `embed.html` is meant to sit in an iframe. URL parameters: `replayUrl`,
@@ -392,6 +424,8 @@ anything, and leaves the renderer's files as they are:
   page's "3D or not" itself instead.
 
 ## Optional browser audio
+
+(For a host page with its own sound player. The GX player has the game's own sound without one: see "The game's sound".)
 
 For a public backend contract, an asset-free diagnostic tone module, and offline
 PCM capture instructions, see [Supplying an audio backend](docs/audio-backend.md).
@@ -512,14 +546,19 @@ asset routes are not included here.
   fork named in `public/gx/BUILD.txt`). `src/sim/tape.ts` follows its replay
   validator's and replay driver's input reading.
 - [mp4-muxer](https://github.com/Vanilagy/mp4-muxer) by Vanilagy (MIT): puts
-  Export Video's H.264 frames into the MP4 file; the build lists it, with its
-  license, in `THIRD_PARTY_LICENSES.txt`.
+  Export Video's H.264 frames and AAC sound into the MP4 file; the build lists
+  it, with its license, in `THIRD_PARTY_LICENSES.txt`.
 - [Emscripten](https://emscripten.org) (MIT / University of Illinois NCSA):
   builds the simulator for the browser; its runtime is part of that build.
 - The [Melee decompilation](https://github.com/doldecomp/melee)
   (doldecomp/melee contributors): the game's code, which the renderer's
   behavior is written from (function names in the comments are its names), and
-  which the simulator compiles, the GX player's drawing code included.
+  which the simulator compiles, the GX player's drawing code included, and its
+  sound code: `lbaudio_ax.c`, HSD's `synth.c` and `axdriver.c`, and the
+  Dolphin SDK's AX and AXFX libraries (`libs/dolphin`).
+- Nintendo's DSP-ADPCM format, as documented publicly (the DSPADPCM
+  documentation of the GameCube SDK, and the many open decoders that follow
+  it): the GX player's sound decodes the game's samples with it.
 - [Project Slippi](https://github.com/project-slippi) (Fizzi and the Project
   Slippi team): the GX player's *Slippi* playback follows what Slippi's replay
   playback does (its playback code's restore of the game's state, read for
