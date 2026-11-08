@@ -23,7 +23,8 @@ import { GxScreen } from "./render3d/gxpath/screen";
 import { CRT_PRESETS, CURVE_MAX, isCrtPreset, type CrtPreset } from "./render3d/crt";
 import { GxSession, type GameFiles, type SessionBackend } from "./render3d/gxpath/session";
 import { musicEnabled, sound, soundConfigured, soundState } from "./audio";
-import { canExport, ExportCanceled, exportMp4, saveFile, videoName, type ExportOptions, type ExportScale } from "./render3d/gxpath/export";
+import { canExport, canExportSound, ExportCanceled, exportMp4, saveFile, videoName, type ExportOptions, type ExportScale } from "./render3d/gxpath/export";
+import { SessionSound } from "./render3d/gxpath/exportsound";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const q = new URLSearchParams(location.search);
@@ -477,11 +478,19 @@ async function seekForExport(row: number): Promise<void> {
   glBackend?.present();
 }
 
-/** a video of rows from..to as the player draws them now (Playback, Speed, TV); the bytes and what it took */
+/** the video has the game's sound: the session has it, the browser encodes it, and the page was not asked for none (exportsound=0) */
+const videoSound = () => session?.soundState === "on" && canExportSound() && q.get("exportsound") !== "0" &&
+  document.querySelector<HTMLInputElement>('input[name="sound"]:checked')?.value !== "off";
+
+/** a video of rows from..to as the player draws them now (Playback, Speed, TV), with the game's sound when it has it; the bytes and what
+ *  it took */
 async function makeVideo(from: number, to: number, scale: ExportScale, extra: Partial<ExportOptions> = {}) {
   const s = session!, p = playback!;
   const back = Math.max(0, s.shown), wasPlaying = p.playing;
   p.pause();
+  // (the rows' sound as the export steps them, for the video's sound track: audio-export.ts over the session, exportsound.ts)
+  const snd = videoSound() ? new SessionSound(s.tape.gameFrame(from), s.tape.gameFrame(to), (row) => s.tape.gameFrame(row)) : null;
+  soundTap = snd ? (pcm, row) => snd.take(pcm, row) : null;
   const pics = s.setPictures.bind(s);
   // (the CPU renderer's picture comes as pixels: shown on the flat canvas, which is then the source)
   if (!glBackend) { pics(true); s.onPicture = (rgba) => screen.show(rgba); }
@@ -493,9 +502,11 @@ async function makeVideo(from: number, to: number, scale: ExportScale, extra: Pa
       source,
       seek: seekForExport,
       next: () => { const before = s.shown; s.step(true); glBackend?.present(); return s.shown !== before; },
+      ...(snd ? { audio: snd.blocks(extra.signal) } : {}),
       ...extra,
     });
   } finally {
+    soundTap = null;
     // (back to where the player was)
     s.setPictures(screen.needsPixels);
     await p.seek(back);
@@ -514,6 +525,8 @@ $("export").onclick = () => {
     if (!$<HTMLInputElement>("exportfrom").value) $<HTMLInputElement>("exportfrom").value = String(gf);
     if (!$<HTMLInputElement>("exportto").value) $<HTMLInputElement>("exportto").value = String(Math.min(gf + 599, session.tape.gameFrame(session.frameCount - 1)));
   }
+  // (the sound's choice only when there is a sound to put in the video)
+  $("exportsound").hidden = !(session?.soundState === "on" && canExportSound());
   if (!canExport()) { exportState("This browser cannot make videos (it has no WebCodecs)."); $<HTMLButtonElement>("exportstart").disabled = true; }
 };
 $("exportstart").onclick = async () => {
@@ -541,7 +554,7 @@ $("exportstart").onclick = async () => {
       onProgress: (done, total) => exportState(`Frame ${done} of ${total}...`),
     });
     saveFile(r.file, videoName(exportName(), whole ? undefined : session.tape.gameFrame(from), whole ? undefined : session.tape.gameFrame(to)));
-    exportState(`Saved: ${r.frames} frames, ${r.width} x ${r.height}, ${(r.file.size / 1048576).toFixed(1)} MB, in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
+    exportState(`Saved: ${r.frames} frames, ${r.width} x ${r.height}${r.audio ? ", with the game's sound" : ""}, ${(r.file.size / 1048576).toFixed(1)} MB, in ${((performance.now() - t0) / 1000).toFixed(1)} s.`);
   } catch (e) {
     exportState(e instanceof ExportCanceled ? "Canceled." : `The video could not be made: ${String((e as Error)?.message ?? e)}`);
   } finally {

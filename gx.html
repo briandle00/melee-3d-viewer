@@ -47,7 +47,12 @@
           <label><input type="radio" name="size" value="2" /> 1280 x 960</label>
           <label><input type="radio" name="size" value="4" /> 2560 x 1920</label>
         </fieldset>
-        <p id="exportnote">No sound yet. Every frame is drawn as the player draws it, with its Playback, Speed and TV, as fast as your graphics card allows. The video is made here in your browser and saved to your downloads; nothing is uploaded.</p>
+        <fieldset id="exportsound">
+          <legend>Sound</legend>
+          <label><input type="radio" name="sound" value="on" checked /> The game's sound</label>
+          <label><input type="radio" name="sound" value="off" /> None</label>
+        </fieldset>
+        <p id="exportnote">Every frame is drawn as the player draws it, with its Playback, Speed and TV, as fast as your graphics card allows, and the game's sound is the one the player plays (when the game files folder has the game's audio folder). The video is made here in your browser and saved to your downloads; nothing is uploaded.</p>
         <div id="exportgo"><button id="exportstart">Make the Video</button> <button id="exportcancel" hidden>Cancel</button> <span id="exportstate"></span></div>
       </div>
       <div id="info"></div>
