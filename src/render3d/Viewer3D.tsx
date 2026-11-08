@@ -2276,7 +2276,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     }
     // Yoshi's Story's Shy Guys (stage items): with the fighters' and items' first pass (Camera_800311EC), before
     // the stage's see-through meshes
-    if (st?.shyGuy) { r.setLighting(lighting); drawShyGuys(r, st.shyGuy, data, frame.items ?? [], fno); }
+    if (st?.shyGuy) {
+      r.setLighting(lighting);
+      // (a Shy Guy's turn as the game set it: the track's "irot", which is sent from the first frame it is not zero)
+      const shyTurn = trNow?.hasAt("irot", fno - 123) ? (spawnId: number) => turnOf(spawnId) ?? [0, 0, 0] : null;
+      drawShyGuys(r, st.shyGuy, data, frame.items ?? [], fno, shyTurn);
+    }
     if (st) {
       r.setLighting(stageLit);
       for (const sk of st.skeletons) {
@@ -4218,14 +4223,22 @@ function drawPlatform(r: Renderer, ek: EffectKit | undefined, a: Actor, frame: n
 // Yoshi's Story's Shy Guys: the stage file's own Shy Guy (a card whose
 // texture animation is it flying) where the replay says each one is, facing
 // the way it flies
+//
+// Its turn is its root's rotation as its code sets it, which is not the way it faces: it_802D8688 turns it by where
+// it starts, states 1 and 4 turn it a twentieth of a half turn a frame for 20 frames after a wall or a fresh flight
+// (itHeiho_UnkMotion1_Phys, it_802D9168), and the states between (2, 3: hit, falling) keep the turn it had while
+// it_802762BC changes the way it faces (bot-mario_luigi 1268-1315: facing left, turned right). So the track's turn
+// ("irot", `turnOf`) when the track has it, else the way it faces.
 function drawShyGuys(r: Renderer, sg: { prop: Prop; prop2: Prop | null; scale: number }, data: ReplayData, items: ReplayItem[],
-                     frame: number) {
+                     frame: number, turnOf: ((spawnId: number) => number[]) | null) {
   for (const it of items) {
     if (it.typeId !== SHY_GUY) continue;
     const t = shyGuyClock(data, frame, it);
     // (animation 2's in state 4, and on through the states that keep the animation playing: it_803F83F0's -1)
     const prop = shyClocks.get(data)?.get(it.spawnId)?.anim === 2 && sg.prop2 ? sg.prop2 : sg.prop;
-    prop.pose(t, it.xPosition, it.yPosition, 2, sg.scale, it.facingDirection < 0 ? Math.PI : 0, true);
+    const turn = turnOf?.(it.spawnId);
+    if (turn) prop.pose(t, it.xPosition, it.yPosition, 2, sg.scale, turn[1], true, turn[2], turn[0]);
+    else prop.pose(t, it.xPosition, it.yPosition, 2, sg.scale, it.facingDirection < 0 ? Math.PI : 0, true);
     r.drawSkeleton(prop.skeleton, "opa");
     r.drawSkeleton(prop.skeleton, "xlu");
     r.endPass();
