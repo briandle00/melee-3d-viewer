@@ -1,7 +1,9 @@
 The GX player's simulator module (gx-core.js, gx-core.wasm) and its game file list (sim-files.json).
 
 Built from melee-sim-light (https://github.com/briandle00/melee-sim-light, a fork of https://github.com/kyhavlov/melee-sim-light),
-branch sound/w41 at 0b6fd0c6 (local; on perf/open 7018279c: the float rule for a sum's own product, native libm calls, fighter facing in
+branch sound/w54 at 99a0cddc (local; sound/w41 0b6fd0c6 with the sound core's two fixes from the upstream port: the stage's music
+read from its table with no write to the stage's state, and a second start of the sound in the same module begins as a first start;
+on perf/open 7018279c: the float rule for a sum's own product, native libm calls, fighter facing in
 the effect callback): the viewer build with the HUD layout option (msl_gxw_set_hud_layout), the stream restart and memory-top
 calls the app's player seeks with (msl_gxw_restart_stream, msl_gxw_heap_top), the game data load kept for the next match
 (msl_gxw_load_game, msl_gxw_rewind: a restart or a C-stick fit drive opens in milliseconds), and the sound core (src/sound: the game's
@@ -13,8 +15,8 @@ module (the page hands it the user's own files, main.dol included; the sound fil
 Source-file names are relative (prefix maps); gx-core.js is written with LF line ends.
 
 sha256
-  gx-core.js    9256557cdc6809a3a0522027a3078dd7670e6e9f68542687fb1657e31d8122ba
-  gx-core.wasm  ecf533865eb866b867988ec19672546dfae526324b6e857b67df7a013ca8bbfd
+  gx-core.js    424e3ca1ce883e3aa8f21bafb6ac0745655375ddb07e6a69bb7351cf51c5e979
+  gx-core.wasm  83844640109a00d422913169eb1e66a9875a48c8d9a24775c30f400b80e25a62
 
 sim-files.json lists the game files the module reads (names only), for a game folder given by URL (?files=). The sound files are not in
 it: the module names them when the sound starts (audio/us/smash2.sem, the match's audio/us/*.ssm banks, the stage's audio/*.hps).
