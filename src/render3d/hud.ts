@@ -885,6 +885,8 @@ export class Hud {
       const [ex] = edgePoint(sx - 320, -(sy - 240), W);
       if (Math.abs(ex) >= W - 1e-4) kinds.set(p.slot, ex < 0 ? 1 : 2);
     }
+    // (kept: the table after a later jump is played through the frames drawn with the kinds they had)
+    this.drawnKinds.set(f, [0, 1, 2, 3, 4, 5].map((port) => kinds.get(port) ?? 0));
     const assign = (t: ArrowTable) => {
       for (let port = 0; port < 6; port++) {
         const p = this.players.find((q) => q.slot === port);
@@ -930,7 +932,8 @@ export class Hud {
     if (f < f0) return arrowTable();
     // (false when a frame's kinds can't be had yet - its camera not worked out: nothing is kept then)
     const step = (t: ArrowTable, g: number): boolean => {
-      const kinds = kindsAt(g);
+      // (a frame drawn: the kinds its magnifiers had, from the fighter's own camera bone; else worked out)
+      const kinds = this.drawnKinds.get(g) ?? kindsAt(g);
       if (!kinds) return false;
       arrowsPlace(t);
       for (let port = 0; port < 6; port++) {
@@ -957,6 +960,9 @@ export class Hud {
   }
   /** the arrows' table after a frame's magnifiers, for the frame drawn and the one before it */
   private arrowAfter = new Map<number, ArrowTable>();
+  /** each frame drawn: every port's arrow kind as its magnifier gave it (drawArrows), what arrowHistory plays
+   *  through in place of edgeKindsAt's, which takes the fighter's place and camera box for the camera bone */
+  private drawnKinds = new Map<number, number[]>();
 
   /** the bubble at the screen's edge toward the fighter, its pointer turned to it */
   private drawLupe(r: Renderer, p: Hud["players"][number], sx: number, sy: number) {
