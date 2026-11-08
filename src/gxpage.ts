@@ -4,18 +4,20 @@
  *
  * URL parameters: replayUrl, name, frame (game frame, -123 = first), files (the game files folder URL; the names it reads come from
  * sim-files.json beside the module, else the extraction's list), core (the module, default gx/gx-core.js), backend (gl, cpu),
- * speed, playback (slippi, original), pace (60, console), paused=1.
+ * speed, playback (slippi, original), pace (60, console), paused=1, sound (0: the game's sound is not started; else it starts with
+ * the match when the game files folder has the disc's audio folder, and the Sound button plays it).
  * Messages in: {type: "load", url, name?, frame?}, {type: "seek", frame}, play, pause, toggle, {type: "gameFiles", files},
  * {type: "speed", speed}, {type: "playback", playback}, {type: "pace", pace}. Out: {type: "loaded", frames, playback, pace},
  * {type: "frame", frame, running}, {type: "renderer", renderer, reason}.
  */
 import { decode } from "@shelacek/ubjson";
 import { CpuBackend } from "./render3d/gxr/cpu";
-import { gxMissing, gxNames, namesToRead, readGameFiles } from "./sim/gamefiles";
+import { gxMissing, gxNames, namesToRead, readGameFiles, readSoundFiles } from "./sim/gamefiles";
 import type { GameFilesFrom } from "./sim/protocol";
 import { readTape } from "./sim/tape";
 import { isPlaybackMode, PLAYBACK_MODES, type GxCoreFactory, type PlaybackMode } from "./render3d/gxpath/core";
-import { GxPlayback, isPace, PACES, SPEEDS, type Pace } from "./render3d/gxpath/playback";
+import { GxPlayback, isPace, PACES, paceFps, SPEEDS, type Pace } from "./render3d/gxpath/playback";
+import { SoundOut } from "./render3d/gxpath/soundout";
 import { ControllerOverlay, isOverlayShow, type OverlayShow } from "./render3d/gxpath/overlay";
 import { GxScreen } from "./render3d/gxpath/screen";
 import { CRT_PRESETS, CURVE_MAX, isCrtPreset, type CrtPreset } from "./render3d/crt";
@@ -47,6 +49,11 @@ const wasmModule: Promise<WebAssembly.Module | null> = (async () => {
   try { return await WebAssembly.compile(await (await fetch(url)).arrayBuffer()); } catch { return null; }
 })();
 let gameFiles: GameFiles | null = null;
+/** the game's own sound (the simulator's sound core) to the speakers; its music on or off */
+const soundOut = new SoundOut();
+let gameMusic = true;
+/** (Export Video with sound) each row's sound as it is stepped, while a video is made */
+let soundTap: ((pcm: Int16Array, row: number) => void) | null = null;
 const screen = new GxScreen($("view"));
 const pads = new ControllerOverlay($("view"), () => session?.tape ?? null);
 let padShow: OverlayShow = isOverlayShow(q.get("controllers")) ? (q.get("controllers") as OverlayShow) : "off";
@@ -184,10 +191,19 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
   mark("gameFiles");
   info("starting the simulator...");
   const factory = (await import(/* @vite-ignore */ coreUrl)).default as GxCoreFactory;
+  const from = filesFrom;
   session = new GxSession({
     factory, coreOptions: coreOptions(await wasmModule), files: gameFiles, tape,
     makeBackend, playback: playbackMode, onProgress: (text) => { if (text) info(text + "..."); },
+    // (the game's sound, from the disc's audio folder in the game files folder; read the first time the sound names its files)
+    sound: q.get("sound") === "0" ? undefined : { files: (names) => { info("reading the game's sound files..."); return readSoundFiles(from, names); } },
   });
+  session.setMusic(gameMusic);
+  // (a row's sound to the speakers when it is drawn as the game plays, and to a video being made)
+  session.onSound = (pcm, row, heard) => {
+    soundTap?.(pcm, row);
+    if (heard && playback?.playing && !exporting) soundOut.push(pcm);
+  };
   session.setPictures(true);
   await session.warmup();
   mark("warmedUp");
@@ -257,6 +273,10 @@ function update() {
   post({ type: "frame", frame: gf, running: p.playing });
   // playing or paused, the frame and the speed (1 = the game's 60), told to the sound
   sound.transport(p.playing, row, p.speed * (pace === "console" ? 60000 / 1001 : 60) / 60);
+  // (the game's own sound: played at the rows' pace and speed; paused or sought, what is queued is dropped)
+  soundOut.fps = paceFps(pace);
+  soundOut.speed = p.speed;
+  if (!p.playing || p.seeking !== null) soundOut.clear();
   showSound();
 }
 
@@ -268,7 +288,7 @@ function wireSound(p: GxPlayback) {
   p.stepForward = () => { forward(); sound.seek(Math.max(0, session?.shown ?? 0)); };
 }
 function showSound() {
-  if (!soundConfigured) return;
+  if (!soundConfigured) { showGameSound(); return; }
   const st = soundState();
   $("sound").hidden = false;
   $("music").hidden = st !== "on";
@@ -278,6 +298,12 @@ function showSound() {
 }
 $("sound").onclick = () => {
   if (!session || !playback) return;
+  if (!soundConfigured) {
+    if (soundOut.on) soundOut.stop();
+    else void soundOut.start().then(showSound);
+    showSound();
+    return;
+  }
   if (soundState() === "on" || soundState() === "loading") { sound.disable(); showSound(); return; }
   const row = Math.max(0, session.shown);
   sound.seek(row);
@@ -285,7 +311,25 @@ $("sound").onclick = () => {
   void sound.enable().then(showSound, showSound);
   showSound();
 };
-$("music").onclick = () => { sound.music(!musicEnabled()); showSound(); };
+$("music").onclick = () => {
+  if (!soundConfigured) { gameMusic = !gameMusic; session?.setMusic(gameMusic); showSound(); return; }
+  sound.music(!musicEnabled()); showSound();
+};
+
+// ---- the game's own sound (no host player configured): the simulator's sound core, started with the match (session.ts); the Sound
+// button plays it (browsers start audio only from a click), Music turns the game's music on or off
+function showGameSound() {
+  const st = session?.soundState ?? "off";
+  const has = st === "on";
+  $("sound").hidden = !session || st === "off";
+  $<HTMLButtonElement>("sound").disabled = !has;
+  $("sound").textContent = `Sound: ${has && soundOut.on ? "On" : "Off"}`;
+  $("sound").title = has ? "The game's sound, made by the game's own sound code as the replay plays" : `No sound: ${st}`;
+  $("sound").setAttribute("aria-pressed", String(has && soundOut.on));
+  $("music").hidden = !has;
+  $("music").textContent = `Music: ${gameMusic ? "On" : "Off"}`;
+  $("music").title = "The game's music, on or off (the rest of the sound stays)";
+}
 if (soundConfigured) setInterval(showSound, 500);
 
 function fail(e: unknown) {
