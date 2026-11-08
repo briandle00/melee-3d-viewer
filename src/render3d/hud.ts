@@ -807,7 +807,7 @@ export class Hud {
     this.burstsAt = f;
     this.burstsKey = key;
     if (!ps.particles.length) return;
-    const built = buildParticles(ps.particles, { right: [1, 0, 0], up: [0, 1, 0] });
+    const built = buildParticles(ps.particles, this.particleAxes());
     r.drawParticles(built.data, built.batches);
   }
   /** The bursts as the game ran them: the effect world's particles of the
@@ -833,9 +833,20 @@ export class Hud {
       }
       return s;
     };
-    const built = buildParticles(t.particles, { right: [1, 0, 0], up: [0, 1, 0] }, shift);
+    const built = buildParticles(t.particles, this.particleAxes(), shift);
     r.drawParticles(built.data, built.batches);
   }
+  /** The HUD camera's axes for its particles: its right and up, its view, and its projection times it - the
+   *  camera is a perspective one (the file's), and a trail's or a direction particle's way across the picture
+   *  is where that projection puts it and where it was (psDispSub's perspective branch, prj[0] == 0). Until
+   *  2026-11-09 the bursts' quads were turned by their velocity in the HUD's plane as by an orthographic camera:
+   *  a lost stock's burst a few degrees off the game's, its quads' boxes 2 to 10 pixels off */
+  private particleAxes() {
+    mul(this.particleVP, this.proj, this.view);
+    const v = this.view;
+    return { right: [v[0], v[4], v[8]], up: [v[1], v[5], v[9]], viewProj: this.particleVP, view: v };
+  }
+  private particleVP = new Float32Array(16);
   private bursts = new ParticleSystem();
   private burstsAt = -1;
   private burstsKey = "";
