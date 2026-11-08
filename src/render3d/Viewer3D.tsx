@@ -118,6 +118,21 @@ let layersOff: Partial<Record<Layer, boolean>> = {};
 const POSE_LOG = new URLSearchParams(location.search).has("poselog");
 // (the log of the frame being drawn, when it is logged: for the items, drawn outside the viewer's own closure)
 let itemPoseLog: PoseLog | null = null;
+/** the material animation an item's code laid once and left (the viewer track's "imat", it_80273670: Peach's
+ *  turnip's face): [the state whose animations, the frame], for the frame drawn, by spawn id; or null */
+let itemMaterialNow: ((spawnId: number) => [number, number] | null) | null = null;
+/** an item's textures as its code left them, when the track says ("imat"): the material animation of the state
+ *  it laid, at the frame it laid, over its pose's - while it is in that state, or in one with no material
+ *  animation of its own. Peach's turnip: its face picked in the ground (state 0, frame 5 in bot-peach_puff 1764)
+ *  stays on through its states after, which have none, and the player drew the model's own face */
+function layItemMaterial(data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number,
+                         art: NonNullable<ReturnType<Fighter["article"]>>) {
+  const m = itemMaterialNow?.(it.spawnId);
+  if (!m || (it.state !== m[0] && art.prop.hasMatAnim)) return;
+  const a = articleEntry(it.typeId);
+  const src = a ? articleFighter(data, fs, it, frame)?.article(a.art, m[0]) ?? null : null;
+  if (src) art.prop.layMaterialsOf(src.prop, m[1]);
+}
 
 // A fighter the game does not draw: dead, or waiting to come back (action
 // states 0-11: the Dead* states and Sleep), or in the middle of a move that
@@ -2166,6 +2181,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       r.setTint(null);
     };
     prof.mark("fx");
+    // (before the fighters: the items they hold are drawn with them)
+    itemMaterialNow = (spawnId) => viewerTrack()?.itemMaterial(spawnId, fno - 123) ?? null;
     drawFighters("opa");
     prof.mark("fightersOpa");
     // (an owner's joint as posed this frame, for the items the game ties to one)
@@ -4868,6 +4885,7 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
   if (on) {
     const age = it.typeId === GW_TORCH && owner ? torchAge(data, owner, frame, it) : itemAnimAge(data, frame, it);
     art.prop.poseUnder(still ?? age + (a.from?.[it.state] ?? 0), on, size, false, art.attach);
+    layItemMaterial(data, fs, it, frame, art);
     // (held: its place kept against Mewtwo's hand at his size)
     if (shadowScale !== null) art.prop.setGrandchildScale(shadowScale, shadowOwner?.modelScale);
     const w = art.prop.skeleton.world;
@@ -4939,6 +4957,7 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
     // random spins of a needle knocked down included)
     if (onChild && !art.prop.trackPose) art.prop.setChildRotationX(tilt);
   }
+  layItemMaterial(data, fs, it, frame, art);
   if (shadowScale !== null) art.prop.setGrandchildScale(shadowScale);
   if (chargeScale !== null) art.prop.setGrandchildScale(chargeScale);
   // (a laser stretched along its flight: Item_UpdateRayAnimation, up to its special attributes' +4)

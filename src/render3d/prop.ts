@@ -345,6 +345,20 @@ export class Prop {
     if (any) sk.update(this.place);
   }
 
+  /** whether it has a material animation of its own */
+  get hasMatAnim(): boolean {
+    return !!this.matAnim;
+  }
+
+  /** after the pose, its materials as another prop of the same model's material animation has them at `frame`
+   *  (an item's state's, laid by its code and left: "imat") */
+  layMaterialsOf(other: Prop, frame: number) {
+    if (!other.matAnim) return;
+    const sk = this.skeleton;
+    sk.resetMaterials();
+    sk.applyMatAnims(other.matAnim, (j) => this.joints[j]?.dobjs ?? NO_DOBJS, frame, false);
+  }
+
   /** the track's joints over the animation's (its root is the item's place, never in it) */
   private layTrackPose() {
     const tp = this.trackPose;
