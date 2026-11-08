@@ -2171,7 +2171,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const own = c.itemType === undefined ? undefined
           : (frame.items ?? []).find((it) => it.owner === a.player && c.itemType === it.typeId);
         if (!own) continue;
-        const item = { state: own.state, age: itemLife(data, fno, own) };
+        const item = { state: own.state, age: chainClock(data, fno, own) };
         // its glow, held at the arm the whole time, fired or not (Item_8026AB54
         // with ThrowN's number, which ftLib_80086630 takes as the fighter's own
         // part slot, not through the named-part table: Samus's joint 51, her cannon)
@@ -2192,7 +2192,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         if (!trackChains.has(it.spawnId)) continue;
         const links = trNow!.pose("lm", String(it.spawnId), fno - 123);
         const f = articleFighter(data, fs, it, fno);
-        if (links && f) drawTrackChain(r, f, it, links, trackArticles.get(data)?.get(it.typeId), itemLife(data, fno, it), pass);
+        if (links && f) drawTrackChain(r, f, it, links, trackArticles.get(data)?.get(it.typeId), chainClock(data, fno, it), pass);
       }
     };
     // (their first opaque copy, under the stage's lights, then the second, under the fighters')
@@ -4427,6 +4427,21 @@ function itemLife(data: ReplayData, frame: number, it: ReplayItem): number {
   while (f > 0 && frame - f < 600 && data.frames[f - 1]?.items?.some((q) => q.spawnId === it.spawnId)) f--;
   return frame - f;
 }
+/** a chain's animation clock: its frames in the game less those its owner began in hitlag. The grapple beam's
+ *  model and its links are animated by Samus's own state code (samus_grapple_anim's HSD_JObjAnimAll, from the
+ *  it_802BAC3C family her states call), which the fighter's hitlag skips (Fighter_procUpdate: no animation
+ *  callback while in hitlag): the frame the hit lands still animates, the next ones until the count runs out
+ *  do not (bot-samus_mewtwo 5500: hitlag 4, the links equal; 5501: hitlag 3, the game's links as on 5500) */
+function chainClock(data: ReplayData, frame: number, it: ReplayItem): number {
+  const life = itemLife(data, frame, it);
+  let still = 0;
+  for (let k = 0; k < life; k++) {
+    if ((data.frames[frame - k - 1]?.players[it.owner]?.state?.hitlagRemaining ?? 0) > 0) still++;
+  }
+  return life - still;
+}
+
+
 
 // PK Flash's charge: a frame more each frame it flies held (its state 0), up
 // to its attributes' +0x4; the flash is sized by it as it grows, and its
