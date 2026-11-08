@@ -56,7 +56,24 @@ export interface GxCoreModule {
   _msl_gxw_cfit_result(moved: number): void;
   _msl_gxw_cfit_first(): number;
   _msl_gxw_cfit_flips(): number;
+  // (builds with the sound core: the game's own sound code, src/sound in the simulator; off unless started)
+  _msl_gxw_sound_start?(root: number): number;
+  _msl_gxw_sound_need?(i: number): number;
+  _msl_gxw_sound_pcm?(): number;
+  _msl_gxw_sound_frames?(): number;
+  _msl_gxw_sound_music?(on: number): void;
+  _msl_gxw_sound_info?(which: number): number;
+  _msl_gxw_sound_log?(): number;
+  _msl_gxw_sound_log_count?(): number;
 }
+
+/** the sound's sample rate (the console's DSP: 32 kHz), and its channels (left and right interleaved) */
+export const SOUND_RATE = 32000;
+export const SOUND_CHANNELS = 2;
+
+/** GxCore.soundStart's answer: on; the sound files the module needs and did not find (paths under the game files' folder, e.g.
+ *  "audio/us/main.ssm"); or none (the module has no sound, or no memory for it) */
+export type SoundStart = { on: true } | { on: false; need: string[] } | { on: false; need: null; reason: string };
 
 /** how the replay is played back: as Slippi's playback shows it, or as the console recorded it (the simulator's msl_gxw_set_playback) */
 export type PlaybackMode = "slippi" | "original";
@@ -213,6 +230,64 @@ export class GxCore {
   setDisplay(on: boolean): void {
     const r = this.mod._msl_gxw_set_display(on ? 1 : 0);
     if (r !== 0) throw new Error(`msl_gxw_set_display: ${r}`);
+  }
+
+  // ---- the game's sound (builds with the sound core) ----
+
+  /** the module has the game's sound code */
+  get hasSound(): boolean { return typeof this.mod._msl_gxw_sound_start === "function"; }
+
+  /** a file into the module's file system under the game files' folder (the sound files the module names: soundStart) */
+  writeFile(name: string, bytes: Uint8Array): void {
+    const m = this.mod, at = `${DATA_ROOT}/${name}`, dir = at.slice(0, at.lastIndexOf("/"));
+    (m.FS as unknown as { mkdirTree(p: string): void }).mkdirTree(dir);
+    m.FS.writeFile(at, bytes);
+  }
+
+  /** Start the game's sound for the open match (after openMatch, before its first step). Files it names and does not find are listed:
+   *  write them (writeFile), open the match again (rewind, openMatch) and start again. */
+  soundStart(): SoundStart {
+    const m = this.mod;
+    if (!this.hasSound) return { on: false, need: null, reason: "this simulator build has no sound" };
+    if (!this.open) throw new Error("no match open");
+    const root = m._malloc(DATA_ROOT.length + 1);
+    let r: number;
+    try {
+      m.HEAPU8.set(new TextEncoder().encode(DATA_ROOT + "\0"), root);
+      r = m._msl_gxw_sound_start!(root);
+    } finally { m._free(root); }
+    if (r === 0) return { on: true };
+    if (r < 0) return { on: false, need: null, reason: r === -2 ? "a frame was already played" : "no memory for the sound" };
+    const need: string[] = [];
+    for (let i = 0; i < r; i++) {
+      const p = m._msl_gxw_sound_need!(i);
+      let e = p;
+      while (m.HEAPU8[e]) e++;
+      need.push(new TextDecoder().decode(m.HEAPU8.subarray(p, e)));
+    }
+    return { on: false, need };
+  }
+
+  /** the last step's sound: interleaved stereo 16-bit samples at SOUND_RATE (a copy; empty while the sound is off) */
+  soundPcm(): Int16Array {
+    const m = this.mod;
+    const n = m._msl_gxw_sound_frames?.() ?? 0;
+    if (n <= 0) return new Int16Array(0);
+    const p = m._msl_gxw_sound_pcm!();
+    return new Int16Array(m.HEAPU8.slice(p, p + n * 2 * SOUND_CHANNELS).buffer);
+  }
+
+  /** the game's music heard or not (its voices play on either way: the sound's state stays the game's) */
+  soundMusic(on: boolean): void { this.mod._msl_gxw_sound_music?.(on ? 1 : 0); }
+
+  /** (the checks) the game's sound requests since the sound started: [game row, kind (1 a sound: id, volume, pan, track, channel, voice;
+   *  2 the music: file entry, volume, track), values...] */
+  soundLog(): number[][] {
+    const m = this.mod, n = m._msl_gxw_sound_log_count?.() ?? 0, out: number[][] = [];
+    if (n <= 0) return out;
+    const p = m._msl_gxw_sound_log!(), v = new Int32Array(m.HEAPU8.buffer.slice(p, p + n * 32));
+    for (let i = 0; i < n; i++) out.push(Array.from(v.subarray(i * 8, i * 8 + 8)));
+    return out;
   }
 
   /** (a resynced drive) the recording's positions, one record per tape frame (replay_drive.py recorded_positions); before the first step.
