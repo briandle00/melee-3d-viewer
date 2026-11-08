@@ -6,7 +6,10 @@
 //   each fighter's entry (ft_0C31.c: lbAudioAx_80024304(0x8B), track 0x16), "GO!" (ifStatus_803F9628[4], 0x7C857), all at volume
 //   0x7F and pan 0x40 doubled (fn_80023750) on channel 7, and the stage's music;
 // - a seek back (a rewind to a checkpoint or to the first row) and a straight play have the same sound row for row;
-// - the stream the renderer draws is the same with the sound on and off.
+// - a second start of the sound in the same module (after a start that named missing files, without a rewind) sounds as a first
+//   start does: the module puts the sound's own statics back (the decomp sets them once, at boot);
+// - the stream the renderer draws is the same with the sound on and off, and the stage's music plays (read from the stage's table
+//   by the module, with no write to the game's stage state).
 // Without the files the tests are skipped. Nothing from the files is written anywhere.
 //
 //   MELEE_ASSETS=<game files> MELEE_AUDIO=<folder with audio/> deno test -A --no-check --sloppy-imports tests/gx-sound.test.ts
@@ -15,8 +18,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { readTape, type Tape } from "../src/sim/tape.ts";
+import { driveOrder, readTape, type Tape } from "../src/sim/tape.ts";
 import { GxSession, type SessionBackend } from "../src/render3d/gxpath/session.ts";
+import { GxCore } from "../src/render3d/gxpath/core.ts";
+import { nativeRow, nativeTape } from "../src/render3d/gxpath/tapebridge.ts";
 import { gxNames } from "../src/sim/gamefiles.ts";
 import { gameFiles } from "./game-files.ts";
 
@@ -187,4 +192,78 @@ test("a seek back has the sound of a straight play, row for row", withSound, asy
     assert.ok(pcm.has(back + 40), `row ${back + 40} stepped again`);
   }
   s.close();
+});
+
+/** a bare module instance (no session: no kept game data, so no rewind) with the game files; `sound` written into it first */
+async function bareCore(sound: string[] = []): Promise<GxCore> {
+  const { factory, coreOptions } = await moduleOf();
+  if (!filesOf) {
+    const names = gxNames(fs.readdirSync(gameFiles!));
+    filesOf = { names, files: new Map(names.map((n) => [n, new Uint8Array(fs.readFileSync(path.join(gameFiles!, n)))])) };
+  }
+  const core = await GxCore.create((o) => (factory as (o: Record<string, unknown>) => Promise<never>)({ ...o, ...coreOptions }), filesOf.files);
+  for (const n of sound) core.writeFile(n, new Uint8Array(fs.readFileSync(path.join(audio!, n))));
+  return core;
+}
+
+/** `rows` rows stepped: the sound of all of them (hashed), the stream of each row (hashed), the requests, the music voices at the end */
+function playRows(core: GxCore, whole: Uint8Array, rows: number) {
+  const streams: string[] = [], pcm: Int16Array[] = [];
+  for (let i = 0; i < rows; i++) {
+    core.step(nativeRow(whole, i));
+    streams.push(crypto.createHash("sha256").update(core.stream()).digest("hex"));
+    pcm.push(core.soundPcm());
+  }
+  return { sound: sha(pcm), streams, log: core.soundLog(), music: core.mod._msl_gxw_sound_info?.(3) ?? -1 };
+}
+
+test("a second start of the sound in the same module sounds as a first start", withSound, async () => {
+  const tape = tapeOf(ROWS);
+  const whole = nativeTape(tape, driveOrder(tape, 1)[0]);
+  // (the module names the files it needs at the first start; the page writes them and starts the sound again)
+  const twice = await bareCore();
+  twice.openMatch(whole, filesOf!.names, "slippi");
+  const first = twice.soundStart();
+  assert.ok(first.need && first.need.length > 0, `the first start names the sound files: ${JSON.stringify(first)}`);
+  for (const n of first.need!) twice.writeFile(n, new Uint8Array(fs.readFileSync(path.join(audio!, n))));
+  // (no rewind and no new opening: the second start runs in the same module, over the first start's state)
+  assert.deepEqual(twice.soundStart(), { on: true }, "a second start in the same module starts");
+  const again = playRows(twice, whole, ROWS);
+  twice.destroy();
+
+  const once = await bareCore(first.need!);
+  once.openMatch(whole, filesOf!.names, "slippi");
+  assert.deepEqual(once.soundStart(), { on: true }, "one start with every file there");
+  const fresh = playRows(once, whole, ROWS);
+  once.destroy();
+
+  assert.equal(again.sound, fresh.sound, "the same sound as a first start");
+  assert.deepEqual(again.log, fresh.log, "the same requests as a first start");
+  assert.ok(fresh.log.length > 4);
+});
+
+test("the stream drawn is the same with the sound on and off, and the stage's music plays", withSound, async () => {
+  const tape = tapeOf(ROWS);
+  const whole = nativeTape(tape, driveOrder(tape, 1)[0]);
+  const off = await bareCore();
+  off.openMatch(whole, filesOf!.names, "slippi");
+  const silent = playRows(off, whole, ROWS);
+  off.destroy();
+  assert.equal(silent.log.length, 0, "no requests while the sound is off");
+
+  const probe = await bareCore();
+  probe.openMatch(whole, filesOf!.names, "slippi");
+  const need = probe.soundStart().need ?? [];
+  probe.destroy();
+  const on = await bareCore(need);
+  on.openMatch(whole, filesOf!.names, "slippi");
+  assert.deepEqual(on.soundStart(), { on: true });
+  const heard = playRows(on, whole, ROWS);
+  on.destroy();
+
+  // (the start wrote nothing of the match's state: the stage's music is read from its table, not through Ground_801C24F8)
+  for (let r = 0; r < ROWS; r++) assert.equal(heard.streams[r], silent.streams[r], `row ${r}: the same stream with the sound on`);
+  assert.ok(need.some((n) => /^audio\/[a-z0-9_]+\.hps$/.test(n)), `the stage's music file among ${need.join(" ")}`);
+  assert.ok(heard.log.some((l) => l[1] === 2 && l[0] === 0), "the stage's music, started with the match");
+  assert.ok(heard.music > 0, `the music's voices play at row ${ROWS} (${heard.music})`);
 });
