@@ -1638,6 +1638,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const posed: { f: Fighter; a: Actor }[] = [];
     // (posed but not drawn - a fighter its move hides: still placed at its captor's hold, as the game animates it)
     const posedHidden: { f: Fighter; a: Actor }[] = [];
+    // (every fighter posed and not drawn - its move's vanish, the track's hide bits: its camera bone still places
+    // its magnifier, and the frames the effect world steps through pose it elsewhere)
+    const posedUnseen: { f: Fighter; a: Actor }[] = [];
     drawnKirbyHats = [];
 
     // stage and fighters, opaque parts first, then the see-through ones; the
@@ -1772,6 +1775,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       if (vanished(a.st) || trackHidden(a)) {
         frameActors.push({ key: actorKey(a.player, a.nana), st: a.st, fighter: fi, world: worldByPart(a.st.internalCharacterId, fi.skeleton.world) });
         if (a.captor) posedHidden.push({ f: fi, a });
+        posedUnseen.push({ f: fi, a });
         continue;
       }
       const an = fi.animFor(a.st.actionStateId);
@@ -1831,7 +1835,10 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // fighters posed for this frame again after)
       const filled = benchFrame === null && fillChecks(fxw, data, fs, FILL_MS);
       if (filled && st && stageInWorld(tr)) st.update(fno, stageFrame(data, fno));
-      if (advance(fxw, data, fs, fno, frameActors) || filled) for (const { f: fi, a } of posed) poseActor(fi, a);
+      // (the unseen ones too: until 2026-11-08 a fighter its move hid kept the pose of the last frame the stepping
+      // posed - checkpoints made ahead - and its magnifier sat where that put it: Mewtwo's teleport, a bubble on
+      // the right edge for a frame, and the edge arrow the game never gave)
+      if (advance(fxw, data, fs, fno, frameActors) || filled) for (const { f: fi, a } of [...posed, ...posedUnseen]) poseActor(fi, a);
       // (the swinging chains are stepped to this frame now: those with them posed again)
       for (const { f: fi, a } of posed) {
         const key = actorKey(a.player, a.nana);
