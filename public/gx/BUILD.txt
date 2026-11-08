@@ -7,13 +7,14 @@ calls the app's player seeks with (msl_gxw_restart_stream, msl_gxw_heap_top), th
 (msl_gxw_load_game, msl_gxw_rewind: a restart or a C-stick fit drive opens in milliseconds), and the sound core (src/sound: the game's
 own sound code, off unless the page starts it: msl_gxw_sound_start, msl_gxw_sound_need, msl_gxw_sound_pcm, msl_gxw_sound_frames,
 msl_gxw_sound_music, msl_gxw_sound_info, msl_gxw_sound_log, msl_gxw_sound_log_count); the browser build computes no game data
-fingerprint (it only marks a saved state's game data). Built with tools/build/build_wasm_gx.sh, DATA unset: no game data is inside the
+fingerprint (it only marks a saved state's game data). Built with tools/build/build_wasm_gx.sh from a clean build folder (FORCE=1, EXTRA_CFLAGS: -fmacro-prefix-map and -ffile-prefix-map of
+the checkout to nothing), DATA unset: no game data is inside the
 module (the page hands it the user's own files, main.dol included; the sound files only when sound is on).
 Source-file names are relative (prefix maps); gx-core.js is written with LF line ends.
 
 sha256
   gx-core.js    9256557cdc6809a3a0522027a3078dd7670e6e9f68542687fb1657e31d8122ba
-  gx-core.wasm  3581b3676303ac8cc2f48a183f696a43ee878d25e5ba5d67a3d9678b70dd345b
+  gx-core.wasm  ecf533865eb866b867988ec19672546dfae526324b6e857b67df7a013ca8bbfd
 
 sim-files.json lists the game files the module reads (names only), for a game folder given by URL (?files=). The sound files are not in
 it: the module names them when the sound starts (audio/us/smash2.sem, the match's audio/us/*.ssm banks, the stage's audio/*.hps).
