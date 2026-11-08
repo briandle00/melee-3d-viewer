@@ -69,6 +69,36 @@ export async function namesToRead(from: GameFilesFrom, list: string | null): Pro
   throw new Error("the simulator's file list (sim-files.json) could not be read");
 }
 
+/** The game's sound files the simulator names (paths under the game files folder, as on the disc: "audio/us/smash2.sem",
+ *  "audio/us/mars.ssm", "audio/sp_zako.hps"), read from the folder: by URL each path below its base; a picked folder by the path inside
+ *  it (a file's webkitRelativePath after the folder's own name), else by its name when one file has it. Throws naming the first missing. */
+export async function readSoundFiles(from: GameFilesFrom, names: string[]): Promise<Map<string, Uint8Array>> {
+  const out = new Map<string, Uint8Array>();
+  const inFolder = (f: File) => {
+    const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
+    return rel.includes("/") ? rel.slice(rel.indexOf("/") + 1) : f.name;
+  };
+  const byPath = from.kind === "files" ? new Map(from.list.map((f) => [inFolder(f), f])) : null;
+  const one = async (name: string) => {
+    if (byPath) {
+      const leaf = name.slice(name.lastIndexOf("/") + 1);
+      const f = byPath.get(name) ?? (() => {
+        const same = from.kind === "files" ? from.list.filter((x) => x.name === leaf && inFolder(x).endsWith(name.slice(name.indexOf("/") + 1))) : [];
+        return same.length === 1 ? same[0] : undefined;
+      })();
+      if (!f) throw new Error(`${name}: not in the game files folder`);
+      out.set(name, new Uint8Array(await f.arrayBuffer()));
+      return;
+    }
+    const base = new URL((from as { base: string }).base.replace(/\/?$/, "/"));
+    const r = await fetch(new URL(name.split("/").map(encodeURIComponent).join("/"), base));
+    if (!r.ok) throw new Error(`${name}: ${r.status === 404 ? "not in the game files folder" : "HTTP " + r.status}`);
+    out.set(name, new Uint8Array(await r.arrayBuffer()));
+  };
+  for (let i = 0; i < names.length; i += 4) await Promise.all(names.slice(i, i + 4).map(one));
+  return out;
+}
+
 /** the files' bytes, by name; throws naming the first one missing */
 export async function readGameFiles(from: GameFilesFrom, names: string[]): Promise<Map<string, Uint8Array>> {
   const out = new Map<string, Uint8Array>();

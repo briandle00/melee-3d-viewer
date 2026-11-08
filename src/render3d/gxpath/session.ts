@@ -13,6 +13,11 @@
  * again, in milliseconds; a fresh instance only when the module cannot be put back.
  *
  * The renderer is anything with gxr's GxBackend (the CPU reference, the WebGL one); its methods used here are listed in SessionBackend below.
+ *
+ * The game's sound (a module with the sound core, and the sound option): the module runs the game's own sound code beside its frames,
+ * started each time the match opens (core.ts soundStart), so its state is in the module's memory and every rewind, checkpoint and
+ * opening again keeps it exact. Each row stepped hands its sound to onSound (32 kHz stereo), heard or not (a row stepped on the way
+ * to a seek is not); the files the sound needs are read the first time it names them (the sound option's files) and kept.
  */
 import { GxGpu } from "../gxr/gpu";
 import type { Dff, GxFrame } from "../gxr/dff";
@@ -71,6 +76,8 @@ export interface SessionOptions {
   playback?: PlaybackMode;
   /** what the page is doing before the match can start (the C-stick fit of playback original), or null when that is over */
   onProgress?: (text: string | null) => void;
+  /** the game's sound: the sound files the module names (paths under the game files' folder) read; without it the match has no sound */
+  sound?: { files(names: string[]): Promise<Map<string, Uint8Array>> };
   /** at most this many drive choices are tried when the game parts from the replay (default 3, as the track simulator) */
   maxDrives?: number;
   /** a renderer, made with the way to the GPU's memory it reads (the CPU reference needs it); the same one is used for every restart
@@ -88,6 +95,15 @@ export class GxSession {
   /** called with each picture the game copies to the screen (rgba is the renderer's own buffer: copy to keep) */
   onPicture: ((rgba: Uint8Array, row: number) => void) | null = null;
   times: FrameTimes = { step: 0, handoff: 0, render: 0 };
+  /** each row's sound as it is stepped: interleaved stereo 16-bit at 32 kHz (core.ts SOUND_RATE), the row, and whether it is to be heard
+   *  (a row drawn as it plays; false for the rows stepped alone on the way to a seek) */
+  onSound: ((pcm: Int16Array, row: number, heard: boolean) => void) | null = null;
+  /** the game's sound: "off" (not asked for), "on", or why there is none */
+  soundState = "off";
+  private soundFiles = new Map<string, Uint8Array>();
+  /** the module instances the sound files were written into */
+  private soundWritten = new WeakSet<GxCore>();
+  private music = true;
   /** sums over every frame stepped since the match opened */
   totals = { frames: 0, step: 0, handoff: 0, render: 0, streamBytes: 0, regionBytes: 0, maxStep: 0, maxFrame: 0 };
   /** which of the tape's drive choices (UCF switches, arithmetic: tape.ts driveOrder) the match plays, and how far each held */
@@ -127,7 +143,7 @@ export class GxSession {
 
   /** The match of `whole` opened, played back `mode`: in `reuse` rewound when it can be (GxCore.rewind: the game data kept from its
    *  first load), else in a fresh instance that loads the game data (GxCore.loadGame). */
-  private async openIn(reuse: GxCore | null, whole: Uint8Array, mode: PlaybackMode): Promise<GxCore> {
+  private async openIn(reuse: GxCore | null, whole: Uint8Array, mode: PlaybackMode, sound = true): Promise<GxCore> {
     let core = reuse;
     if (!core?.rewind()) {
       core?.destroy();
@@ -138,7 +154,52 @@ export class GxSession {
       if (core.loadGame(this.o.files.names)) core.rewind();
     }
     core.openMatch(whole, this.o.files.names, mode);
+    if (sound && this.o.sound && (this.soundState === "off" || this.soundState === "on")) return await this.startSound(core, whole, mode);
     return core;
+  }
+
+  /** The game's sound started for the match just opened in `core`: the files it names read (the sound option) and written into the
+   *  module, and the match opened again to start it with them. When it cannot start, the match is opened again without it (every
+   *  opening of a session is then the same) and soundState says why. */
+  private async startSound(core: GxCore, whole: Uint8Array, mode: PlaybackMode): Promise<GxCore> {
+    if (!core.hasSound) { this.soundState = "this simulator build has no sound"; return core; }
+    if (!this.soundWritten.has(core)) {
+      for (const [n, b] of this.soundFiles) core.writeFile(n, b);
+      this.soundWritten.add(core);
+    }
+    let r = core.soundStart();
+    for (let tries = 0; !r.on && r.need && r.need.length && tries < 2; tries++) {
+      let got: Map<string, Uint8Array>;
+      try {
+        got = await this.o.sound!.files(r.need);
+      } catch (e) {
+        r = { on: false, need: null, reason: String((e as Error)?.message ?? e) };
+        break;
+      }
+      for (const n of r.need) {
+        const b = got.get(n);
+        if (!b) { r = { on: false, need: null, reason: `${n}: not in the game files folder` }; break; }
+        this.soundFiles.set(n, b);
+      }
+      if (!r.on && r.need === null) break;
+      core = await this.openIn(core, whole, mode, false);
+      for (const [n, b] of this.soundFiles) core.writeFile(n, b);
+      this.soundWritten.add(core);
+      r = core.soundStart();
+    }
+    if (r.on) {
+      core.soundMusic(this.music);
+      this.soundState = "on";
+      return core;
+    }
+    this.soundState = r.need ? `the game's sound needs ${r.need.join(", ")}` : r.reason;
+    return await this.openIn(core, whole, mode, false);
+  }
+
+  /** the game's music heard or not (the sound's state goes on as the game's either way) */
+  setMusic(on: boolean): void {
+    this.music = on;
+    if (this.soundState === "on") this.core?.soundMusic(on);
   }
 
   /** the match from its first row (the module rewound, or a fresh instance; the renderer back to its start) */
@@ -162,6 +223,7 @@ export class GxSession {
     backend.onPicture = this.wantPictures ? (rgba) => { this.onPicture?.(rgba, this.index - 1); } : null;
     // (the register files the stream starts from are taken when the first frame is stepped: row 0 is stepped here and fed first)
     core.step(nativeRow(whole, 0));
+    this.sound(0, false);
     this.firstStepped = true;
     this.gpu = new GxGpu(backend, core.initial() as unknown as Dff);
     backend.prepareMemory?.(this.gpu.mem, this.gpu.regs);
@@ -186,7 +248,10 @@ export class GxSession {
     const i = this.index;
     const t0 = performance.now();
     if (i === 0 && this.firstStepped) this.firstStepped = false;
-    else core.step(nativeRow(this.whole!, i));
+    else {
+      core.step(nativeRow(this.whole!, i));
+      this.sound(i, draw && this.feeding);
+    }
     const t1 = performance.now();
     this.index = i + 1;
     this.checkDiverged(i);
@@ -209,6 +274,11 @@ export class GxSession {
     if (t1 - t0 > T.maxStep) T.maxStep = t1 - t0;
     if (t3 - t0 > T.maxFrame) T.maxFrame = t3 - t0;
     return true;
+  }
+
+  /** row i's sound to onSound (while the sound is on) */
+  private sound(i: number, heard: boolean): void {
+    if (this.onSound && this.soundState === "on") this.onSound(this.core!.soundPcm(), i, heard);
   }
 
   private checkDiverged(i: number): void {
@@ -254,6 +324,7 @@ export class GxSession {
     this.wasm!._msl_gxw_restart_stream!();
     const i = this.index;
     this.core!.step(nativeRow(this.whole!, i));
+    this.sound(i, false);
     this.index = i + 1;
     this.checkDiverged(i);
     this.feedHere();
@@ -390,7 +461,7 @@ export class GxSession {
       let core: GxCore | null = null;
       try {
         const whole = await this.tapeFor(d, "original");
-        core = driveCore = await this.openIn(driveCore, whole, "original");
+        core = driveCore = await this.openIn(driveCore, whole, "original", false);
         core.setDisplay(false); // (only the gameplay rows matter)
         let t0 = now();
         for (let i = 0; i < tape.count; i++) {
