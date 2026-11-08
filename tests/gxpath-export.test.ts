@@ -8,7 +8,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BITS_PER_PIXEL, ExportCanceled, MAX_BITRATE, exportMp4, timescaleOf, videoName, type ExportOptions } from "../src/render3d/gxpath/export.ts";
+import { AUDIO_RATE, BITS_PER_PIXEL, CONSOLE_FPS, ExportCanceled, MAX_BITRATE, Resampler, exportMp4, timescaleOf, videoName, type ExportOptions } from "../src/render3d/gxpath/export.ts";
+import { SessionSound } from "../src/render3d/gxpath/exportsound.ts";
 import { mp4Samples } from "../src/render3d/gxpath/exportcheck.ts";
 
 type Config = { codec: string; width: number; height: number; bitrate: number; framerate: number; hardwareAcceleration: string };
@@ -22,6 +23,35 @@ interface Seen {
   canvases: { w: number; h: number; smoothing?: boolean }[];
 }
 let seen: Seen;
+/** what the sound's stand-ins saw: the configuration, and each block of samples (frames, the timestamp, the left channel's first value) */
+let heard: { configs: { codec: string; sampleRate: number; numberOfChannels: number }[]; data: { frames: number; timestamp: number; first: number }[]; closed: boolean };
+/** the audio codecs the stand-in browser encodes */
+let audioCodecs = ["mp4a.40.2", "opus"];
+
+class FakeAudioData {
+  closed = false;
+  constructor(readonly o: { format: string; sampleRate: number; numberOfFrames: number; numberOfChannels: number; timestamp: number; data: Float32Array }) {}
+  close() { this.closed = true; }
+}
+class FakeAudioEncoder {
+  state = "unconfigured";
+  private n = 0;
+  constructor(private init: { output: (c: FakeChunk, meta?: unknown) => void; error: (e: unknown) => void }) {}
+  static isConfigSupported(c: { codec: string }) { return Promise.resolve({ supported: audioCodecs.includes(c.codec), config: c }); }
+  configure(c: { codec: string; sampleRate: number; numberOfChannels: number }) { this.state = "configured"; heard.configs.push(c); }
+  encode(d: FakeAudioData) {
+    if (d.closed) throw new Error("closed sound data was encoded");
+    heard.data.push({ frames: d.o.numberOfFrames, timestamp: d.o.timestamp, first: d.o.data[0] });
+    // (an AAC packet a block, its duration the block's)
+    // (the decoder's description: AAC's AudioSpecificConfig, Opus's 19-byte OpusHead)
+    const codec = heard.configs.at(-1)!.codec;
+    const description = codec === "opus" ? new Uint8Array([79, 112, 117, 115, 72, 101, 97, 100, 1, 2, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0]) : new Uint8Array([0x11, 0x90]);
+    const meta = this.n++ === 0 ? { decoderConfig: { codec, sampleRate: AUDIO_RATE, numberOfChannels: 2, description } } : undefined;
+    this.init.output(new FakeChunk("key", d.o.timestamp, Math.round((d.o.numberOfFrames * 1e6) / AUDIO_RATE), new Uint8Array([9, 9])), meta);
+  }
+  flush() { return Promise.resolve(); }
+  close() { this.state = "closed"; heard.closed = true; }
+}
 /** which configurations the stand-in browser takes (default: every one) */
 let supports: (c: Config) => boolean = () => true;
 /** the encoder fails on this frame (an error callback, as WebCodecs does) */
@@ -79,7 +109,10 @@ function withBrowser(on = true) {
   seen = { configs: [], frames: [], encoders: [], draws: [], canvases: [] };
   supports = () => true;
   failOn = null;
-  for (const [k, v] of Object.entries({ VideoEncoder: FakeEncoder, VideoFrame: FakeFrame, EncodedVideoChunk: FakeChunk, OffscreenCanvas: FakeCanvas })) {
+  heard = { configs: [], data: [], closed: false };
+  audioCodecs = ["mp4a.40.2", "opus"];
+  for (const [k, v] of Object.entries({ VideoEncoder: FakeEncoder, VideoFrame: FakeFrame, EncodedVideoChunk: FakeChunk, OffscreenCanvas: FakeCanvas,
+                                         AudioEncoder: FakeAudioEncoder, AudioData: FakeAudioData, EncodedAudioChunk: FakeChunk })) {
     if (on) g[k] = v; else delete g[k];
   }
 }
@@ -226,4 +259,88 @@ test("a TV without WebGL 2 says the TV cannot be drawn, and the encoder is close
   await assert.rejects(exportMp4(opts), /cannot draw the TV \(WebGL 2\)/);
   assert.deepEqual(calls.seek, []);
   assert.equal(seen.encoders[0].state, "closed");
+});
+
+// ---- the sound (export.ts audio: one block a row, audio-export.ts captureAudio over an OfflineAudioBackend - the page's is the
+// player's own session's sound, exportsound.ts)
+
+/** the game's sound of rows from..to as a session hands it: 533 or 534 stereo samples a row at 32 kHz (8008 / 15 on average), each
+ *  row's samples the row's number */
+function rowsSound(from: number, to: number, gameFrame = (row: number) => row - 123) {
+  const snd = new SessionSound(gameFrame(from), gameFrame(to), gameFrame);
+  for (let row = from - 3; row <= to + 3; row++) {
+    const n = Math.floor(((row + 1) * 8008) / 15) - Math.floor((row * 8008) / 15);
+    snd.take(new Int16Array(2 * n).fill(row), row);
+  }
+  return snd;
+}
+
+test("with the sound: the file has an AAC track at 48 kHz, as long as the video, a block a row in order from its first row", async () => {
+  for (const fps of [60, CONSOLE_FPS]) {
+    withBrowser();
+    const snd = rowsSound(100, 399);
+    const r = await exportMp4(options({ from: 100, to: 399, fps, audio: snd.blocks() }).opts);
+    assert.deepEqual(r.audio, { codec: "mp4a.40.2", sampleRate: AUDIO_RATE, samples: r.audio!.samples });
+    assert.deepEqual(heard.configs, [{ codec: "mp4a.40.2", sampleRate: AUDIO_RATE, numberOfChannels: 2, bitrate: 192000 }]);
+    // (300 rows at the video's rate: 5 s at 60 frames a second, 5.005 s at the console's - give or take a sample)
+    const seconds = 300 / fps;
+    assert.ok(Math.abs(r.audio!.samples - seconds * AUDIO_RATE) <= 2, `${r.audio!.samples} samples for ${seconds} s`);
+    assert.equal(heard.data.length, 300, "a block a row");
+    // (the timestamps follow the samples written: no gap, no overlap)
+    let at = 0;
+    for (const d of heard.data) { assert.equal(d.timestamp, Math.round((at * 1e6) / AUDIO_RATE)); at += d.frames; }
+    // (row 100's sound first: the samples of row i are i / 32768)
+    assert.ok(Math.abs(heard.data[0].first - 100 / 32768) < 1e-6, `${heard.data[0].first}`);
+    assert.ok(heard.closed, "the sound's encoder closed");
+    const head = new Uint8Array(await r.file.arrayBuffer());
+    const text = new TextDecoder("latin1").decode(head);
+    assert.ok(text.includes("mp4a") && text.includes("soun"), "an audio track in the file");
+  }
+});
+
+test("Opus when the browser has no AAC; neither: the export says so before it starts", async () => {
+  withBrowser();
+  audioCodecs = ["opus"];
+  let r = await exportMp4(options({ from: 0, to: 59, audio: rowsSound(0, 59).blocks() }).opts);
+  assert.equal(r.audio!.codec, "opus");
+  withBrowser();
+  audioCodecs = [];
+  const { opts, calls } = options({ from: 0, to: 59, audio: rowsSound(0, 59).blocks() });
+  await assert.rejects(exportMp4(opts), /cannot encode the sound/);
+  assert.deepEqual(calls.seek, [], "the replay is not touched");
+  r = await exportMp4(options({ from: 0, to: 59 }).opts);
+  assert.equal(r.audio, null, "without the sound asked for, no sound track");
+});
+
+test("the sound of a row not made ends the export with it, both encoders closed", async () => {
+  withBrowser();
+  const snd = new SessionSound(0, 59, (row) => row);
+  const r = exportMp4(options({ from: 0, to: 59, audio: snd.blocks() }).opts);
+  await assert.rejects(r, /sound of game frame 0 was not made/);
+  assert.equal(seen.encoders[0].state, "closed");
+  assert.ok(heard.closed);
+});
+
+test("the resampler: 32 kHz to 48 kHz keeps a steady tone's level and its timing, block after block", () => {
+  const rs = new Resampler(48000);
+  const out: number[] = [];
+  // (1 kHz at 32 kHz, in rows of 533 or 534)
+  let k = 0;
+  for (let row = 0; row < 120; row++) {
+    const n = Math.floor(((row + 1) * 8008) / 15) - Math.floor((row * 8008) / 15), pcm = new Int16Array(2 * n);
+    for (let i = 0; i < n; i++, k++) { const v = Math.round(16000 * Math.sin((2 * Math.PI * 1000 * k) / 32000)); pcm[2 * i] = v; pcm[2 * i + 1] = -v; }
+    const { l, r } = rs.push(pcm, 32000);
+    assert.equal(l.length, r.length);
+    for (let i = 0; i < l.length; i++) { out.push(l[i]); assert.ok(Math.abs(l[i] + r[i]) < 1e-6); }
+  }
+  // (as many output samples as 48 / 32 of the input, give or take the filter's two)
+  assert.ok(Math.abs(out.length - (k * 3) / 2) <= 3, `${out.length} of ${(k * 3) / 2}`);
+  // (the level: the tone's peak within half a percent; its phase: sample j is the tone at j / 48000 s, two input samples late - the
+  // filter's four taps around the place between its second and third)
+  const peak = Math.max(...out.slice(1000));
+  assert.ok(Math.abs(peak - 16000 / 32768) < 0.005 * 16000 / 32768, `peak ${peak}`);
+  for (const j of [3000, 3001, 20000]) {
+    const want = (16000 / 32768) * Math.sin((2 * Math.PI * 1000 * (j / 48000 - 2 / 32000)));
+    assert.ok(Math.abs(out[j] - want) < 0.01, `sample ${j}: ${out[j]} against ${want}`);
+  }
 });
