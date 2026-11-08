@@ -1755,9 +1755,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         ? trackAt!.poseSent("fj", owner, fno - 123) : null;
       let laid = posedBy ? layTrackSwing(fi, a.st.internalCharacterId, posedBy.joints, true, fresh) : false;
       // (and the ones the simulator runs - the chains a hurtbox sits on - as the game swung them, when the
-      // track has them: "fp")
+      // track has them: "fp"; the same quaternion turns leave a chain's joints out of these lines too
+      // (viewer_track.c skips them alike), so then only the ones this frame's line has: Zelda's dress kept its
+      // roots where the move before left them through a 30-frame blend into her wait, Mewtwo's tail through a fall)
       const swungBy = trackAt?.pose("fp", owner, fno - 123);
-      if (swungBy && layTrackSwing(fi, a.st.internalCharacterId, swungBy.joints, true)) laid = true;
+      const swungFresh = fresh ? trackAt!.poseSent("fp", owner, fno - 123) : null;
+      if (swungBy && layTrackSwing(fi, a.st.internalCharacterId, swungBy.joints, true, swungFresh)) laid = true;
       if (laid) fi.skeleton.update();
     };
     for (const a of actors) {

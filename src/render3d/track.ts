@@ -82,7 +82,11 @@ export interface TrackData {
 }
 
 /** one owner's pose lines ("jp", "fp", "lm"), each with the joints as of it (the streamed ones: PoseStream) */
-interface PoseSnap { frame: number; joints: Map<number, Float32Array>; out: Map<number, number> | null; links: number }
+interface PoseSnap {
+  frame: number; joints: Map<number, Float32Array>; out: Map<number, number> | null; links: number;
+  /** the joints the owner's lines on this frame have values for */
+  sent: Set<number>;
+}
 
 /** a pose as of a frame: by joint (an item's preorder joint, a fighter's part, a chain's link) its values -
  *  nine (rot, scale, translate; NaN for one not sent, which is the file's rest) or a link's twelve (its
@@ -422,8 +426,10 @@ export class ViewerTrack {
       const out = how.out ? new Map(prev?.out) : null;
       let i = 2 + how.key;
       const links = how.links ? Number(e[i++]) : 0;
+      const sent = new Set<number>(prev && prev.frame === e[0] ? prev.sent : []);
       while (i < e.length) {
         const j = Number(e[i++]);
+        sent.add(j);
         if (out) out.set(j, Number(e[i++]));
         const mask = Number(e[i++]);
         const had = joints.get(j);
@@ -433,7 +439,7 @@ export class ViewerTrack {
       }
       // (two lines of one owner on a frame: the second holds both)
       if (prev && prev.frame === e[0]) list.pop();
-      list.push({ frame: e[0], joints, out, links });
+      list.push({ frame: e[0], joints, out, links, sent });
     }
     return byKey;
   }
@@ -484,11 +490,15 @@ export class ViewerTrack {
     return list[lo];
   }
 
-  /** the joints a streamed pose type ("sp", "fj") has a line with values for on exactly game frame `frame`:
-   *  empty when the owner has no line then, null when the track has no lines of the owner's at or before it.
-   *  Good until the next ask */
+  /** the joints a pose type has a line with values for on exactly game frame `frame`: empty when the owner has
+   *  no line then, null when the track has no lines of the owner's at or before it. A streamed type's ("sp",
+   *  "fj") is good until the next ask */
   poseSent(type: string, key: string, frame: number): ReadonlySet<number> | null {
-    if (frame >= this.until || !STREAMED.has(type)) return null;
+    if (frame >= this.until || !this.instants.has(type)) return null;
+    if (!STREAMED.has(type)) {
+      const at = this.pose(type, key, frame) as PoseSnap | null;
+      return at ? (at.frame === frame ? at.sent : NONE_SENT) : null;
+    }
     const s = this.streamsOf(type).get(key);
     if (!s || !s.frames.length || s.frames[0] > frame) return null;
     let lo = 0, hi = s.frames.length - 1;
