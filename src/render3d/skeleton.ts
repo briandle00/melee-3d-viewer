@@ -10,7 +10,7 @@ import {
 } from "./hsd";
 import { Mat, ident, invert, mul } from "./math";
 import {
-  HSD_MtxSRT, PSMTXConcat, PSMTXIdentity, PSMTXInverse, PSMTXMultVec, concatGL, madd, mkBillBoardMtx, mtxFromGL, mtxToGL,
+  HSD_MtxSRT, HSD_MtxSRTQuat, PSMTXConcat, PSMTXIdentity, PSMTXInverse, PSMTXMultVec, concatGL, madd, mkBillBoardMtx, mtxFromGL, mtxToGL,
 } from "./gxmath";
 
 /** what a texture animation can change, per TObj */
@@ -109,6 +109,7 @@ const MIN_SCALE = Math.fround(1e-3);
 const tmpB = new Float32Array(16), tmpC = new Float32Array(16);
 const tmpL = new Float32Array(12), tmpP12 = new Float32Array(12), tmpRS = new Float32Array(3);
 const tmpS3 = new Float32Array(3), tmpR3 = new Float32Array(3), tmpT3 = new Float32Array(3);
+const tmpQ4 = new Float32Array(4);
 const tmpP = [0, 0, 0];
 
 // the camera the billboards face: its view matrix and that inverted (HSD
@@ -218,6 +219,11 @@ export class Skeleton {
   readonly rot: Float32Array;
   readonly scale: Float32Array;
   readonly trans: Float32Array;
+  /** a joint turned by a quaternion (JOBJ_USE_QUATERNION: an animation's blend, a part animation's) - x, y, z, w,
+   *  laid by the viewer track's "fq" - when its `quatOn` is set: its matrix is HSD_MtxSRTQuat's, not its Euler
+   *  turn's (`rot` then holds the same turn as Euler angles, for whatever reads them). Cleared by clearQuats */
+  readonly quat: Float32Array;
+  readonly quatOn: Uint8Array;
   /** whether each joint's own meshes are drawn: its HIDDEN flag, as the
    *  animations leave it (HSD draws a joint by its own flag alone, and goes
    *  on to its children whatever it is) */
@@ -246,6 +252,8 @@ export class Skeleton {
     this.rot = new Float32Array(n * 3);
     this.scale = new Float32Array(n * 3);
     this.trans = new Float32Array(n * 3);
+    this.quat = new Float32Array(n * 4);
+    this.quatOn = new Uint8Array(n);
     this.shown = new Uint8Array(n);
     this.subEnd = new Int32Array(n);
     for (let i = 0; i < n; i++) this.subEnd[i] = i + 1;
@@ -350,6 +358,11 @@ export class Skeleton {
   restOf(j: number, what: "rot" | "scale" | "trans"): [number, number, number] {
     const o = j * 9 + (what === "rot" ? 0 : what === "scale" ? 3 : 6);
     return [this.rest[o], this.rest[o + 1], this.rest[o + 2]];
+  }
+
+  /** every joint back to its Euler turn (none turned by a quaternion) */
+  clearQuats() {
+    this.quatOn.fill(0);
   }
 
   resetPose() {
@@ -494,7 +507,10 @@ export class Skeleton {
       this.hasScl[i] = 1;
     }
     for (let k = 0; k < 3; k++) { tmpS3[k] = Sc[r + k]; tmpR3[k] = R[r + k]; tmpT3[k] = T[r + k]; }
-    HSD_MtxSRT(L, tmpS3, tmpR3, tmpT3, psOk ? ps : null);
+    if (this.quatOn[i]) {
+      for (let k = 0; k < 4; k++) tmpQ4[k] = this.quat[i * 4 + k];
+      HSD_MtxSRTQuat(L, tmpS3, tmpQ4, tmpT3, psOk ? ps : null);
+    } else HSD_MtxSRT(L, tmpS3, tmpR3, tmpT3, psOk ? ps : null);
     const o = i * 16;
     if (p >= 0) { mtxFromGL(W, P, p * 16); PSMTXConcat(P, L, L); }
     else if (parentWorld) { mtxFromGL(parentWorld, P, 0); PSMTXConcat(P, L, L); }
@@ -524,7 +540,7 @@ export class Skeleton {
   }
 
   /** the pose as of the last update that changed something, to know one that changes nothing */
-  private last: { rot: Float32Array; scale: Float32Array; trans: Float32Array; shown: Uint8Array; parent: Float32Array;
+  private last: { rot: Float32Array; scale: Float32Array; trans: Float32Array; shown: Uint8Array; quat: Float32Array; quatOn: Uint8Array; parent: Float32Array;
                   hasParent: boolean; shifted: boolean; view: number } | null = null;
   /** whether any joint faces the camera (its matrices follow the view) */
   private billboards: boolean | null = null;
@@ -535,14 +551,17 @@ export class Skeleton {
     if (parentWorld) for (let k = 0; k < 16; k++) if (parentWorld[k] !== L.parent[k]) return false;
     const n3 = this.n * 3, R = this.rot, S = this.scale, T = this.trans;
     for (let k = 0; k < n3; k++) if (R[k] !== L.rot[k] || S[k] !== L.scale[k] || T[k] !== L.trans[k]) return false;
+    for (let k = 0; k < this.n; k++) if (this.quatOn[k] !== L.quatOn[k]) return false;
+    for (let k = 0; k < this.n * 4; k++) if (this.quat[k] !== L.quat[k]) return false;
     const sh = this.shown;
     for (let k = 0; k < this.n; k++) if (sh[k] !== L.shown[k]) return false;
     return true;
   }
   private remember(parentWorld: Mat | null) {
     const L = (this.last ??= { rot: new Float32Array(this.n * 3), scale: new Float32Array(this.n * 3), trans: new Float32Array(this.n * 3),
-                                shown: new Uint8Array(this.n), parent: new Float32Array(16), hasParent: false, shifted: false, view: 0 });
+                                shown: new Uint8Array(this.n), quat: new Float32Array(this.n * 4), quatOn: new Uint8Array(this.n), parent: new Float32Array(16), hasParent: false, shifted: false, view: 0 });
     L.rot.set(this.rot); L.scale.set(this.scale); L.trans.set(this.trans); L.shown.set(this.shown);
+    L.quat.set(this.quat); L.quatOn.set(this.quatOn);
     L.hasParent = !!parentWorld;
     if (parentWorld) L.parent.set(parentWorld.subarray(0, 16));
     L.shifted = !!this.shift;

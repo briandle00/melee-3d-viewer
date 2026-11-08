@@ -1762,6 +1762,11 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const swungBy = trackAt?.pose("fp", owner, fno - 123);
       const swungFresh = fresh ? trackAt!.poseSent("fp", owner, fno - 123) : null;
       if (swungBy && layTrackSwing(fi, a.st.internalCharacterId, swungBy.joints, true, swungFresh)) laid = true;
+      // (and from track version 3 on, the parts a quaternion turns as the game turned them: "fq", each part whose
+      // latest line is an "fq" one (quatTurned) - an animation's blend from TransN down, the guard, the fall's lean,
+      // a part animation's blend (Mewtwo's part 46 through his forward smash) - laid as quaternions, the joint's
+      // matrix HSD_MtxSRTQuat's as the game makes it for JOBJ_USE_QUATERNION)
+      if (posedBy && trackAt!.version >= 3 && layTrackQuats(trackAt!, fi, a.st.internalCharacterId, owner, fno - 123)) laid = true;
       if (laid) fi.skeleton.update();
     };
     for (const a of actors) {
@@ -4619,6 +4624,30 @@ const GUARD_POSED: ReadonlySet<number> = new Set([178, 179, 181, 182]);
 const FALL_FIRST = 20, FALL_LAST = 28;
 /** a fighter's swinging joints as the track has them ("fp": by part, rot, scale, translate) laid on its
  *  pose; whether any was. `only`: the parts from TransN (part 1) down are laid only when in it */
+/** a fighter's quaternion-turned parts as the track has them at game frame `g` ("fq": quaternion x, y, z, w,
+ *  scale, translate; part 0 without the translate), laid on its pose; whether any was */
+function layTrackQuats(tr: ViewerTrack, fi: Fighter, char: number, owner: string, g: number): boolean {
+  const q = tr.pose("fq", owner, g);
+  if (!q) return false;
+  const sk = fi.skeleton;
+  let laid = false;
+  for (const [part, v] of q.joints) {
+    if (!tr.quatTurned(owner, part, g)) continue;
+    const j = partToModelJoint(char, part);
+    if (j < 0 || j >= sk.n || [0, 1, 2, 3].some((k) => Number.isNaN(v[k]))) continue;
+    for (let k = 0; k < 4; k++) sk.quat[j * 4 + k] = v[k];
+    sk.quatOn[j] = 1;
+    // (the same turn as Euler angles, for what reads the pose's turns)
+    const e = mtxEuler(quatMtx([v[0], v[1], v[2], v[3]]));
+    sk.rot[j * 3] = e[0]; sk.rot[j * 3 + 1] = e[1]; sk.rot[j * 3 + 2] = e[2];
+    for (let k = 0; k < 3; k++) {
+      if (!Number.isNaN(v[4 + k])) sk.scale[j * 3 + k] = v[4 + k];
+      if (!Number.isNaN(v[7 + k])) sk.trans[j * 3 + k] = v[7 + k];
+    }
+    laid = true;
+  }
+  return laid;
+}
 function layTrackSwing(fi: Fighter, char: number, joints: Map<number, Float32Array>, all: boolean,
                        only: ReadonlySet<number> | null = null): boolean {
   const sk = fi.skeleton;

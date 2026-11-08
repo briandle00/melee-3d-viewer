@@ -1316,6 +1316,8 @@ export class Fighter {
   pose(state: PoseInput, xRot?: { joint: number; angle: number }, at?: Place | null, face?: Face | null) {
     const sk = this.skeleton;
     sk.shift = null;
+    // (the quaternion turns the track laid on the last pose are its own: this pose starts from Euler turns)
+    sk.clearQuats();
     this.posedBy = "animation";
     this.body(state, 0);
     if (face?.parts.length) this.applyParts(face.parts);
