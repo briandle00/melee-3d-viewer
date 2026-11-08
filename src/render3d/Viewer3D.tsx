@@ -1195,6 +1195,19 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // (the percent's shake and scatter from the game's own random numbers, when a viewer track has them:
       // the effect world's state at the end of the frame's particles - hud.ts shakeDraws)
       h.edgeKindsAt = (g) => edgeKindsOf(data, g);
+      // (the game's own magnifier readings, when the track has them: "mag", edge 2 left, 4 right. Bowser in
+      // bot-dk_bowser 693-705 stood at x 33 while his camera box bone was past the right edge: the game gave him
+      // arrow 0, which a camera bone worked out from his place could not)
+      const trackKinds = [0, 0, 0, 0, 0, 0];
+      h.trackKindsAt = (g) => {
+        const tr = viewerTrack();
+        if (!tr?.has("mag") || !tr.valid(g - 123)) return null;
+        for (let port = 0; port < 6; port++) {
+          const m = tr.magnifier(port, g - 123);
+          trackKinds[port] = m && m.shows ? (m.edge === 2 ? 1 : m.edge === 4 ? 2 : 0) : 0;
+        }
+        return trackKinds;
+      };
       h.rngAt = (i) => {
         if (hudRng === "off") return null;
         if (hudRng === "ps") return fxw?.rngAfter.get(i) ?? null;

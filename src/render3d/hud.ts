@@ -881,9 +881,13 @@ export class Hud {
     if (this.arrows.length < 4) return [];
     const W = edgeWidth(this.k);
     const kinds = new Map<number, number>();
-    for (const { p, sx, sy } of magnified) {
-      const [ex] = edgePoint(sx - 320, -(sy - 240), W);
-      if (Math.abs(ex) >= W - 1e-4) kinds.set(p.slot, ex < 0 ? 1 : 2);
+    const given = this.trackKindsAt?.(f) ?? null;
+    if (given) given.forEach((k, port) => { if (k) kinds.set(port, k); });
+    else {
+      for (const { p, sx, sy } of magnified) {
+        const [ex] = edgePoint(sx - 320, -(sy - 240), W);
+        if (Math.abs(ex) >= W - 1e-4) kinds.set(p.slot, ex < 0 ? 1 : 2);
+      }
     }
     // (kept: the table after a later jump is played through the frames drawn with the kinds they had)
     this.drawnKinds.set(f, [0, 1, 2, 3, 4, 5].map((port) => kinds.get(port) ?? 0));
@@ -919,6 +923,10 @@ export class Hud {
   /** the arrow kind of each port (0-5: 0 none, 1 left, 2 right) its magnifier gives at frame g, worked out without
    *  drawing (the player's: Viewer3D), or null when it can't be; for the table after a jump */
   edgeKindsAt: ((g: number) => ArrayLike<number> | null) | null = null;
+  /** the arrow kind of each port at frame g as the game's magnifiers gave it, when the viewer track has their
+   *  readings ("mag": ifMagnify_802FB8C0 gives a port an arrow while its bubble shows at the left or right edge),
+   *  else null: then the kinds are worked out from the camera (edgeKindsAt, and the frame's own bubbles) */
+  trackKindsAt: ((g: number) => ArrayLike<number> | null) | null = null;
   /** the table after frame f's magnifiers, every 256 frames from the HUD's start (arrowHistory) */
   private arrowChecks: ArrowTable[] = [];
   /** if_2FD9.c's table after frame f's magnifiers, played from the HUD's start (game frame 0) a frame at a time:
@@ -926,14 +934,14 @@ export class Hud {
    *  where it last was and its color for the rest of the game, so a jump needs the whole of it. Null when the
    *  player gives no edgeKindsAt. */
   private arrowHistory(f: number): ArrowTable | null {
-    const kindsAt = this.edgeKindsAt;
+    const kindsAt = this.edgeKindsAt ?? (this.trackKindsAt ? () => null : null);
     if (!kindsAt) return null;
     const f0 = -FIRST_FRAME, STEP = 256;
     if (f < f0) return arrowTable();
     // (false when a frame's kinds can't be had yet - its camera not worked out: nothing is kept then)
     const step = (t: ArrowTable, g: number): boolean => {
       // (a frame drawn: the kinds its magnifiers had, from the fighter's own camera bone; else worked out)
-      const kinds = this.drawnKinds.get(g) ?? kindsAt(g);
+      const kinds = this.trackKindsAt?.(g) ?? this.drawnKinds.get(g) ?? kindsAt(g);
       if (!kinds) return false;
       arrowsPlace(t);
       for (let port = 0; port < 6; port++) {
