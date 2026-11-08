@@ -113,6 +113,22 @@ const MODEL_KEY_JOINT_SIZE = new Set([0x2d, 0x2e, 0x31]);
 const MODEL_KEY_SRT = new Set([0x2d, 0x2e, 0x31, 0x127, 0x4a38, 0x4a39, 0x4a3a, 0xb798, 0xb799, 0xb79a,
                                0x2, 0x6, 0xa3, 0xa7, 0xaa, 0xf2, 0x12a, 0x132, 0x133]);
 
+/** The transform the dispatch gives a generator: the one it has already, when it has one - a kind 0x20000
+ *  generator's own, made with it (hsd_8039F05C: psAddGeneratorAppSRT_begin, xA2 set, its gp the generator), its
+ *  particles placed in the camera's axes from its place - which every one of efLib's paths keeps (`if ((appsrt =
+ *  gen->appsrt) == NULL) appsrt = psAddGeneratorAppSRT_begin(...)`) and sets the fields of, its status, xA2 and
+ *  gp as they were; else `s` itself, new. Until 2026-11-09 the dispatch's transform took the place of the
+ *  generator's own, and a hit's sparks of kind 0x20000 (0x133 from a model's key) were placed through its scale
+ *  and drawn a few pixels off */
+export function giveSrt(g: Generator, s: AppSRT): AppSRT {
+  const own = g.srt;
+  if (!own) return (g.srt = s);
+  const { status, view, owner, used } = own;
+  Object.assign(own, s);
+  own.status = status; own.view = view; own.owner = owner ?? s.owner; own.used = used;
+  return own;
+}
+
 /** An effect world as it stood after a frame (FxWorld.save), to be made again exactly (FxWorld.load): its own
  *  state copied, what it only reads (the effect files, the models' props, the hooks) kept as it is */
 export interface FxSnapshot { frame: number; state: Record<string, unknown>; bytes: number }
@@ -1819,7 +1835,7 @@ export class FxWorld {
     if (s.attach && ctx.follow) {
       // (sized: a transform of its own that follows, at the call's scale)
       if (s.scale === "arg" || s.scale === "fighter") {
-        g.srt = { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0, sx: ctx.scale, sy: ctx.scale, sz: ctx.scale, follow: true };
+        giveSrt(g, { tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0, sx: ctx.scale, sy: ctx.scale, sz: ctx.scale, follow: true });
       }
       this.attach(g, ctx.follow, ctx.pos);
       // (at the call's place under the joint: the offset goes with it)
@@ -1837,7 +1853,7 @@ export class FxWorld {
       if (s.srtRotY !== undefined) srt.ry = ctx.facing < 0 ? s.srtRotY : -Math.PI;
       if (s.rotZ) srt.rz = ctx.angle;
       if (s.scale === "arg" || s.scale === "fighter") srt.sx = srt.sy = srt.sz = ctx.scale;
-      g.srt = srt;
+      giveSrt(g, srt);
     } else {
       g.px = ctx.pos[0]; g.py = ctx.pos[1]; g.pz = ctx.pos[2];
     }
@@ -1861,7 +1877,7 @@ export class FxWorld {
       const bank = this.banks.get(k.bank);
       const g = bank ? this.ps.generator(bank, k.gen) : null;
       if (!g) continue;
-      g.srt = { tx: at[0], ty: at[1], tz: at[2], rx: 0, ry: 0, rz: 0, sx: scale, sy: scale, sz: scale, follow: false };
+      giveSrt(g, { tx: at[0], ty: at[1], tz: at[2], rx: 0, ry: 0, rz: 0, sx: scale, sy: scale, sz: scale, follow: false });
       g.tag = `f:${by}`;
     }
   }
@@ -1920,7 +1936,7 @@ export class FxWorld {
           // the joint's own size each frame (0x1000); the generator waits, let go, while anything uses it)
           const turnY = gfx === 0x127 || MODEL_KEY_ROT_Y.has(gfx), sized = MODEL_KEY_SCALE.has(gfx);
           const sc = sized ? m.scale : 1;
-          g.srt = { tx: 0, ty: 0, tz: 0, rx: 0, ry: turnY ? m.rotY : 0, rz: 0, sx: sc, sy: sc, sz: sc, follow: true, owner: g };
+          giveSrt(g, { tx: 0, ty: 0, tz: 0, rx: 0, ry: turnY ? m.rotY : 0, rz: 0, sx: sc, sy: sc, sz: sc, follow: true, owner: g });
         }
         this.attach(g, on, [w[k.joint * 16 + 12], w[k.joint * 16 + 13], w[k.joint * 16 + 14]]);
         if (own) {
@@ -1940,18 +1956,18 @@ export class FxWorld {
         const turnY = gfx !== 0xd4 && gfx !== 0x243 && gfx !== 0xe3, turnZ = gfx === 0xd4 || gfx === 0x243;
         const sc = gfx === 0xd4 || gfx === 0xe3 ? m.scale : 1;
         // (efLib_AddGeneratorAppSRT and psAddGeneratorAppSRT_begin make it with status 1: ONCE)
-        g.srt = { tx: w[atJoint * 16 + 12], ty: w[atJoint * 16 + 13], tz: w[atJoint * 16 + 14],
-                  rx: 0, ry: turnY ? m.rotY : 0, rz: turnZ ? m.rotZ : 0, sx: sc, sy: sc, sz: sc, follow: false, status: APP_ONCE };
+        giveSrt(g, { tx: w[atJoint * 16 + 12], ty: w[atJoint * 16 + 13], tz: w[atJoint * 16 + 14],
+                     rx: 0, ry: turnY ? m.rotY : 0, rz: turnZ ? m.rotZ : 0, sx: sc, sy: sc, sz: sc, follow: false, status: APP_ONCE });
         m.kin?.push(g);
         continue;
       }
-      g.srt = { tx: w[k.joint * 16 + 12], ty: w[k.joint * 16 + 13], tz: w[k.joint * 16 + 14],
-                rx: 0, ry: m.rotY, rz: m.rotZ, sx: m.scale, sy: m.scale, sz: m.scale, follow: false };
+      const srt = giveSrt(g, { tx: w[k.joint * 16 + 12], ty: w[k.joint * 16 + 13], tz: w[k.joint * 16 + 14],
+                               rx: 0, ry: m.rotY, rz: m.rotZ, sx: m.scale, sy: m.scale, sz: m.scale, follow: false });
       if ((m.follow || m.under) && !alone) {
         // (a model that moves with a fighter: its generators go with its
         // joint and leave their particles behind - Fire Fox's trail)
         const joint = k.joint;
-        g.srt.follow = true;
+        srt.follow = true;
         g.bake = true;
         g.model = m;
         g.follow = (self) => {

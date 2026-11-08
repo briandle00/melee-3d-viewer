@@ -215,7 +215,7 @@ test("0xB2: the place through the transform's matrix made again, each row readin
   assert.equal(p2.px, 1.5);
 });
 
-import { FxWorld } from "../src/render3d/fx/world.ts";
+import { FxWorld, giveSrt } from "../src/render3d/fx/world.ts";
 
 test("a generator the stage's code places (grLib_801C96F8): its transform made ONCE; its own, kind 0x20000, no longer only follows", () => {
   const cmds: CmdList[] = [];
@@ -238,4 +238,29 @@ test("a generator the stage's code places (grLib_801C96F8): its transform made O
   (w as unknown as { banks: Map<number, EffectBank> }).banks.set(0, { id: 0, cmds: [cmd()], texGroups: [] } as unknown as EffectBank);
   const c = gen([0, "sgen", 0, 0, 0, 5, 6, 7, 1, -1, -1])!;
   assert.equal(c.srt!.sx, 2);
+});
+
+test("a generator's own transform (kind 0x20000) is kept when the dispatch gives it one: only following, its fields set", () => {
+  // (efLib_SpawnParticleEffect's cases and every efLib path: `if ((appsrt = gen->appsrt) == NULL) appsrt =
+  // psAddGeneratorAppSRT_begin(...)` - the one hsd_8039F05C made, xA2 set, is the one the case scales; a hit's
+  // sparks, 0x133 from a model's key, were placed through the case's scale until 2026-11-09, a few pixels off)
+  const cmds: CmdList[] = [];
+  cmds[0x133] = cmd({ kind: 0x20000 });
+  cmds[0x132] = cmd();
+  const ps = new ParticleSystem(), bank = { id: 0, cmds, texGroups: [] } as unknown as EffectBank;
+  const g = ps.generator(bank, 0x133)!, own = g.srt!;
+  assert.equal(own.view, true);
+  const given = giveSrt(g, { tx: 4, ty: 5, tz: 6, rx: 0, ry: 0.5, rz: 0, sx: 0.8, sy: 0.8, sz: 0.8, follow: false, status: APP_ONCE });
+  assert.equal(given, own);
+  assert.equal(g.srt, own);
+  assert.deepEqual([own.tx, own.ty, own.tz, own.ry, own.sx, own.follow], [4, 5, 6, 0.5, 0.8, false]);
+  // (its status, xA2 and generator as hsd_8039F05C made them)
+  assert.equal(own.view, true);
+  assert.equal(own.status ?? 0, 0);
+  assert.equal(own.owner, g);
+  // one with none takes the one given
+  const h = ps.generator(bank, 0x132)!, s: AppSRT = { tx: 1, ty: 2, tz: 3, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1, follow: true };
+  assert.equal(h.srt, null);
+  assert.equal(giveSrt(h, s), s);
+  assert.equal(h.srt, s);
 });
