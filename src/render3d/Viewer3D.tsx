@@ -863,6 +863,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   let fxw: FxWorld | null = null;
   let fxData: ReplayData | null = null;
   let fxTrack: ViewerTrack | null = null;
+  /** how many effect worlds have been made (a check sees the world it filled is the one drawn) */
+  let fxWorlds = 0;
   const fxPercent = new Map<string, Before>();
   let failed = false;
   // whether this player holds the replay's playing up while it warms up
@@ -1862,17 +1864,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // fighters are this frame's; the effects themselves are drawn later)
     prof.mark("pose");
     if (ek?.bank) {
-      // (made again when a viewer track comes in: what it says replaces the guesses)
       const tr = viewerTrack();
-      if (!fxw || fxData !== data || fxTrack !== tr) {
-        fxw = makeWorld(ek, data, fs, tr);
-        fxData = data;
-        fxTrack = tr;
-      }
-      if (!fxw.ko && st?.camera) fxw.ko = koLook(ek, st);
-      // (the color animations' tables come with the shared fighter file,
-      // which may load after the world is made)
-      if (!fxw.colTables && ek.colAnims) fxw.colTables = ek.colAnims;
+      fxw = worldNow(ek, data, fs);
       // (a skip or a jump steps the frames between, posing the fighters
       // for each: posed again for this one, to be drawn)
       // (checkpoints ahead first, in a little of the frame's time - not while the frame is timed - the stage and the
@@ -2677,12 +2670,31 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   // the effects learned from public replays' tracks (effect-table.json, optional),
   // once a page; the effects run again with it as it comes in
   const [learnedTable, setLearnedTable] = createSignal<Learned | null>(null);
+  /** whether the table's read has ended (with it or without): the world is made again as it comes */
+  const [learnedDone, setLearnedDone] = createSignal(false);
   let useLearned = true;
   createEffect(() => {
     if (!mayLoad()) return;
-    loadLearned().then((t) => { if (t) { setLearnedTable(t); fxw = null; schedule(); } });
+    loadLearned().then((t) => { if (t) { setLearnedTable(t); fxw = null; schedule(); } }).finally(() => setLearnedDone(true));
   });
 
+  /** the effect world for the replay and the viewer track now, as the frames drawn step it: made again when a
+   *  track comes in (what it says replaces the guesses) or a file comes that its steps read (the effect files
+   *  set it to null) */
+  const worldNow = (ek: EffectKit, data: ReplayData, fs: Map<string, Fighter>): FxWorld => {
+    const tr = viewerTrack(), st = stage();
+    if (!fxw || fxData !== data || fxTrack !== tr) {
+      fxw = makeWorld(ek, data, fs, tr);
+      fxData = data;
+      fxTrack = tr;
+      fxWorlds++;
+    }
+    if (!fxw.ko && st?.camera) fxw.ko = koLook(ek, st);
+    // (the color animations' tables come with the shared fighter file,
+    // which may load after the world is made)
+    if (!fxw.colTables && ek.colAnims) fxw.colTables = ek.colAnims;
+    return fxw;
+  };
   // the parity harness's own effect world, and where its last ask ended
   let harnessRun: { w: FxWorld; data: ReplayData; track: ViewerTrack | null; next: number } | null = null;
 
@@ -3504,11 +3516,18 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     sections: () => prof.read(),
     /** checkpoints made ahead to a frame now, at once (the checks', before a jump they measure) */
     fxFill: (to: number) => {
-      const data = replayStore.replayData;
-      if (!fxw || !data) return null;
-      const c = checks(fxw);
+      // (only once every file the world's steps read is in - every fighter, the effect files, the track's, the learned
+      // effects' table: one that
+      // comes later makes the world again, and the checkpoints made before with it, and the jump that was to be
+      // exact is warmed up instead. The world is made here when no frame has made it yet. False: not yet)
+      const data = rawData(), ek = kit(), fs = ready(), tr = viewerTrack();
+      if (!data || !ek?.bank || !allIn() || loadsOut() > 0 || trackFiles() > 0 || !kitDone() || !learnedDone()) return false;
+      // (and the stage's own effects, when the track's pieces name them)
+      if (tr && trackFilesOf(tr).has(30) && !scene?.particles.bank) return false;
+      const w = worldNow(ek, data, fs);
+      const c = checks(w);
       for (let i = 0; i < 100000 && (c.ahead?.frame ?? c.store.last.frame) < Math.min(to, data.frames.length - 1); i++) {
-        if (!fillChecks(fxw, data, ready(), 50)) break;
+        if (!fillChecks(w, data, fs, 50)) break;
       }
       draw();
       return true;
@@ -3517,8 +3536,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
      *  the world drawn is the exact one */
     fxChecks: () => {
       const c = fxw ? checksOf.get(fxw) : undefined;
-      return c ? { count: c.store.snaps.length, last: c.store.last.frame, every: c.store.every, bytes: c.store.bytes, exact: c.exact }
-        : null;
+      return c ? { count: c.store.snaps.length, last: c.store.last.frame, every: c.store.every, bytes: c.store.bytes, exact: c.exact,
+                   world: fxWorlds, frame: fxw!.frame } : null;
     },
     /** each frame drawn since the last ask: [when it started (ms), how long it took, the frame] */
     frameLog: () => { const out: number[][] = []; for (let i = 0; i + 2 < frameLog.length; i += 3) out.push([frameLog[i], frameLog[i + 1], frameLog[i + 2]]); frameLog.length = 0; return out; },
