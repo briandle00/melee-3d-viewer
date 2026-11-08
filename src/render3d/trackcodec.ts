@@ -15,8 +15,8 @@
  * floats as "0x" words keeps, read back as the floats themselves).
  *
  * VTB2 puts a mode byte before each type's body: 0 the body as VTB1 has it,
- * 1 a pose type, one of the pose lines ("fj", "fp", "jp", "sp", "lm", and the
- * debug "wf", "wi", "ws"): a few head numbers and then groups of (ids, mask,
+ * 1 a pose type, one of the pose lines ("fj", "fp", "jp", "sp", "lm", "fq",
+ * "lj", and the debug "wf", "wi", "ws"): a few head numbers and then groups of (ids, mask,
  * one float word for each bit of the mask). Its streams, in order: the frames
  * (steps, zigzag), each head number (a column), for "fp" a byte per event
  * (1: every value of it is the value of the same frame's "fj" line of the
@@ -38,6 +38,8 @@ const RANKS = 1024, ID = 4096;
 /** the pose types: head numbers, ids before a group's mask, which head number tells the character or the stage part (-1 none) */
 const POSE: Record<string, [number, number, number]> = {
   fj: [3, 1, 2], fp: [3, 1, 2], wf: [3, 1, 2], jp: [1, 1, -1], wi: [1, 1, -1], sp: [1, 1, 0], ws: [1, 1, 0], lm: [2, 2, -1],
+  // (track version 3: the parts a quaternion turns, a chain link's joints below its root)
+  fq: [3, 1, 2], lj: [1, 2, -1],
 };
 /** a type whose values are those of another's line of the same frame and head */
 const DERIVE: Record<string, string> = { fp: "fj" };

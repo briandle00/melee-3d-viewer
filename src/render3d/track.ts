@@ -53,6 +53,33 @@
  *       a fighter's joints as the game left them (its animation, the blend into
  *       it and what its code set after), the nine values, by part: every part
  *       with a live joint but 0; the first line has every value
+ * and, from track version 3 on:
+ *   ["fq", f, port, sub, character, (part, mask, values)...]
+ *       the parts "fj" would have but that a quaternion turns at the frame's
+ *       end (an animation's blend, the guard, the fall's lean, a part
+ *       animation's blend): quaternion x, y, z, w, scale x, y, z, translate
+ *       x, y, z (part 0: the quaternion and the scale). A part going from one
+ *       to the other is sent whole in the line it goes to: of "fj" and "fq",
+ *       the part's latest line is the one that lays it (quatTurned)
+ *   ["lj", f, spawn_id, (joint, link, mask, values)...]
+ *       a chain link's joints below its root ("lm" has the root's matrix),
+ *       by preorder index in the link's tree (1 the root's first child), the
+ *       nine values of "jp" (Ness's yo-yo ball's spin); kept by link * 4096 +
+ *       joint
+ *   ["imat", f, spawn_id, state, frame]
+ *       the item's code laid its state's animations, its materials' too, at
+ *       that frame once (it_80273670: Peach's turnip's face, Dr. Mario's
+ *       pill): its textures stay as that frame left them
+ *   ["lmat", f, spawn_id, link, frame]
+ *       the same for a chain link's material animation (it_802BE5D8: Ness's
+ *       yo-yo ball, frame 1 while it spins, 0 once let go)
+ *   ["mag", f, port, shows, x, y, edge]
+ *       the magnifier's reading the HUD draws from, on change: whether it
+ *       shows (the offscreen bit the fighter draw before left), the whole
+ *       pixel of the fighter's camera box bone (x2188, which the bubble and
+ *       the edge arrows take) and the screen edge ifMagnify_802FB73C finds
+ *       for it (1 top, 2 left, 3 bottom, 4 right): ifMagnify_802FB8C0 gives
+ *       the port an edge arrow while it shows at edge 2 or 4
  * and the ones for later (effects, part switches, stage animations): kept,
  * asked for by type.
  *
@@ -73,6 +100,7 @@ import { pageCache, trim } from "../state/pageCache";
 
 export type TrackEvent = [number, string, ...(number | string)[]];
 export interface TrackData {
+  /** 1, 2; 3: every float as its single's bits, and "fq", "lj", "imat", "lmat", "mag" */
   version: number; sim_build?: number; seconds?: number; events: TrackEvent[];
   /** whether the simulator played the replay exactly, and if not the first
    *  game frame its game was not the replay's */
@@ -94,19 +122,24 @@ interface PoseSnap {
 export interface TrackPose { joints: Map<number, Float32Array>; out: Map<number, number> | null; links: number }
 
 /** how a pose line reads: values before its joints that name the owner, values of a joint, whether a joint
- *  has "out" before its mask, and whether the owner's header has a link count */
-const POSES: Record<string, { key: number; width: number; out: boolean; links: boolean }> = {
+ *  has "out" before its mask, whether the owner's header has a link count, and whether a joint is two numbers
+ *  (joint, link: kept as link * LINK_JOINTS + joint) */
+const POSES: Record<string, { key: number; width: number; out: boolean; links: boolean; pair?: boolean }> = {
   jp: { key: 1, width: 9, out: false, links: false },
   fp: { key: 3, width: 9, out: false, links: false },
   lm: { key: 1, width: 12, out: true, links: true },
   sp: { key: 1, width: 9, out: false, links: false },
   fj: { key: 3, width: 9, out: false, links: false },
+  fq: { key: 3, width: 10, out: false, links: false },
+  lj: { key: 1, width: 9, out: false, links: false, pair: true },
 };
+/** "lj": a link's joint is kept as link * LINK_JOINTS + joint */
+export const LINK_JOINTS = 4096;
 
 /** the pose types with a line on most frames (a fighter's every joint, an animated stage's): not kept as a
  *  snapshot a line, but as their lines with a snapshot every POSE_EVERY of them, played forward from the
  *  nearest to the frame asked for (PoseStream) */
-const STREAMED = new Set(["sp", "fj"]);
+const STREAMED = new Set(["sp", "fj", "fq"]);
 const POSE_EVERY = 64;
 /** no joint sent (poseSent on a frame the owner has no line) */
 const NONE_SENT: ReadonlySet<number> = new Set();
@@ -193,6 +226,8 @@ const KEYS: Record<string, number> = {
   tint: 3, charge: 3, part: 3, pos: 2, shake: 2, hide: 2, cns: 2,
   bg: 0, fd: 0, bgcolor: 0, cam: 0, ganim: 1, gcolor: 1, gjoint: 2,
   hook: 2, irot: 1, fdrot: 0, stadscreen: 0, anim: 2, rng: 0, fod: 0, ij: 2,
+  // (version 3; "imat" and "lmat" are written as the item's code lays them: the last one holds)
+  mag: 1, imat: 1, lmat: 2,
 };
 
 /** a fighter's animation as the game played it ("anim"), as of game frame `since` */
@@ -208,6 +243,8 @@ export class ViewerTrack {
   /** every instant, in the order the track has them (within a frame too) */
   private allInstants: TrackEvent[] = [];
   readonly seconds: number;
+  /** the track's version (TrackData.version) */
+  readonly version: number;
   /** the first game frame the track does not hold for (the simulator's game
    *  went another way there): Infinity when it holds for the whole replay */
   readonly until: number;
@@ -216,6 +253,7 @@ export class ViewerTrack {
     // (a track handed over with its floats still as words: read them now)
     if (!data.decoded) { decodeTrackFloats(data.events); data.decoded = true; }
     this.seconds = data.seconds ?? 0;
+    this.version = data.version ?? 0;
     // (a track that says it is not exact without saying where holds for none of it)
     this.until = typeof data.diverged_at === "number" ? data.diverged_at : data.exact === false ? -Infinity : Infinity;
     // (only the events before it: the rest are of the simulator's other game)
@@ -428,7 +466,8 @@ export class ViewerTrack {
       const links = how.links ? Number(e[i++]) : 0;
       const sent = new Set<number>(prev && prev.frame === e[0] ? prev.sent : []);
       while (i < e.length) {
-        const j = Number(e[i++]);
+        const j = how.pair ? Number(e[i]) + LINK_JOINTS * Number(e[i + 1]) : Number(e[i]);
+        i += how.pair ? 2 : 1;
         sent.add(j);
         if (out) out.set(j, Number(e[i++]));
         const mask = Number(e[i++]);
@@ -508,6 +547,75 @@ export class ViewerTrack {
       else hi = mid - 1;
     }
     return s.frames[lo] === frame ? s.sentOn(lo) : NONE_SENT;
+  }
+
+  /** by type ("fj", "fq") and owner: each part's line frames, in order (quatTurned) */
+  private partFrames = new Map<string, Map<string, Map<number, number[]>>>();
+
+  private partFramesOf(type: string, key: string): Map<number, number[]> | undefined {
+    let byKey = this.partFrames.get(type);
+    if (!byKey) {
+      byKey = new Map();
+      this.partFrames.set(type, byKey);
+      const how = POSES[type];
+      for (const e of this.instants.get(type) ?? []) {
+        const k = e.slice(2, 2 + how.key).join(":");
+        let parts = byKey.get(k);
+        if (!parts) byKey.set(k, (parts = new Map()));
+        let i = 2 + how.key;
+        while (i < e.length) {
+          const part = Number(e[i]);
+          let mask = Number(e[i + 1]);
+          i += 2;
+          let list = parts.get(part);
+          if (!list) parts.set(part, (list = []));
+          if (list[list.length - 1] !== e[0]) list.push(e[0]);
+          while (mask) { i += mask & 1; mask >>>= 1; }
+        }
+      }
+    }
+    return byKey.get(key);
+  }
+
+  /** whether a quaternion turns a fighter's part at game frame `frame` (of its "fj" and "fq" lines at or before
+   *  it, the latest is an "fq" one): then pose("fq", key, frame) has its values, else pose("fj", ...). Always
+   *  false on a track before version 3 (none has "fq": a quaternion-turned part is simply left out of "fj"
+   *  there). `key` is port:sub:character, as pose's */
+  quatTurned(key: string, part: number, frame: number): boolean {
+    if (frame >= this.until) return false;
+    const last = (type: string): number => {
+      const list = this.partFramesOf(type, key)?.get(part);
+      if (!list || !list.length || list[0] > frame) return -Infinity;
+      let lo = 0, hi = list.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (list[mid] <= frame) lo = mid;
+        else hi = mid - 1;
+      }
+      return list[lo];
+    };
+    const q = last("fq");
+    return q !== -Infinity && q > last("fj");
+  }
+
+  /** the material animation frame an item's code last laid (it_80273670: "imat"), as of game frame `frame`:
+   *  [item state, frame], or null */
+  itemMaterial(spawn: number, frame: number): [number, number] | null {
+    const v = this.at("imat", String(spawn), frame);
+    return v ? [Number(v[0]), Number(v[1])] : null;
+  }
+
+  /** the material animation frame a chain link's code last laid (it_802BE5D8: "lmat"), or null */
+  linkMaterial(spawn: number, link: number, frame: number): number | null {
+    const v = this.at("lmat", spawn + ":" + link, frame);
+    return v ? Number(v[0]) : null;
+  }
+
+  /** a port's magnifier reading at game frame `frame` ("mag"): whether it shows, the whole pixel of the
+   *  fighter's camera box bone, and the edge (1 top, 2 left, 3 bottom, 4 right); null without one */
+  magnifier(port: number, frame: number): { shows: boolean; x: number; y: number; edge: number } | null {
+    const v = this.at("mag", String(port), frame);
+    return v ? { shows: Number(v[0]) !== 0, x: Number(v[1]), y: Number(v[2]), edge: Number(v[3]) } : null;
   }
 
   /** a fighter's stored charge (the fighter's own field: "dk", "ss", ...), or undefined */
