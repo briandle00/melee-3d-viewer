@@ -602,8 +602,9 @@ export class Fighter {
    *  attributes keep (`at`: their offset) - from its first child down, with
    *  the animations its special attributes keep at `anim` (joint, material:
    *  pointers to them, +0 and +4), as the game adds them to the model's child
-   *  (the grapple beam's glow and claw: itsamusgrapple.c); null without one */
-  articleAnimated(index: number, at: number | null, anim: number): Prop | null {
+   *  (the grapple beam's glow and claw: itsamusgrapple.c), or none (`anim` null: the
+   *  model's child at rest); null without one */
+  articleAnimated(index: number, at: number | null, anim: number | null): Prop | null {
     const key = `animated:${index}:${at}:${anim}`;
     if (this.articleModels.has(key)) return this.articleModels.get(key)!;
     const a = this.pl;
@@ -613,10 +614,13 @@ export class Fighter {
     const model = art === null ? null : ptr(a, art + 0x10);
     const root = at === null ? (model === null ? null : ptr(a, model)) : special === null ? null : ptr(a, special + at);
     const child = root === null ? null : ptr(a, root + 0x08);
-    const twice = (o: number) => { const p = special === null ? null : ptr(a, special + o); return p === null ? null : ptr(a, p); };
+    const twice = (o: number | null) => {
+      const p = special === null || o === null ? null : ptr(a, special + o);
+      return p === null ? null : ptr(a, p);
+    };
     let out: Prop | null = null;
     if (child !== null) {
-      try { out = new Prop(a, child, twice(anim), twice(anim + 4), `animated:${this.internalId}:${index}:${at}`, false); } catch { out = null; }
+      try { out = new Prop(a, child, twice(anim), twice(anim === null ? null : anim + 4), `animated:${this.internalId}:${index}:${at}`, false); } catch { out = null; }
     }
     this.articleModels.set(key, out);
     return out;

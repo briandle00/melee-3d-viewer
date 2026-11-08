@@ -2192,11 +2192,21 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const item = { state: own.state, age: chainClock(data, fno, own) };
         // its glow, held at the arm the whole time, fired or not (Item_8026AB54
         // with ThrowN's number, which ftLib_80086630 takes as the fighter's own
-        // part slot, not through the named-part table: Samus's joint 51, her cannon)
+        // part slot, not through the named-part table: Samus's joint 51, her cannon).
+        // The game never plays the glow's animation: it_802B7C18 adds it, and the pick-up that follows at once
+        // (Item_8026AB54's picked_up, itSamusGrapple_Logic53_PickedUp) sets state 0, whose animation is none (-1:
+        // Item_80268E5C's HSD_JObjRemoveAnimAll) before any frame steps it. The glow is the model's child, the joint
+        // the item is tied by (its bone_attach_id, 1: it_80274F48's lb_8000C2F8, a place and an orientation
+        // constraint), so it stands at the arm with the arm's axes at its own size - the item's, not Samus's
+        // (resolveCnsOrientation keeps each axis's length) - and, a JOBJ_RBILLBOARD, turned about the view's z by
+        // its own rotate z (mkRBillBoardMtx), which the track has ("jp", joint 1). bot-samus_mewtwo 5146: drawn
+        // pulsing at 0.88 x Samus's size, unturned; the game's at 1, turned 126 degrees
         const on = jointOf(a.player, THROWN_PART);
-        const glow = f.articleAnimated(c.art, null, c.glowAnim), art = f.article(c.art, 0);
+        const glow = f.articleAnimated(c.art, null, null), art = f.article(c.art, 0);
         if (on && glow) {
-          glow.poseUnder(item.age, on, (art?.scale ?? 1) * f.modelScale, false, 0);
+          glow.poseUnder(0, on, art?.scale ?? 1, false, 0);
+          const turn = itemPose(own.spawnId)?.get(1)?.[2];
+          if (turn !== undefined && !Number.isNaN(turn)) glow.setRootRotationZ(turn);
           const w = glow.skeleton.world;
           if (note) {
             drawnArticles.push({ type: own.typeId, state: item.state, x: w[12], y: w[13], z: w[14], scale: Math.hypot(w[0], w[1], w[2]),
@@ -4635,8 +4645,8 @@ function useTrackArticles(data: ReplayData, tr: ViewerTrack | null) {
   trackArticles.set(data, out);
 }
 
-// The grapple beam's glow: the beam item's own model, at the hand until it is fired and then at the head, pulsing
-// by its animation at the special attributes' +0xA4 (itsamusgrapple.c), made with the beam. The chains' links
+// The grapple beam's glow: the beam item's own model, at the hand until it is fired and then at the head; its
+// animation at the special attributes' +0xA4 (itsamusgrapple.c) is taken off again before it plays (drawChains). The chains' links
 // themselves are drawn from the track's "lm" (drawTrackChain).
 const CHAINS: Record<number, { art: number; itemType?: number; glowAnim?: number }> = {
   13: { art: 3, itemType: 0x60, glowAnim: 0xa4 },
