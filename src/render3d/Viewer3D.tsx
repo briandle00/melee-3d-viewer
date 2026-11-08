@@ -1742,9 +1742,16 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // ftAnim_80070010's lb_8000C868, ftAnim_8006FE9C's lb_8000C490 - until the shield is held all the way, so the
       // track leaves those joints out from the guard's first frame on and their last values are the move's before
       // it. A held light shield kept a fighter in the pose he raised it from: Marth's whole body off in the magnifier)
+      // (and while falling: ftCo_Fall_Anim_Inner and ftCo_800CC988 under Fall, FallAerial and FallSpecial lean
+      // the fall into its forward or backward animation by the air drift through ftAnim_8006FE9C's lb_8000C490
+      // every frame the lean is neither none nor whole, so from a fall's second frame on the track has none of
+      // those joints and their last values are the fall's first frame's. Ganondorf, Mewtwo, Sheik and Mr. Game &
+      // Watch falling stood frozen in that first pose. Of the other callers of lb_8000C490 and lb_8000C868 for the
+      // parts from TransN down, only Sheik's side-B chain (ftSk_SpecialS_80110610) is left out here)
       const guarded = blend !== null && blend.anim < 0 && GUARD_POSED.has(a.st.actionStateId) &&
         fi.internalId !== YOSHI_ID;
-      const fresh = blend && ((blend.blendFrames > 0 && blend.blendAt < blend.blendFrames) || guarded)
+      const leaned = blend !== null && blend.anim >= FALL_FIRST && blend.anim <= FALL_LAST;
+      const fresh = blend && ((blend.blendFrames > 0 && blend.blendAt < blend.blendFrames) || guarded || leaned)
         ? trackAt!.poseSent("fj", owner, fno - 123) : null;
       let laid = posedBy ? layTrackSwing(fi, a.st.internalCharacterId, posedBy.joints, true, fresh) : false;
       // (and the ones the simulator runs - the chains a hurtbox sits on - as the game swung them, when the
@@ -4620,6 +4627,9 @@ const trackArticles = new WeakMap<ReplayData, Map<number, number>>();
 
 /** the states whose code poses the fighter by the guard (ftCo_80091E78): GuardOn, Guard, GuardSetOff, GuardReflect */
 const GUARD_POSED: ReadonlySet<number> = new Set([178, 179, 181, 182]);
+/** the falls' animations, which ftCo_Fall_Anim_Inner leans by the air drift: Fall, FallF, FallB, FallAerial,
+ *  FallAerialF, FallAerialB, FallSpecial, FallSpecialF, FallSpecialB (ftCo_SM_Fall to ftCo_SM_FallSpecialB) */
+const FALL_FIRST = 20, FALL_LAST = 28;
 /** a fighter's swinging joints as the track has them ("fp": by part, rot, scale, translate) laid on its
  *  pose; whether any was. `only`: the parts from TransN (part 1) down are laid only when in it */
 function layTrackSwing(fi: Fighter, char: number, joints: Map<number, Float32Array>, all: boolean,
