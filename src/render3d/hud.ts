@@ -882,7 +882,7 @@ export class Hud {
     const W = edgeWidth(this.k);
     const kinds = new Map<number, number>();
     const given = this.trackKindsAt?.(f) ?? null;
-    if (given) given.forEach((k, port) => { if (k) kinds.set(port, k); });
+    if (given) { for (let port = 0; port < given.length; port++) if (given[port]) kinds.set(port, given[port]); }
     else {
       for (const { p, sx, sy } of magnified) {
         const [ex] = edgePoint(sx - 320, -(sy - 240), W);
