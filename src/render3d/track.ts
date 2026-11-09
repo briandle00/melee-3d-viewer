@@ -255,6 +255,29 @@ export interface TrackAnim {
   since: number; anim: number; kind: number; frame: number; rate: number; blendFrames: number; blendAt: number;
 }
 
+/** the last of a sorted list of frames at or before `frame` (-Infinity: none, or no list). The list keeps where it
+ *  was last found (_at): played forward, the next ask's is that one or the one after - looked at first, the search
+ *  only when it is neither (quatTurned asks for every part of every fighter, every frame) */
+function lastAtOrBefore(list: number[] | undefined, frame: number): number {
+  if (!list || !list.length || list[0] > frame) return -Infinity;
+  const n = list.length, c = list as number[] & { _at?: number };
+  const was = c._at ?? 0;
+  let lo: number;
+  if (was < n && list[was] <= frame && (was + 1 >= n || list[was + 1] > frame)) lo = was;
+  else if (was + 1 < n && list[was + 1] <= frame && (was + 2 >= n || list[was + 2] > frame)) lo = was + 1;
+  else {
+    lo = 0;
+    let hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (list[mid] <= frame) lo = mid;
+      else hi = mid - 1;
+    }
+  }
+  c._at = lo;
+  return list[lo];
+}
+
 export class ViewerTrack {
   /** changes of state, by type and key, in frame order */
   private states = new Map<string, Map<string, TrackEvent[]>>();
@@ -647,19 +670,8 @@ export class ViewerTrack {
    *  there). `key` is port:sub:character, as pose's */
   quatTurned(key: string, part: number, frame: number): boolean {
     if (frame >= this.until) return false;
-    const last = (type: string): number => {
-      const list = this.partFramesOf(type, key)?.get(part);
-      if (!list || !list.length || list[0] > frame) return -Infinity;
-      let lo = 0, hi = list.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi + 1) >> 1;
-        if (list[mid] <= frame) lo = mid;
-        else hi = mid - 1;
-      }
-      return list[lo];
-    };
-    const q = last("fq");
-    return q !== -Infinity && q > last("fj");
+    const q = lastAtOrBefore(this.partFramesOf("fq", key)?.get(part), frame);
+    return q !== -Infinity && q > lastAtOrBefore(this.partFramesOf("fj", key)?.get(part), frame);
   }
 
   /** the material animation frame an item's code last laid (it_80273670: "imat"), as of game frame `frame`:
