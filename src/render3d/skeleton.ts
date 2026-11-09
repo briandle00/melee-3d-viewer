@@ -453,6 +453,12 @@ export class Skeleton {
     for (const s of this.states) if (s.dirty !== false) resetState(s);
   }
 
+  /** one mesh's material back to the file's */
+  resetMaterial(i: number) {
+    const s = this.states[i];
+    if (s && s.dirty !== false) resetState(s);
+  }
+
   /** a stage's material animation: per joint, one MatAnim per DObj */
   applyMatAnims(anims: (MatAnim | null)[][], dobjsOf: (j: number) => DObj[], frame: number, loop: boolean) {
     const n = Math.min(anims.length, this.n);

@@ -9,9 +9,9 @@
  * Every number here is read from your game files at runtime.
  */
 import { animTime } from "./animtime";
-import { Archive, FigaTree, JObj, loadFigaTree, loadJoint, parseArchive, ptr, sample, str, type Track } from "./hsd";
+import { Archive, FigaTree, JObj, loadFigaTree, loadJoint, loadMatAnimJoint, type MatAnim, parseArchive, ptr, sample, str, type Track } from "./hsd";
 import { Face, FaceTextures, PartAnims, PartPose, faceTextures, partAnims } from "./face";
-import { Skeleton } from "./skeleton";
+import { applyMatAnim, Skeleton } from "./skeleton";
 import { Prop } from "./prop";
 import { itemHitElement, ScriptEvent, runScript } from "./fx/script";
 // (how far on a move that loops by itself has its script run: fx/script.ts ScriptClock)
@@ -274,6 +274,8 @@ export interface GameAnim {
 }
 
 const MEWTWO_ID = 16;
+/** a full shield (ftCommonData x260_startShieldHealth) */
+const START_SHIELD = 60;
 
 /** a parts description's (FtPartsDesc: model count, then a table of four lookups by costume) meshes, each lookup's
  *  every variant together: the costume's lookup, else costume 0's (ftParts_8007487C) */
@@ -473,6 +475,17 @@ export class Fighter {
         this.partVariants = variants(lookups[0]);
         this.lowVariants = variants(lookups[1]);
         this.metalVariants = variants(lookups[3]);
+        // Yoshi's egg (part 0's variant 1, and its low-detail one): its materials' animation, held still
+        // (ftYs_Init_8012B6E8: rate 0) at the frame his shield says (ftYs_Init_8012B8A4)
+        if (internalId === YOSHI) {
+          const mat = [...md.publics].find(([k]) => k.endsWith("matanim_joint"));
+          const anims = mat ? loadMatAnimJoint(md, mat[1]) : [];
+          const byDobj = new Map<number, MatAnim>();
+          all.forEach((j, k) => j.dobjs.forEach((dobj, n) => { const ma = anims[k]?.[n]; if (ma) byDobj.set(dobj.index, ma); }));
+          const egg = [...(this.partVariants[0]?.[1] ?? []), ...(this.lowVariants[0]?.[1] ?? [])];
+          this.eggMats = egg.filter((i) => byDobj.has(i)).map((i) => ({ dobj: i, ma: byDobj.get(i)! }));
+          this.eggEnd = this.eggMats.reduce((e, m) => (e === 0 ? m.ma.aobj?.end ?? 0 : e), 0);
+        }
         this.partVariants.forEach((m, part) => {
           const sel = startingPart(this.internalId, costume, part);
           this.partShown[part] = sel;
@@ -579,6 +592,24 @@ export class Fighter {
   /** each model part's variants (their meshes), and the variant shown now (-1: none) */
   private partVariants: number[][][] = [];
   private partShown: number[] = [];
+
+  /** Yoshi's egg's meshes and their materials' animations, and its length (ftYoshiAttributes xC: the
+   *  animation's end frame, ftYs_Init_8012B6E8) */
+  private eggMats: { dobj: number; ma: MatAnim }[] = [];
+  private eggEnd = 0;
+
+  /** Yoshi's egg's colors as his shield left them: its materials' animation at its length times the share of
+   *  the shield lost (ftYs_Init_8012B8A4: xC * (1 - shield_health / x260_startShieldHealth), HSD_MObjReqAnim at
+   *  that frame), the egg darker as the shield goes; 0 his egg roll's (ftYs_Init_8012B918). null: the file's,
+   *  before his code first set it */
+  eggShade(shield: number | null) {
+    const sk = this.skeleton, f32 = Math.fround;
+    for (const { dobj, ma } of this.eggMats) {
+      if (shield === null) { sk.resetMaterial(dobj); continue; }
+      const st = sk.states[dobj];
+      if (st) applyMatAnim(st, ma, f32(this.eggEnd * f32(1 - f32(shield / START_SHIELD))), false);
+    }
+  }
 
   /** the variant a part shows now (-1: none) */
   partNow(part: number): number { return this.partShown[part] ?? -1; }

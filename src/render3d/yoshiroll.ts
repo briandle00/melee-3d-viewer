@@ -127,3 +127,20 @@ export function eggRollAt(h: RollHistory, f: number): EggRoll | null {
   }
   return out;
 }
+
+/** Yoshi's egg's colors are set from his shield by his code (ftYs_Init_8012B8A4) on each frame of his shield coming
+ *  up (GuardOn 341, GuardOn_1 345) and held (GuardHold 342) and of his rolls and dodge in the egg (EscapeF, EscapeB,
+ *  Escape: ftCo_80099644), and to the full shield's in his egg roll (ftYs_Init_8012B918); between those they stay as
+ *  they were left. Per frame, the shield on the last frame that set them (null: none yet, the file's colors) */
+export const EGG_SET = new Set([233, 234, 235, 341, 342, 345]);
+export function eggShields(frames: ({ internalCharacterId: number; actionStateId: number; shieldSize: number } | undefined)[]):
+    (number | null)[] {
+  let now: number | null = null;
+  return frames.map((st) => {
+    if (st && st.internalCharacterId === YOSHI) {
+      if (EGG_SET.has(st.actionStateId)) now = st.shieldSize;
+      else if (st.actionStateId >= ROLL_FIRST && st.actionStateId <= ROLL_LAST) now = 60;
+    }
+    return now;
+  });
+}
