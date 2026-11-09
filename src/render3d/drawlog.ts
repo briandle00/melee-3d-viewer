@@ -278,13 +278,18 @@ interface Inner {
 
 /** the renderer's fields and methods the log reads or wraps (a test checks they are still there) */
 export const RENDERER_NAMES = ["draws", "cs", "camView", "camVP", "camProj", "camGx", "mvBuf", "lightV", "fogRegs", "cullOn", "shiftView", "shiftVP",
-                               "shifted", "mirrored",
+                               "shifted", "mirrored", "captureLive",
                                "lighting",
                                "overlayVP", "viewProj", "shadowMaps", "shadowMask", "live", "imageTex", "staticsOf", "begin", "setFog",
                                "setTint", "setOutline", "beginShadow", "beginMirror", "endMirror", "endShadow", "drawOne",
                                "drawGeometry", "drawParticles", "drawTrail", "drawSphere", "overlay", "endOverlay"] as const;
 
-export interface FrameLog { frame: number | string | null; draws: Record<string, unknown>[] }
+export interface FrameLog {
+  frame: number | string | null; draws: Record<string, unknown>[];
+  /** what the frame did besides drawing, as the game's logs have it: its copies of the picture into a texture
+   *  (GXCopyTex: the source rectangle in the game's 640 x 480 pixels, the texture format, the copy's size) */
+  events?: Record<string, unknown>[];
+}
 
 export class DrawLog {
   frames: FrameLog[] = [];
@@ -362,6 +367,14 @@ export class DrawLog {
       if (t?.erase && a[3]) this.clear(t.w, t.h);
     });
     wrap("endOverlay", () => { this.target = null; });
+    // (Pokemon Stadium's screen: the match copied into its picture, grStadium_801D2FD0 / 801D3084 - the source in the
+    // game's pixels as GXSetTexCopySrc has them, RGB565)
+    wrap("captureLive", (a) => {
+      const rect = a[3] as number[];
+      const px = (v: number, n: number) => Math.round(v * n * 1e6) / 1e6;
+      this.event({ copy: "texture", src: [px(rect[0], 640), px(rect[1], 480), px(rect[2], 640), px(rect[3], 480)], format: 4,
+                   w: a[1], h: a[2] });
+    });
     wrap("drawParticles", (a) => this.particles(a[0] as Float32Array, a[1] as Batch[]));
     // (the trail and the sphere set GL themselves: their state is drawTrail's and drawSphere's own)
     wrap("drawTrail", (a, drew) => {
@@ -410,6 +423,11 @@ export class DrawLog {
     this.cur = { frame: this.label, draws: [] };
     this.frames.push(this.cur);
     if (this.frames.length > this.limit) this.frames.shift();
+  }
+
+  private event(rec: Record<string, unknown>) {
+    if (!this.cur) this.newFrame();
+    (this.cur!.events ??= []).push(rec);
   }
 
   private add(rec: Record<string, unknown>) {

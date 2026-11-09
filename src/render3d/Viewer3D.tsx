@@ -1661,7 +1661,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const gm = scene.screen.mode;
         setLiveGame(st.screen.image, 4, gm === 7 ? 640 : gm === 8 ? 124 : 250, gm === 7 ? 406 : gm === 8 ? 80 : 160);
         // (the match's copy is the frame before's, whatever the number of draws of this frame)
-        if (r.liveAdvance(st.screen.image, fno, scene.screen.mode === 7 || scene.screen.mode === 8, scene.screen.size[0], scene.screen.size[1])) screenAgain = true;
+        if (r.liveAdvance(st.screen.image, fno, scene.screen.mode === 7 || scene.screen.mode === 8, ...scene.screen.copySize())) screenAgain = true;
         // (a copy of the match is shown in the screen's constant green, the rest in its vertex colors)
         const m = scene.screen.mode;
         for (const s of st.setScreenConstant(m === 7 || m === 8, scene.screen.tint)) r.forgetMaterial(s);
@@ -2560,15 +2560,21 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // before the HUD goes over it, for the next frame)
     if (st?.screen && scene?.screen) {
       const sc = scene.screen, img = st.screen.image;
-      const rect = sc.captureRect((player) => {
+      const copy = sc.captureRect((player) => {
+        // (the game's own reading when the viewer track has it: the fighter's x2188 as the frame before left it,
+        // the pixel grStadium_801D32D0's lbVector_WorldToScreen of the camera box bone cuts to - "mag", every
+        // close-up copy of the gate's captures)
+        const tr = viewerTrack();
+        const m0 = tr?.has("mag") && tr.valid(fno - 124) ? tr.magnifier(player, fno - 124) : null;
+        if (m0) return [m0.x, m0.y];
         const p = frame.players[player]?.state;
         if (!p) return null;
         const X = p.xPosition, Y = p.yPosition + middle(p.internalCharacterId), m = viewProj;
         const cw = m[3] * X + m[7] * Y + m[15];
-        return [((m[0] * X + m[4] * Y + m[12]) / cw + 1) / 2, (1 - (m[1] * X + m[5] * Y + m[13]) / cw) / 2];
-      });
+        return [((m[0] * X + m[4] * Y + m[12]) / cw + 1) * 320, (1 - (m[1] * X + m[5] * Y + m[13]) / cw) * 240];
+      }, fno);
       // (as it is: the screen's material lays its green on it, setScreenConstant)
-      if (rect) r.captureLive(img, sc.size[0], sc.size[1], rect, [255, 255, 255], fno);
+      if (copy) r.captureLive(img, copy.w, copy.h, copy.rect, [255, 255, 255], fno);
     }
     prof.mark("ghosts");
     // the screen flash of a strong hit (fx/bgflash.ts): from the match's first on, fn_8001FEC4's quad under its own

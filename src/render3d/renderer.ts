@@ -991,6 +991,19 @@ export class Renderer {
     jumpedAt?: number; first?: boolean; second?: boolean;
   }>();
 
+  /** each live texture's size as last allocated */
+  private liveSize = new WeakMap<WebGLTexture, [number, number]>();
+  /** a live texture made w x h if it is not (what it held is gone: it is about to be drawn whole) */
+  private sizeLive(tex: WebGLTexture, w: number, h: number) {
+    const had = this.liveSize.get(tex);
+    if (had && had[0] === w && had[1] === h) return;
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    this.liveSize.set(tex, [w, h]);
+    this.bound.fill(null);
+  }
+
   /** show this picture where the file has the image (a render target), from now on */
   liveImage(image: Image, source: TexImageSource, version: number) {
     let l = this.live.get(image);
@@ -1010,6 +1023,8 @@ export class Renderer {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     } else gl.bindTexture(gl.TEXTURE_2D, l.tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    const sz = source as { width?: number; height?: number };
+    if (sz.width !== undefined && sz.height !== undefined) this.liveSize.set(l.tex, [sz.width, sz.height]);
     l.version = version;
     this.bound.fill(null);
   }
@@ -1063,6 +1078,7 @@ export class Renderer {
       }
     }
     // a frame with no copy of the one before: black, drawn twice
+    this.sizeLive(l.tex, w, h);
     const gl = this.gl, t = this.targetOf(l, l.tex, w, h);
     gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
     gl.viewport(0, 0, w, h);
@@ -1105,6 +1121,8 @@ export class Renderer {
       dst = l.pend;
       l.pendFrame = frame;
     }
+    // (the copy's own picture, pixel for pixel: GXCopyTex writes the source's size - 640 x 406, 124 x 80)
+    this.sizeLive(dst, w, h);
     const [PW, PH] = this.look ? [LOOK_W, LOOK_H] : this.pic ? [this.pic.w, this.pic.h] : this.size;
     const sx = rect[0] * PW, sy = rect[1] * PH, sw = rect[2] * PW, sh = rect[3] * PH;
     // the picture's pixels under the part, bottom-up as GL counts its rows
@@ -1172,7 +1190,13 @@ uniform vec3 uTint;
 out vec4 outColor;
 void main() {
   vec2 st = vec2(gl_FragCoord.x * uMap.x + uMap.y, gl_FragCoord.y * uMap.z + uMap.w);
-  outColor = vec4(texture(uSrc, st).rgb * uTint, 1.0);
+  // the copy as GX encodes it into its RGB565 picture (GXCopyTex: the frame buffer's 8 bits a channel cut to 5, 6 and
+  // 5, the blue's lowest bit dropped - gxr/copy.ts encodeCopy) and the texture unit reads it back (each channel's top
+  // bits repeated below it)
+  ivec3 c = ivec3(round(clamp(texture(uSrc, st).rgb, 0.0, 1.0) * 255.0));
+  int r = c.r >> 3, g = c.g >> 2, b = (c.b >> 3) & 0x1e;
+  vec3 back = vec3(float((r << 3) | (r >> 2)), float((g << 2) | (g >> 4)), float((b << 3) | (b >> 2))) / 255.0;
+  outColor = vec4(back * uTint, 1.0);
 }`));
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) ?? "link");

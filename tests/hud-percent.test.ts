@@ -59,3 +59,42 @@ test("Kirby's spat-out star shows its fighter's tag at once", () => {
   assert.equal(h.tag[9], 0);
   assert.equal(h.tag[10], 1);
 });
+
+/** one player through these states (one a frame, from frame 0), launched hard at the DamageFly ones */
+function through(seq: [number, number][], kind = 2): PlayerHud {
+  const ids = seq.flatMap(([s, n]) => Array(n).fill(s) as number[]);
+  const data = replay(Array(ids.length).fill(0));
+  data.frames.forEach((f, i) => {
+    const s = f.players[0]!.state as unknown as Record<string, number>;
+    s.actionStateId = ids[i];
+    s.internalCharacterId = kind;
+    if (ids[i] >= 87 && ids[i] <= 91) s.attackBasedXSpeed = 5;
+  });
+  return new PlayerHud(data, 0, { idle: 50, launch: 4, launchSpeed: 3 }, -200);
+}
+
+test("a launch's tag stays through DamageFall and an aerial jump (Ft_MF_SkipNametagVis), not through a special", () => {
+  // DamageFlyN 10 frames, DamageFall (ftCo_80090780: flags 0x18001), JumpAerialF (ftCo_800CBAC4)
+  const h = through([[14, 5], [88, 10], [38, 10], [27, 5]]);
+  assert.equal(h.tag[8], 1);
+  assert.equal(h.tag[16], 1);
+  assert.equal(h.tag[27], 1);
+  // (a fighter's own special clears it: Fighter_ChangeMotionState with no flags)
+  const g = through([[14, 5], [88, 10], [38, 5], [374, 5]], 24);
+  assert.equal(g.tag[19], 1);
+  assert.equal(g.tag[20], 0);
+  // Jigglypuff's own aerial jumps keep it too (ftCo_800D74A4), another fighter's state of that number does not
+  assert.equal(through([[14, 5], [88, 10], [38, 5], [342, 5]], 15).tag[22], 1);
+  assert.equal(through([[14, 5], [88, 10], [38, 5], [342, 5]], 2).tag[22], 0);
+});
+
+test("crouching counts the tag up from Squat; SquatWait after Squat keeps the count, after a landing sets it", () => {
+  // Squat 6 frames then SquatWait: the count runs from Squat's first frame (ftCo_Squat_Enter)
+  const h = through([[20, 5], [39, 6], [40, 60]]);
+  assert.equal(h.tag[5 + 48], 0);
+  assert.equal(h.tag[5 + 49], 1);
+  // SquatWait from a landing (ftCo_SquatWait_CheckInput -> fn_800D62C4): the count from SquatWait's start
+  const l = through([[20, 5], [42, 6], [40, 60]]);
+  assert.equal(l.tag[11 + 48], 0);
+  assert.equal(l.tag[11 + 49], 1);
+});
