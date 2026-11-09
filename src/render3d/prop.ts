@@ -128,16 +128,11 @@ export class Prop {
     this.layTrackPose();
     if (this.rootAtOrigin || rootSet) sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
     this.itemRootScale();
-    // (the dispatch's scale on the root itself, efLib_Create_Attach_Scale's HSD_JObjSetScale: the root's matrix is
-    // then HSD_MtxSRT of it with the root's turn, as the game's, not a parent's scale times the root's)
-    const onRoot = this.rootScaleSet && !this.rootScaled;
-    if (onRoot) sk.scale[0] = sk.scale[1] = sk.scale[2] = scale;
     if (this.matAnim) {
       sk.resetMaterials();
       sk.applyMatAnims(this.matAnim, (j) => this.joints[j]?.dobjs ?? NO_DOBJS, frame, loop);
     }
-    const ps = onRoot ? 1 : scale;
-    gameSrt(this.place, ps, ps, ps, rotX, rotY, rotZ, x, y, z);
+    gameSrt(this.place, scale, scale, scale, rotX, rotY, rotZ, x, y, z);
     sk.update(this.place);
   }
 
@@ -166,7 +161,6 @@ export class Prop {
     this.skeleton.update(this.place);
   }
 
-  /** after the pose, the root's turn about z set to `value`, the same way (HSD_JObjSetRotationZ) */
   /** after the pose, the root's own scale times `k` (each float32): an effect's callback setting the root's scale */
   scaleRoot(k: number) {
     const sk = this.skeleton;
@@ -174,6 +168,7 @@ export class Prop {
     sk.update(this.place);
   }
 
+  /** after the pose, the root's turn about z set to `value`, the same way (HSD_JObjSetRotationZ) */
   setRootRotationZ(value: number) {
     this.skeleton.rot[2] = value;
     this.skeleton.update(this.place);
