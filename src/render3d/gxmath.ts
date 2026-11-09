@@ -172,6 +172,36 @@ function parts(x: number): [bigint, number] {
  *  takes: sqrtf's) */
 export function fma64(a: number, b: number, c: number): number {
   if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(c)) return a * b + c;
+  // (the quick way, when it is exact - nearly always: Dekker's product and Knuth's sum give a * b + c as s + t + e
+  // with no error; when t + e is itself a double, s + (t + e) rounds the exact sum once. Away from the edges of the
+  // range only (the split overflows, a result in the subnormals rounds otherwise); else, or when t + e is not
+  // exact, the integers below)
+  if (a !== 0 && b !== 0 && c !== 0) {
+    const p = a * b;
+    const ap = Math.abs(p), aa = Math.abs(a), ab = Math.abs(b), ac = Math.abs(c);
+    if (aa < 1e150 && ab < 1e150 && ac < 1e300 && ap > 1e-280 && (ac > 1e-280)) {
+      let q = SPLIT * a;
+      const ah = q - (q - a), al = a - ah;
+      q = SPLIT * b;
+      const bh = q - (q - b), bl = b - bh;
+      const e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+      const s = p + c, bb = s - p;
+      const t = (p - (s - bb)) + (c - bb);
+      const u = t + e, ub = u - t;
+      if ((t - (u - ub)) + (e - ub) === 0) {
+        const r = s + u;
+        if (Math.abs(r) > 1e-280) return r;
+      }
+    }
+  }
+  return fma64Exact(a, b, c);
+}
+/** Veltkamp's split of a double into two halves of 26 bits (2^27 + 1) */
+const SPLIT = 134217729;
+
+/** fma64 by integers: exact for results in the normal range */
+export function fma64Exact(a: number, b: number, c: number): number {
+  if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(c)) return a * b + c;
   const [ma, ea] = parts(a), [mb, eb] = parts(b), [mc, ec] = parts(c);
   const mp = ma * mb, ep = ea + eb;
   if (mp === 0n) return a * b + c;
