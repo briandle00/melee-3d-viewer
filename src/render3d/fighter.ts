@@ -297,6 +297,8 @@ function hatLookups(a: Archive, desc: number, costume: number): Set<number>[] {
   return out;
 }
 
+const NO_JOINTS: ReadonlySet<number> = new Set();
+
 export class Fighter {
   skeleton: Skeleton;
   /** its joint 1 (TransN) has nothing under it */
@@ -1144,6 +1146,14 @@ export class Fighter {
     return out;
   }
 
+  private visJointSets = new Map<FigaTree, ReadonlySet<number>>();
+  /** visJoints as a set, made once an animation (carryShown asks for it every frame) */
+  private visJointSet(tracks: Track[][], anim: FigaTree): ReadonlySet<number> {
+    let out = this.visJointSets.get(anim);
+    if (!out) this.visJointSets.set(anim, (out = new Set(this.visJoints(tracks, anim))));
+    return out;
+  }
+
   /** A joint's shown or hidden is its JObj's flag, which only a NODE or BRANCH track (or the code) sets: a move
    *  whose animation has no such track for it leaves it as the last one that had left it - the joint is not laid
    *  back to the file's flags when an animation changes (Fighter_ChangeMotionState, HSD_JObjAddAnimAll). Donkey
@@ -1156,7 +1166,7 @@ export class Fighter {
     const now = g.at(frame);
     if (!now) return;
     const nowAnim = now.anim >= 0 && own(now) ? this.anim(now.anim) : null;
-    const set = new Set(nowAnim ? this.visJoints(this.ownTracks(nowAnim), nowAnim) : []);
+    const set = nowAnim ? this.visJointSet(this.ownTracks(nowAnim), nowAnim) : NO_JOINTS;
     let f = now.since - 1;
     for (let steps = 0; steps < 64; steps++) {
       const a = g.at(f);

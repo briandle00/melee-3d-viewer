@@ -26,12 +26,14 @@ const TWO_OVER_PI = f32(2 / f32(Math.PI));
 const fmadd = madd;
 
 /** the angle as eighths of a turn from the nearest quarter turn, and which quarter */
-function reduce(x: number): [number, number] {
+// (reduce's two results, here rather than in an array a call: sinf and cosf take them at once)
+let redY = 0, redN = 0;
+function reduce(x: number) {
   const z = f32(TWO_OVER_PI * x);
   const n = x < 0 || Object.is(x, -0) ? Math.trunc(f32(z - 0.5)) : Math.trunc(f32(z + 0.5));
-  const y = fmadd(FOUR_OVER_PI_M1[3], x, fmadd(FOUR_OVER_PI_M1[2], x, fmadd(FOUR_OVER_PI_M1[1], x,
+  redY = fmadd(FOUR_OVER_PI_M1[3], x, fmadd(FOUR_OVER_PI_M1[2], x, fmadd(FOUR_OVER_PI_M1[1], x,
             fmadd(FOUR_OVER_PI_M1[0], x, f32(x - n * 2)))));
-  return [y, n & 3];
+  redN = n & 3;
 }
 
 const odd = (y: number, ysq: number) =>
@@ -41,7 +43,8 @@ const even = (ysq: number) => fmadd(ysq, fmadd(ysq, fmadd(ysq, fmadd(POLY[0], ys
 /** the game's sinf */
 export function sinf(angle: number): number {
   const x = f32(angle);
-  const [y, n] = reduce(x);
+  reduce(x);
+  const y = redY, n = redN;
   const q = n << 1;
   if (Math.abs(y) < EPSILON) return fmadd(POLY[9], f32(QUADRANT[q + 1] * y), QUADRANT[q]);
   const ysq = f32(y * y);
@@ -51,7 +54,8 @@ export function sinf(angle: number): number {
 /** the game's cosf */
 export function cosf(angle: number): number {
   const x = f32(angle);
-  const [y, n] = reduce(x);
+  reduce(x);
+  const y = redY, n = redN;
   const q = n << 1;
   if (Math.abs(y) < EPSILON) return f32(-(y * QUADRANT[q] - QUADRANT[q + 1]));
   const ysq = f32(y * y);
