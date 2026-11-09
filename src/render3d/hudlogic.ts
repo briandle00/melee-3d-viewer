@@ -72,11 +72,14 @@ export interface DigitLayout {
 export function digitLayout(percent: number): DigitLayout {
   const p = Math.max(0, Math.min(999, Math.trunc(percent)));
   const h = Math.floor(p / 100) % 10, t = Math.floor(p / 10) % 10, o = p % 10;
-  const oo = o === 1 ? ONE_GAP : 0, to = t === 1 ? ONE_GAP : 0, ho = h === 1 ? ONE_GAP : 0;
+  // (float32 as ifStatus_802F4EDC sums them: 0.5069f each, the tens' oo + to, the hundreds' (oo + to) + (to + ho))
+  const f = Math.fround, gap = f(ONE_GAP);
+  const oo = o === 1 ? gap : 0, to = t === 1 ? gap : 0, ho = h === 1 ? gap : 0;
+  const tens = f(oo + to);
   return {
     frame: [2 * h, 2 * t, 2 * o, 0],
     shown: [h !== 0, !(h === 0 && t === 0), true, true],
-    dx: [oo + 2 * to + ho, oo + to, 0, -oo],
+    dx: [f(tens + f(to + ho)), tens, 0, -oo],
   };
 }
 
