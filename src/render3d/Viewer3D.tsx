@@ -1710,7 +1710,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // Stadium's big screen: what it shows now
       if (scene.screen && st.screen) {
         scene.screen.draw(fno);
-        r.liveImage(st.screen.image, scene.screen.canvas, scene.screen.version);
+        r.liveImage(st.screen.image, scene.screen.pictureOf, scene.screen.version);
         // (for the draw log: the description the game binds in this mode)
         const gm = scene.screen.mode;
         setLiveGame(st.screen.image, 4, gm === 7 ? 640 : gm === 8 ? 124 : 250, gm === 7 ? 406 : gm === 8 ? 80 : 160);
@@ -3704,7 +3704,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // (gameText false: the same frame drawn the way the player drew it before the game's own text, then back)
       const keep = st.lettering;
       if (!gameText) { st.lettering = null; (sc as unknown as { drawn: string }).drawn = ""; sc.draw(st.frame); }
-      const png = sc.canvas.toDataURL("image/png");
+      const png = sc.picture().toDataURL("image/png");
       if (!gameText) { st.lettering = keep; (sc as unknown as { drawn: string }).drawn = ""; sc.draw(st.frame); }
       return { mode: sc.mode, player: sc.player, gameText: !!st.lettering && gameText, png };
     },

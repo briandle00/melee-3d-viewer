@@ -994,7 +994,7 @@ export class Renderer {
    *  version changes */
   private live = new WeakMap<Image, {
     /** the texture the screen shows now: the text page, a copy buffer's, or black (liveAdvance) */
-    tex: WebGLTexture | null; version: number; source: TexImageSource | null;
+    tex: WebGLTexture | null; version: number; source: TexImageSource | (() => TexImageSource) | null;
     /** the text page (the canvas the caller draws, and the letters drawn into it: liveTarget) */
     text: WebGLTexture | null;
     /** the targets drawn into, by texture */
@@ -1042,7 +1042,7 @@ export class Renderer {
   }
 
   /** show this picture where the file has the image (a render target), from now on */
-  liveImage(image: Image, source: TexImageSource, version: number) {
+  liveImage(image: Image, source: TexImageSource | (() => TexImageSource), version: number) {
     let l = this.live.get(image);
     if (!l) {
       this.live.set(image, (l = { tex: null, text: null, version: -1, source: null,
@@ -1053,7 +1053,9 @@ export class Renderer {
     const gl = this.gl;
     if (!l.text) l.text = this.liveTexture(1, 1);
     gl.bindTexture(gl.TEXTURE_2D, l.text);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    // (a source given as a function is asked for only now, when it is uploaded: Stadium's text page paints its
+    // canvas only when something reads it)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, typeof source === "function" ? source() : source);
     l.version = version;
     this.bound.fill(null);
     // (a new page: what samples the screen looks again)
