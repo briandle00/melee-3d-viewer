@@ -63,8 +63,8 @@ import { SHIELD_FX, trackFilesOf, trackShapes, type TrackShapes } from "./fx/dra
 import { type EggRoll, eggRollAt, eggShield, eggShields, YOSHI } from "./yoshiroll";
 import { kirbyStoneAt } from "./kirbystone";
 import { ROLLOUT_ATTRS, ROLLOUT_FIRST, rolloutAngle, rolloutAttrs } from "./rollout";
-import { fighterShown, Hud, HudActor, HudKit, toScreen, type TagCamera } from "./hud";
-import { EDGE_W, edgePoint } from "./hudlogic";
+import { fighterShown, Hud, HudActor, HudKit, magnifierView, toScreen, type TagCamera } from "./hud";
+import { EDGE_W, edgePoint, FIRST_FRAME } from "./hudlogic";
 import { drawLogCommand, setLiveGame } from "./drawlog";
 import { PoseLog, poseLogCommand } from "./poselog";
 import type { ColAnimTables, Tint as ColTint } from "./fx/colanim";
@@ -1938,9 +1938,15 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const po = poses.find((x) => x.key === actorKey(a.player, a.nana));
       if (po) { po.by = fi.posedBy; po.heldBy = actorKey(c.a.player, c.a.nana); po.sum = poseSum(fi.skeleton.rot); }
     }
+    // the magnifier's camera after a jump: the game keeps its view from frame to frame, and sets the fighters'
+    // lights in the next pictures through it (ifMagnify_802FBBDC, hud.ts) - the view of the last picture drawn
+    // before this frame: the last port the viewer track's "mag" says was magnified on the latest frame any was, at
+    // that frame's camera bone (the fighters posed for that frame, then for this one again below)
+    const magSeeded = seedMagnifier(data, fs, fno);
     // the game's effects, stepped to this frame (their colors on the
     // fighters are this frame's; the effects themselves are drawn later)
     prof.mark("pose");
+    if (magSeeded && !(ek?.bank && !priming)) for (const { f: fi, a } of [...posed, ...posedUnseen]) poseActor(fi, a);
     if (ek?.bank && !priming) {
       const tr = viewerTrack();
       fxw = worldNow(ek, data, fs);
@@ -1953,7 +1959,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // (the unseen ones too: until 2026-11-08 a fighter its move hid kept the pose of the last frame the stepping
       // posed - checkpoints made ahead - and its magnifier sat where that put it: Mewtwo's teleport, a bubble on
       // the right edge for a frame, and the edge arrow the game never gave)
-      if (advance(fxw, data, fs, fno, frameActors) || filled) for (const { f: fi, a } of [...posed, ...posedUnseen]) poseActor(fi, a);
+      if (advance(fxw, data, fs, fno, frameActors) || filled || magSeeded) for (const { f: fi, a } of [...posed, ...posedUnseen]) poseActor(fi, a);
       // (the swinging chains are stepped to this frame now: those with them posed again)
       for (const { f: fi, a } of posed) {
         const key = actorKey(a.player, a.nana);
@@ -2720,6 +2726,11 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const hud = NO_HUD || layersOff.hud ? null : hudOf();
     if (hud) {
       const hudActors: HudActor[] = [];
+      // (whether the game's magnifier drew a fighter's picture this frame, by the viewer track's "mag": the game's
+      // own decision, made from the fighter's screen point as the frame before left it)
+      const magTr = viewerTrack();
+      const magShows = (port: number): boolean | undefined =>
+        magTr?.has("mag") && magTr.valid(fno - 123) ? magTr.magnifier(port, fno - 123)?.shows ?? false : undefined;
       for (const a of actors) {
         if (a.nana) continue;
         const fi = fs.get(`${a.st.internalCharacterId}:${a.costume}`);
@@ -2735,7 +2746,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const pst = data.frames[fno - 1]?.players[a.player]?.state;
         const pko = pst && gone(pst) ? koAt(data, fno - 1, a.player, false, pst, camInvAt(fno - 1)) : null;
         hudActors.push({
-          player: a.player, st: a.st, drawn, magnify, at: a.ko ? [a.ko.x, a.ko.y, a.ko.z] : undefined,
+          player: a.player, st: a.st, drawn, magnify, shows: magShows(a.player), at: a.ko ? [a.ko.x, a.ko.y, a.ko.z] : undefined,
           tagAt: pko ? [pko.x, pko.y, pko.z] : pst ? [pst.xPosition, pst.yPosition, 0] : undefined,
           // (the magnifier's size: the camera box's target_ext.v.z, ftData +0x3C's last float times fp->x34_scale.y
           // - the player's scale, not the model's (ftCamera_80076064, ftLib_80086B80) - over 8)
@@ -3202,6 +3213,34 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       return { key: actorKey(c.a.player, c.a.nana), on: tj, joint: vj };
     };
     return { out, held, poseOne, holdOf };
+  };
+  /** hud.ts seedMagView for frame f when its magnifier pass does not follow from the frames the HUD drew: the view
+   *  of the last magnifier picture drawn before f (by the viewer track's "mag": on the latest frame from the HUD's
+   *  first on where a fighter was magnified, the last port that was - ifMagnify_802FBBDC goes through the ports in
+   *  order - at its camera box's bone on that frame: lb_8000B1CC of its camera joint, ftLib_800866DC; the hold
+   *  shadow.ts cameraBoxBone keeps through some states is not taken here); none drawn before: the camera's own.
+   *  True when it posed the fighters for another frame (posed again for this one before they are drawn) */
+  const seedMagnifier = (data: ReplayData, fs: Map<string, Fighter>, f: number): boolean => {
+    const hud = NO_HUD || layersOff.hud ? null : hudOf();
+    const tr = viewerTrack();
+    if (!hud || !hud.magSeedWanted(f) || !tr?.has("mag")) return false;
+    const ports = data.settings.playerSettings.map((p, i) => (p ? i : -1)).filter((i) => i >= 0);
+    for (let g = f - 1; g + FIRST_FRAME >= 0 && tr.valid(g - 123); g--) {
+      let last = -1;
+      for (const port of ports) if (tr.magnifier(port, g - 123)?.shows) last = port;
+      if (last < 0) continue;
+      const key = actorKey(last, false);
+      const h = actorsAt(data, fs, g).find((x) => x.key === key);
+      const fi = h?.fighter;
+      const joint = fi ? partToModelJoint(h!.st.internalCharacterId, fi.cameraPart) : -1;
+      if (!fi || joint < 0 || joint >= fi.skeleton.n) { hud.seedMagView(null, f); return true; }
+      const M = mtxFromGL(fi.skeleton.world, shadowJoint, joint * 16), o = fi.cameraOffset;
+      const bone = o[0] || o[1] || o[2] ? PSMTXMultVec(M, o, [0, 0, 0]) as number[] : [M[3], M[7], M[11]];
+      hud.seedMagView(magnifierView(new Float32Array(16), bone), f);
+      return true;
+    }
+    hud.seedMagView(null, f);
+    return false;
   };
   const actorsAt = (data: ReplayData, fs: Map<string, Fighter>, f: number): HeldFrame[] => {
     const { out, held, poseOne, holdOf } = framePoser(data, fs, f, viewerTrack(), true);
