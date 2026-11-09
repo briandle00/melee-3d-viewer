@@ -128,6 +128,9 @@ let itemMaterialNow: ((spawnId: number) => [number, number] | null) | null = nul
 /** for the frame drawn: how the constraints that tie an item to its holder's part leave the item's joint's
  *  matrix (cns.ts: the fighter as posed this frame), by owner and part; null when it is not posed */
 let heldConstraintNow: ((owner: number, part: number) => ((m: Mtx) => void) | null) | null = null;
+/** for the frame drawn: the turn a held item's tied joint was left with the frame before (cns.ts heldTurn), by spawn id;
+ *  null when the effects' world did not step it (its file's rest is taken) */
+let heldTurnNow: ((spawnId: number) => Float32Array | null) | null = null;
 /** an item's textures as its code left them, when the track says ("imat"): the material animation of the state
  *  it laid, at the frame it laid, over its pose's - while it is in that state, or in one with no material
  *  animation of its own. Peach's turnip: its face picked in the ground (state 0, frame 5 in bot-peach_puff 1764)
@@ -895,6 +898,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   /** how many effect worlds have been made (a check sees the world it filled is the one drawn) */
   let fxWorlds = 0;
   const fxPercent = new Map<string, Before>();
+  /** each held item's tied joint's turn as the frame the effects' world stepped last left it (cns.ts heldTurn), and the
+   *  turn its matrix was made from (the frame before's), by spawn id: the world's steps keep them, with its checkpoints */
+  const heldTurns = new Map<number, { frame: number; prev: Float32Array | null; rot: Float32Array }>();
   let failed = false;
   // whether this player holds the replay's playing up while it warms up
   // (replayStore.holdPlay): let go as it is ready, fails or goes
@@ -2266,6 +2272,10 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const model = fighterCnsModel(fa.st.internalCharacterId, fa.world, sk.parent, sk.flags);
       return (m: Mtx) => { resolvePositionOrientation(m, model, part); };
     };
+    heldTurnNow = (spawnId: number) => {
+      const e = heldTurns.get(spawnId);
+      return e && e.frame === fno ? e.prev : null;
+    };
     const heldShake = (owner: number) => shakes.get(actorKey(owner, false));
     drawnArticles = [];
     drawnShields = [];
@@ -2851,6 +2861,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   const makeWorld = (ek: EffectKit, data: ReplayData, fs: Map<string, Fighter>, tr: ViewerTrack | null): FxWorld => {
     const w = new FxWorld(ek.bank!, (c, part) => ek.partToJoint(c, part), ek.banks);
     fxPercent.clear();
+    heldTurns.clear();
     // (where no track holds: the effects learned from public replays' tracks)
     const table = learnedTable();
     if (table && useLearned) w.learned = (key) => table.at.get(key);
@@ -2953,7 +2964,40 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const art = q ? articleOf(data, fs, q, f) : null;
       return q && art?.ptcl?.length ? { keys: art.ptcl, age: itemAnimAge(data, f, q) } : null;
     };
+    // (the held items' turns, stepped with the fighters each frame is posed with: the game makes a held item's tied
+    // joint's matrix once a frame, from the turn it took back the frame before - cns.ts)
+    const heldStep = (f: number, actors: ActorFrame[]) => {
+      const tr = viewerTrack();
+      const actorOf = (owner: number) => actors.find((x) => x.key === actorKey(owner, false));
+      const jointOf = (owner: number, j: number) => {
+        const fa = actorOf(owner);
+        return fa && j >= 0 && (j + 1) * 16 <= fa.world.length ? fa.world.subarray(j * 16, j * 16 + 16) : null;
+      };
+      const partJoint = (owner: number, part: number) => {
+        const c = data.frames[f]?.players[owner]?.state.internalCharacterId;
+        return c === undefined ? -1 : ek.partToJoint(c, part);
+      };
+      const cns = (owner: number, part: number) => {
+        const fa = actorOf(owner);
+        if (!fa || part < 0 || (part + 1) * 16 > fa.world.length) return null;
+        const sk = fa.fighter.skeleton;
+        const model = fighterCnsModel(fa.st.internalCharacterId, fa.world, sk.parent, sk.flags);
+        return (m: Mtx) => { resolvePositionOrientation(m, model, part); };
+      };
+      const seen = new Set<number>();
+      for (const it of data.frames[f]?.items ?? []) {
+        const before = heldTurns.get(it.spawnId);
+        const turn = before && before.frame === f - 1 ? before.rot : null;
+        let left: Float32Array | null = null;
+        drawArticleTracked(null, data, fs, it, f, jointOf, partJoint, undefined, undefined,
+                           (id) => tr?.pose("jp", String(id), f - 123)?.joints ?? null,
+                           { cns, turn, left: (t) => { left = t; } });
+        if (left) { heldTurns.set(it.spawnId, { frame: f, prev: turn, rot: left }); seen.add(it.spawnId); }
+      }
+      for (const k of [...heldTurns.keys()]) if (!seen.has(k)) heldTurns.delete(k);
+    };
     w.extra = (f, actors, world) => {
+      heldStep(f, actors);
       hitSparks(f, actors.filter((x) => x.world.length > 0), world, fxPercent, {
         prevWorld: (k) => world.prevWorld(k),
         scriptTime: (k) => world.scriptTime(k),
@@ -3129,16 +3173,19 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   // drawn)
   const CATCH_UP = 1200, FILL_MS = 2, IDLE_FILL_MS = 12;
   // (with each the hit sparks' record of the fighters' percents, which the world's steps read and keep: fxPercent)
-  type Snap = { snap: FxSnapshot; percent: [string, Before][] };
+  type Snap = { snap: FxSnapshot; percent: [string, Before][]; held: [number, { frame: number; prev: Float32Array | null; rot: Float32Array }][] };
   type Checks = { store: Checkpoints<Snap>; key: unknown[]; exact: boolean; ahead?: Kept<Snap> };
   const saveCheck = (w: FxWorld): Kept<Snap> => {
     const snap = w.save();
-    return { frame: snap.frame, snap: { snap, percent: [...fxPercent].map(([k, v]) => [k, { ...v }]) }, bytes: snap.bytes };
+    return { frame: snap.frame, snap: { snap, percent: [...fxPercent].map(([k, v]) => [k, { ...v }]), held: [...heldTurns].map(([k, v]) => [k, { ...v }]) },
+             bytes: snap.bytes };
   };
   const loadCheck = (w: FxWorld, c: Snap) => {
     w.load(c.snap);
     fxPercent.clear();
     for (const [k, v] of c.percent) fxPercent.set(k, { ...v });
+    heldTurns.clear();
+    for (const [k, v] of c.held) heldTurns.set(k, { ...v });
   };
   const checksOf = new WeakMap<FxWorld, Checks>();
   /** the world's checkpoints, made again when what its steps read changes (files and tables that came late) */
@@ -3150,6 +3197,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const now = saveCheck(w);
       w.reset(0);
       fxPercent.clear();
+      heldTurns.clear();
       const first = saveCheck(w);
       loadCheck(w, now.snap);
       checksOf.set(w, (c = { store: new Checkpoints(first), key, exact: false }));
@@ -3180,7 +3228,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const near = c.store.nearest(f);
     const reach = f - Math.max(near.frame, 0) <= CATCH_UP;
     if (f === w.frame && (c.exact || !reach)) return false;
-    if (!small || f === w.frame) fxPercent.clear();
+    if (!small || f === w.frame) { fxPercent.clear(); heldTurns.clear(); }
     const { st, pose, one } = fxStepper(w, data, fs, f, now, true);
     if ((!small || !c.exact) && reach) {
       // (exactly: from the nearest checkpoint, stepped on)
@@ -5032,19 +5080,19 @@ const ROPES = new Set([62, 63, 96, 97, 102, 113]);
 
 /** an item drawn with its joints as the viewer track has them ("jp", when it does: `poseOf`), else as its
  *  animation has them; the pose is the item's own, so it is taken off its model again after */
-function drawArticleTracked(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number,
+function drawArticleTracked(r: Renderer | null, data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number,
                             jointOf?: (owner: number, joint: number) => Float32Array | null,
                             partJoint?: (owner: number, part: number) => number,
                             turnOf?: (spawnId: number) => number[] | null,
                             shakeOf?: (owner: number) => [number, number] | undefined,
-                            poseOf?: (spawnId: number) => Map<number, Float32Array> | null): boolean {
+                            poseOf?: (spawnId: number) => Map<number, Float32Array> | null, poseOnly?: HeldPoseOnly): boolean {
   const joints = poseOf?.(it.spawnId) ?? null;
   const art = joints ? articleOf(data, fs, it, frame) : null;
   if (art) art.prop.trackPose = joints;
   try {
-    const drew = drawArticle(r, data, fs, it, frame, jointOf, partJoint, turnOf, shakeOf);
+    const drew = drawArticle(r, data, fs, it, frame, jointOf, partJoint, turnOf, shakeOf, poseOnly);
     // (the pose log: its joints as drawn - the last of its draws this frame, its main pass's)
-    if (drew && itemPoseLog) {
+    if (drew && itemPoseLog && !poseOnly) {
       const posed = articleOf(data, fs, it, frame);
       if (posed) itemPoseLog.item(it.spawnId, it.typeId, posed.prop.skeleton);
     }
@@ -5054,11 +5102,17 @@ function drawArticleTracked(r: Renderer, data: ReplayData, fs: Map<string, Fight
   }
 }
 
-function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number,
+/** a held item posed, not drawn (the held turns' step, heldStep): its constraints from these actors, its tied joint's
+ *  turn the frame before, and what it is left with handed back */
+interface HeldPoseOnly { cns: (owner: number, part: number) => ((m: Mtx) => void) | null; turn: Float32Array | null;
+                         left: (turn: Float32Array) => void }
+
+function drawArticle(r: Renderer | null, data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number,
                      jointOf?: (owner: number, joint: number) => Float32Array | null,
                      partJoint?: (owner: number, part: number) => number,
                      turnOf?: (spawnId: number) => number[] | null,
-                     shakeOf?: (owner: number) => [number, number] | undefined): boolean {
+                     shakeOf?: (owner: number) => [number, number] | undefined,
+                     poseOnly?: HeldPoseOnly): boolean {
   // (an item with no entry of its own - one the track or the common items'
   // file names - drawn plainly where it is, as its model's state animates it)
   if (!articleEntry(it.typeId) && ROPES.has(it.typeId)) return false;
@@ -5094,10 +5148,18 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
   if (on) {
     const age = it.typeId === GW_TORCH && owner ? torchAge(data, owner, frame, it) : itemAnimAge(data, frame, it);
     const t = still ?? age + (a.from?.[it.state] ?? 0);
-    // (its tied joint as the constraints leave it, on the holder's part: cns.ts)
-    const resolve = joint !== undefined ? heldConstraintNow?.(it.owner, joint) ?? null : null;
-    if (resolve) art.prop.poseHeld(t, resolve, heldItemScale(data, frame, it, owner, art.scale) ?? size, on.subarray(12, 15), false, art.attach);
+    // (its tied joint as the constraints leave it, on the holder's part, from the turn they left it the frame
+    // before: cns.ts. The turns are stepped with the effects' world, heldStep)
+    const resolve = joint === undefined ? null : poseOnly ? poseOnly.cns(it.owner, joint) : heldConstraintNow?.(it.owner, joint) ?? null;
+    const facingTurn = art.facingTurn ? Math.fround(Math.PI / 2 * (it.facingDirection < 0 ? -1 : 1)) : null;
+    if (resolve) {
+      const turn = poseOnly ? poseOnly.turn : heldTurnNow?.(it.spawnId) ?? null;
+      art.prop.poseHeld(t, resolve, heldItemScale(data, frame, it, owner, art.scale) ?? size, on.subarray(12, 15), false, art.attach,
+                        turn, facingTurn, still !== null);
+      if (poseOnly) { poseOnly.left(art.prop.heldTurn(art.attach)); return true; }
+    } else if (poseOnly) return false;
     else art.prop.poseUnder(t, on, size, false, art.attach);
+    if (!r) return false;
     layItemMaterial(data, fs, it, frame, art);
     // (held: its place kept against Mewtwo's hand at his size)
     if (shadowScale !== null) art.prop.setGrandchildScale(shadowScale, shadowOwner?.modelScale);
@@ -5115,6 +5177,7 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
     if (sh) r.shiftDraws(0, 0);
     return true;
   }
+  if (poseOnly || !r) return false;
   const facing = it.facingDirection < 0 ? -1 : 1;
   let scale = size;
   const pk = pkFlashScale(data, frame, it, art.special);

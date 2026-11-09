@@ -8,6 +8,7 @@ import { RENDER } from "./gx";
 import { ident, invert, Mat, mul } from "./math";
 import { HSD_MtxColMag, HSD_MtxSRT, type Mtx, mtxFromGL, mtxToGL } from "./gxmath";
 import { Skeleton } from "./skeleton";
+import { heldTurn } from "./cns";
 
 // the root's place as the game makes a joint's matrix: HSD_MtxSRT, in float32 with its own sinf and cosf
 // (an item's turn of a quarter about y is the game's cosf of it, not 0)
@@ -261,11 +262,28 @@ export class Prop {
    *  file's rest left out), its joints as its animation has them, and the tied joint's matrix as the constraints
    *  leave it once it is made (`resolve`: cns.ts resolvePositionOrientation); the joints under it go with it. `at`:
    *  where the item's root stands (the joints above the tied one, which the constraints do not move) */
-  poseHeld(frame: number, resolve: (m: Mtx) => void, scale: number, at: ArrayLike<number>, loop = true, attach = 0) {
+  poseHeld(frame: number, resolve: (m: Mtx) => void, scale: number, at: ArrayLike<number>, loop = true, attach = 0,
+           turn: ArrayLike<number> | null = null, facingTurn: number | null = null, laidOnce = false) {
     const sk = this.skeleton;
     this.reset();
-    if (this.anim) sk.applyAObjs(this.anim, frame, loop);
-    this.layTrackPose();
+    // (the tied joint at the turn the constraints left it the frame before (cns.ts heldTurn), else at its file's rest,
+    // as the pick-up lays it; and the root, when it is not the tied one, turned to face as the item does -
+    // HSD_JObjSetFacingDirItem: rotate y = pi / 2 times its facing - when its attributes say so. Then its animation,
+    // which sets what its tracks have each frame (the tied joint's matrix is then made from those) until it ends; the
+    // track's values for the tied joint's turn are the simulator's own take of it, not laid. An animation laid once and
+    // taken off (`laidOnce`: it_80273670's still frame), or one that does not loop and has ended - HSD_AObjInterpretAnim
+    // writes the last frame once and sets AOBJ_NO_ANIM - writes the turn no more, and the constraints' stays)
+    const a = Math.max(0, Math.min(attach, sk.n - 1));
+    const r = turn ?? sk.restOf(a, "rot");
+    const keepTurn = () => { sk.rot[a * 3] = r[0]; sk.rot[a * 3 + 1] = r[1]; sk.rot[a * 3 + 2] = r[2]; };
+    keepTurn();
+    if (facingTurn !== null && a !== 0) sk.rot[1] = facingTurn;
+    if (this.anim) {
+      sk.applyAObjs(this.anim, frame, loop);
+      const ao = this.anim[a];
+      if (laidOnce || (ao && !loop && !ao.loop && ao.end > 0 && frame > ao.end)) keepTurn();
+    }
+    this.layTrackPose(a);
     if (this.rootAtOrigin) sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
     this.itemRootScale();
     if (this.itemRoot && !this.rootScaled) sk.scale[0] = sk.scale[1] = sk.scale[2] = scale;
@@ -276,8 +294,16 @@ export class Prop {
     gameSrt(this.place, 1, 1, 1, 0, 0, 0, at[0], at[1], at[2]);
     // (kept until it is posed again: what its code sets after the pose - Shadow Ball's size - makes the matrices
     // again under the constraints)
-    sk.constrained = { joint: Math.max(0, Math.min(attach, sk.n - 1)), resolve };
+    sk.constrained = { joint: a, resolve };
     sk.update(this.place);
+  }
+
+  /** after poseHeld: the turn its tied joint `attach` is left with (cns.ts heldTurn) */
+  heldTurn(attach: number): Float32Array {
+    const sk = this.skeleton;
+    const a = Math.max(0, Math.min(attach, sk.n - 1));
+    const p = sk.parent[a];
+    return heldTurn(sk.world.subarray(a * 16, a * 16 + 16), p >= 0 ? sk.world.subarray(p * 16, p * 16 + 16) : null);
   }
 
   /** at frame `frame`, held to another model's joint (its world matrix `parent`) by place and turn
@@ -418,15 +444,24 @@ export class Prop {
   }
 
   /** the track's joints over the animation's (its root is the item's place, never in it) */
-  private layTrackPose() {
-    if (this.trackPose) this.layTrackJoints(this.trackPose);
+  private layTrackPose(keepTurnOf = -1) {
+    if (this.trackPose) this.layTrackJoints(this.trackPose, keepTurnOf);
   }
 
-  /** joints below the root, as a track's pose line has them (NaN: the file's rest) */
-  private layTrackJoints(tp: Map<number, Float32Array>) {
+  /** joints below the root, as a track's pose line has them (NaN: the file's rest); `keepTurnOf`: a joint whose turn
+   *  is not laid (a tied joint's, which the constraints make: its scale and place are) */
+  private layTrackJoints(tp: Map<number, Float32Array>, keepTurnOf = -1) {
     const sk = this.skeleton;
     for (const [j, v] of tp) {
       if (j <= 0 || j >= sk.n) continue;
+      if (j === keepTurnOf) {
+        const s = sk.restOf(j, "scale"), t = sk.restOf(j, "trans");
+        for (let k = 0; k < 3; k++) {
+          sk.scale[j * 3 + k] = Number.isNaN(v[3 + k]) ? s[k] : v[3 + k];
+          sk.trans[j * 3 + k] = Number.isNaN(v[6 + k]) ? t[k] : v[6 + k];
+        }
+        continue;
+      }
       // (a value never sent is the file's rest, whatever the animation says)
       const r = sk.restOf(j, "rot"), s = sk.restOf(j, "scale"), t = sk.restOf(j, "trans");
       for (let k = 0; k < 3; k++) {
