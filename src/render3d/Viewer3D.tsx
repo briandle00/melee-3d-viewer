@@ -60,7 +60,7 @@ import { fetchTrack, LINK_JOINTS, replayPath, TrackData, ViewerTrack, type Track
 import { SHIELD_MODEL } from "./fx/dispatch";
 import { pageCache } from "../state/pageCache";
 import { SHIELD_FX, trackFilesOf, trackShapes, type TrackShapes } from "./fx/drawn";
-import { type EggRoll, eggRollAt, eggShields, YOSHI } from "./yoshiroll";
+import { type EggRoll, eggRollAt, eggShield, eggShields, YOSHI } from "./yoshiroll";
 import { kirbyStoneAt } from "./kirbystone";
 import { ROLLOUT_ATTRS, ROLLOUT_FIRST, rolloutAngle, rolloutAttrs } from "./rollout";
 import { fighterShown, Hud, HudActor, HudKit, toScreen, type TagCamera } from "./hud";
@@ -1988,7 +1988,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           }
           drawnKirbyHats.push({ player: a.player, kind, loaded: !!kh });
         }
-        const egg = a.st.internalCharacterId === YOSHI_ID && !a.nana ? eggShieldsOf(data, a.player)[fno] ?? null : null;
+        // (Yoshi's egg's colors: the shield his code set them from - the track's "egg", the shield the callback
+        // read, a hit taken later that frame not in it - else worked out from the replay's shields)
+        const eggSaid = a.st.internalCharacterId === YOSHI_ID && !a.nana && tr?.hasAt("egg", fno - 123)
+          ? tr.at("egg", `${a.player}:0`, fno - 123) : undefined;
+        const egg = a.st.internalCharacterId !== YOSHI_ID || a.nana ? null
+          : eggShield(eggSaid, eggShieldsOf(data, a.player)[fno] ?? null);
         fi.eggShade(egg);
         look = { parts, tint, kh, egg };
         looks.set(akey, look);

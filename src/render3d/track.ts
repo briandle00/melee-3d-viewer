@@ -66,6 +66,10 @@
  *       them (Jigglypuff's ribbons, swung by ftCo_8009DC54's chains), by
  *       preorder index in the hat's tree, the nine values of "jp"; a joint not
  *       yet sent is at its file's rest
+ *   ["egg", f, port, sub, shield]
+ *       the shield Yoshi's code set his egg's colors from (ftYs_Init_8012B8A4,
+ *       the full one's for his egg roll's ftYs_Init_8012B918): they stay so
+ *       until the next
  *   ["lj", f, spawn_id, (joint, link, mask, values)...]
  *       a chain link's joints below its root ("lm" has the root's matrix),
  *       by preorder index in the link's tree (1 the root's first child), the
@@ -234,6 +238,8 @@ const KEYS: Record<string, number> = {
   hook: 2, irot: 1, fdrot: 0, stadscreen: 0, anim: 2, rng: 0, fod: 0, ij: 2,
   // (version 3; "imat" and "lmat" are written as the item's code lays them: the last one holds)
   mag: 1, imat: 1, lmat: 2,
+  // (Yoshi's egg's colors as his shield set them: "egg" by port and sub)
+  egg: 2,
 };
 
 /** a fighter's animation as the game played it ("anim"), as of game frame `since` */
