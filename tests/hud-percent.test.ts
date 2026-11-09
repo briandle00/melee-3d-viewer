@@ -112,3 +112,19 @@ test("after a shake that ends once the digits' animation has, they stand at thei
   assert.equal(digitRest(500, 25, 30), true);             // and there they stay
   assert.equal(digitRest(500, 400, 30), true);
 });
+
+test("a KO's scatter flies each digit from where its joint stood, in float32, as ifStatus_PercentOnDeathAnimationThink", async () => {
+  const { scatterFrom, scatterSpeed } = await import("../src/render3d/hudlogic.ts");
+  const f = Math.fround;
+  const [vx, vy] = scatterSpeed(1, 0, 0, [0, 0, 0.25, 0.5]);
+  // (foo: the second piece goes left; 0.811f * r + 1.2165f fused)
+  assert.equal(vx, -f(f(0.6083) * f(0.25) + f(0.3041)));
+  assert.equal(vy, f(f(0.811) * 0.5 + f(1.2165)));
+  // the joint's own translation is added to, a frame at a time, rounded each time
+  const [x, y] = scatterFrom(-18.75, 2.2507486, 3, [vx, vy]);
+  let ex = f(-18.75), ey = f(2.2507486), evy = vy;
+  for (let k = 0; k < 3; k++) { ex = f(ex + vx); ey = f(ey + evy); evy = f(evy - f(0.2028)); }
+  assert.deepEqual([x, y], [ex, ey]);
+  // (across, it stops once the joint is 100 out, wherever it began)
+  assert.equal(scatterFrom(99.9, 0, 5, [1, 0])[0], f(f(99.9) + 1));
+});

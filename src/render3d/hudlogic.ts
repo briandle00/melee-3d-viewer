@@ -14,6 +14,7 @@
  * Frames are the viewer's: an index into the replay's frames (game frame
  * + 123).
  */
+import { madd } from "./gxmath";
 import type { PlayerState, ReplayData } from "../common/types";
 
 /** the game frame the viewer's frame 0 is */
@@ -105,10 +106,15 @@ export function shakeOffset(frame: number, hit: number, damage: number, piece: n
                             draws: number[] | null = null): [number, number] | null {
   const k = frame - hit;
   if (k < 0 || k > SHAKE_FRAMES - 2) return null;
-  const mag = Math.max(0.1014, Math.min(1.5207, 0.1014 * (damage & 0xff)));
+  // (in float32 as the game: mag = 0.1014f * (f32) damage, clamped; mag * (2.0f * (HSD_Randf() - 0.5f)), then
+  // 0.2028f further out)
+  const f = Math.fround;
+  let mag = f(f(0.1014) * (damage & 0xff));
+  if (mag < f(0.1014)) mag = f(0.1014);
+  else if (mag > f(1.5207)) mag = f(1.5207);
   const step = (r: number) => {
-    const v = mag * 2 * (r - 0.5);
-    return v < 0 ? v - 0.2028 : v + 0.2028;
+    const v = f(mag * f(2 * f(f(r) - 0.5)));
+    return v < 0 ? f(v - f(0.2028)) : f(v + f(0.2028));
   };
   // (the game's own draws when known - HSD_Randf, x then y for each piece in turn; else a stand-in of our own)
   if (draws) return [step(draws[piece * 2]), step(draws[piece * 2 + 1])];
@@ -121,20 +127,33 @@ export function shakeOffset(frame: number, hit: number, damage: number, piece: n
  *  is given a speed - sideways 0.3041 to 0.912, left and right in turn, and
  *  up 1.2165 to 2.0275 - and from the next frame flies with it, falling by
  *  0.2028 a frame, until it is well off the screen (100 either way across,
- *  100 down). Returns each piece's offset from where it was, `frames` after
- *  the KO. */
-export function scatter(frames: number, piece: number, port: number, ko: number,
-                        draws: number[] | null = null): [number, number] {
+ *  100 down): the speeds of piece `piece` (float32, fused as the game's: foo's 0.6083f * HSD_Randf() + 0.3041f, its
+ *  sign by the turn; 0.811f * HSD_Randf() + 1.2165f). */
+export function scatterSpeed(piece: number, port: number, ko: number, draws: number[] | null = null): [number, number] {
   const sign = piece % 2 === 0 ? 1 : -1;
   // (the game's own draws when known - HSD_Randf, x then y for each piece in turn; else a stand-in of our own)
-  const vx = sign * (0.6083 * (draws ? draws[piece * 2] : rand(port, ko, piece, 3)) + 0.3041);
-  let vy = 0.811 * (draws ? draws[piece * 2 + 1] : rand(port, ko, piece, 4)) + 1.2165;
-  let x = 0, y = 0;
+  const rx = Math.fround(draws ? draws[piece * 2] : rand(port, ko, piece, 3));
+  const ry = Math.fround(draws ? draws[piece * 2 + 1] : rand(port, ko, piece, 4));
+  return [sign * madd(Math.fround(0.6083), rx, Math.fround(0.3041)), madd(Math.fround(0.811), ry, Math.fround(1.2165))];
+}
+
+/** a piece's place `frames` after the KO, from where it stood (x, y: its joint's translation): each frame the
+ *  translation itself is added to while it is inside -100..100 across and above -100, in float32 */
+export function scatterFrom(x: number, y: number, frames: number, speed: [number, number]): [number, number] {
+  const f = Math.fround;
+  let [vx, vy] = speed;
+  x = f(x); y = f(y);
   for (let k = 0; k < frames && k < 400; k++) {
-    if (Math.abs(x) < 100) x += vx;
-    if (y > -100) { y += vy; vy -= 0.2028; } else break;
+    if (Math.abs(x) < 100) x = f(x + vx);
+    if (y > -100) { y = f(y + vy); vy = f(vy - f(0.2028)); }
   }
   return [x, y];
+}
+
+/** the offset scatterFrom leaves a piece standing at the origin with (the stand-in's callers) */
+export function scatter(frames: number, piece: number, port: number, ko: number,
+                        draws: number[] | null = null): [number, number] {
+  return scatterFrom(0, 0, frames, scatterSpeed(piece, port, ko, draws));
 }
 
 // ---------------------------------------------------------------- the timer
@@ -248,8 +267,10 @@ export interface PercentView {
   /** the narrow-1 spacing is off while shaking (the game sets the pieces
    *  from their stored places then) */
   spaced: boolean;
-  /** frames since the KO, when the percent is scattering */
+  /** frames since the KO, when the percent is scattering, and each piece's speeds (scatterFrom flies it from where
+   *  it stood) */
   scatter: number | null;
+  scatterSpeeds: [number, number][] | null;
   /** the animation frame of the last hit since the animation began (its shake), or null: the shake sets the digits
    *  at their stored places (ifStatus_802F4B84), which ifStatus_802F4EDC takes from the digits only while the
    *  animation runs (lb_8000B09C) - after it has ended, at its last running frame's (digitRest) */
@@ -461,15 +482,14 @@ export class PlayerHud {
       const draws = this.shakeDraws?.(at) ?? null;
       for (let p = 0; p < 4; p++) offset[p] = shakeOffset(at, hit, this.hitDmg[at], p, this.port, draws) ?? [0, 0];
     }
+    let scatterSpeeds: [number, number][] | null = null;
     if (exploding) {
       const sd = this.scatterDraws?.(l.ko!) ?? null;
-      for (let p = 0; p < 4; p++) {
-        const [sx, sy] = scatter(i - l.ko!, p, this.port, l.ko!, sd);
-        offset[p] = [offset[p][0] + sx, offset[p][1] + sy];
-      }
+      scatterSpeeds = [0, 1, 2, 3].map((p) => scatterSpeed(p, this.port, l.ko!, sd));
     }
     return { percent, color: percentColor(now), anim, animFrame, layout, offset, spaced,
-             scatter: exploding ? i - l.ko! : null, hitAnimFrame: hit >= animStart && hit >= 0 ? hit - animStart : null };
+             scatter: exploding ? i - l.ko! : null, scatterSpeeds,
+             hitAnimFrame: hit >= animStart && hit >= 0 ? hit - animStart : null };
   }
 
   /** the stock icons lost from `from` to `to` (frames): which icon, when */

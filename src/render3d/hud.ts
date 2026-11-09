@@ -34,7 +34,7 @@ import { buildParticles } from "./fx/draw";
 import {
   FIRST_FRAME, GO_FRAME, HUNDREDS, markFrame, ONES, PlayerHud, portColor, portColorIndex, SIGN, TAG_IDLE, TAG_LAUNCH, TAG_LAUNCH_SPEED,
   TENS, timerAt, edgePoint, edgeWidth, tagFrame, nametagFrame, chevronFrame, type ArrowTable, arrowTable, copyArrowTable,
-  arrowsAssign, arrowsPlace, digitRest,
+  arrowsAssign, arrowsPlace, digitRest, scatterFrom,
 } from "./hudlogic";
 import { PLATE_FONT, quad, tagText, texQuad, textPicture } from "./hudtext";
 import { glyphAtlas, PLATE_FULL, plateTexts, rawBytes, type PlateFont, type PlateText } from "./plates";
@@ -742,7 +742,12 @@ export class Hud {
             else m.mat(j, 0, v.layout.frame[k], 1);
             m.color(j, v.color);
             const [x, y] = stored ? stored[[HUNDREDS, TENS, ONES, SIGN].indexOf(k)] : m.trans(j);
-            m.setTrans(j, x + (v.spaced ? v.layout.dx[k] : 0) + v.offset[k][0], y + v.offset[k][1]);
+            // (float32, as the joint holds it: its place, the narrow-1 spacing, a shake's step added to it)
+            const f = Math.fround;
+            let tx = f(f(x + (v.spaced ? v.layout.dx[k] : 0)) + v.offset[k][0]), ty = f(y + v.offset[k][1]);
+            // (a KO's scatter flies the joint from there: ifStatus_PercentOnDeathAnimationThink adds to its translation)
+            if (v.scatter !== null && v.scatterSpeeds) [tx, ty] = scatterFrom(tx, ty, v.scatter, v.scatterSpeeds[k]);
+            m.setTrans(j, tx, ty);
             if (!v.layout.shown[k]) m.hide(j);
           }
           m.finish(px, py);
