@@ -460,10 +460,31 @@ export class StadiumScreen implements StageLogic {
     const key = `${m}:${page.length}:${page.join(",")}|${lines.join(",")}`;
     if (key === this.drawn) return;
     this.drawn = key;
-    this.clear();
     const common = L.common?.font ?? null;
     const glyphs = [...layoutSis(Uint8Array.from([...page, 0]), { boxW: W, boxH: H }, L.file.font, common),
                     ...(lines.length ? layoutSis(Uint8Array.from([...lines, 0]), opts, L.file.font, common) : [])];
+    // (the picture the screen shows is the game's way: the glyphs' quads drawn into it each frame, drawLetters;
+    // the canvas's copy is for the checks and a first upload, painted when one of them asks: picture())
+    this.pending = glyphs;
+    this.letters = this.lettersOf(glyphs, L);
+  }
+
+  /** glyphs drawGame laid out and the canvas has not been painted with yet (picture(): when it is read) */
+  private pending: SisGlyph[] | null = null;
+
+  /** the canvas as drawn so far: a game text laid out since its last paint painted first */
+  picture(): HTMLCanvasElement {
+    this.paintPending();
+    return this.canvas;
+  }
+  /** picture, as a function made once (Renderer.liveImage asks for it when it uploads) */
+  readonly pictureOf = (): HTMLCanvasElement => this.picture();
+
+  private paintPending() {
+    const glyphs = this.pending;
+    if (!glyphs) return;
+    this.pending = null;
+    this.clear();
     const ctx = this.ctx;
     ctx.save();
     ctx.imageSmoothingEnabled = true;
@@ -485,9 +506,6 @@ export class StadiumScreen implements StageLogic {
       ctx.drawImage(pic, g.x, g.y, g.w, g.h);
     }
     ctx.restore();
-    // (the picture the screen shows is the game's way: the glyphs' quads drawn into it each frame, drawLetters;
-    // the canvas keeps a copy for the checks, and is not uploaded)
-    this.letters = this.lettersOf(glyphs, L);
   }
 
   /** the glyphs as quads for the renderer's particle pass (17 floats a vertex, four a quad), one batch for each run
@@ -539,6 +557,8 @@ export class StadiumScreen implements StageLogic {
   }
 
   private clear() {
+    // (a game text laid out before this painting goes on the canvas first, in its order)
+    if (this.pending) this.paintPending();
     this.ctx.fillStyle = "#000";
     this.ctx.fillRect(0, 0, W, H);
   }

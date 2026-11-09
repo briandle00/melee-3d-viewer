@@ -377,7 +377,12 @@ export class Stage {
     const posed = new Set<Part>(), world = new Map<number, Float32Array | null>();
     for (const [g, o] of owner) {
       if (!up(o.part)) { world.set(g, null); continue; }
-      if (!posed.has(o.part)) { this.poseAt(o.part, frame); posed.add(o.part); }
+      if (!posed.has(o.part)) {
+        // (for its joints only: posed for the drawn frame again below)
+        o.part.skeleton.jointsOnly = true;
+        try { this.poseAt(o.part, frame); } finally { o.part.skeleton.jointsOnly = false; }
+        posed.add(o.part);
+      }
       const W = o.part.skeleton.world;
       world.set(g, o.joint >= 0 && (o.joint + 1) * 16 <= W.length ? W.slice(o.joint * 16, o.joint * 16 + 16) : null);
     }

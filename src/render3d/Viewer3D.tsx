@@ -49,6 +49,7 @@ import { copiesFromReplay, HAT_JOINT, KIRBY, KIRBY_ITEMS, KirbyCopy, KirbyHat, p
 import { onAngelPlatform, runNumber, shineAt, SHY_GUY } from "~/common/effects";
 import { ActorFrame, FxWorld, type FxSnapshot, type LearnedFx, type LearnedPiece, NO_WORLD, stepThrough } from "./fx/world";
 import { Checkpoints, jumpTo, type Kept } from "./fx/checkpoints";
+import { stateAge } from "./stateage";
 import { buildParticles } from "./fx/draw";
 import { srtApply } from "./fx/particles";
 import { Before, hitSparks, powershielded } from "./fx/contact";
@@ -1710,7 +1711,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // Stadium's big screen: what it shows now
       if (scene.screen && st.screen) {
         scene.screen.draw(fno);
-        r.liveImage(st.screen.image, scene.screen.canvas, scene.screen.version);
+        r.liveImage(st.screen.image, scene.screen.pictureOf, scene.screen.version);
         // (for the draw log: the description the game binds in this mode)
         const gm = scene.screen.mode;
         setLiveGame(st.screen.image, 4, gm === 7 ? 640 : gm === 8 ? 124 : 250, gm === 7 ? 406 : gm === 8 ? 80 : 160);
@@ -3253,17 +3254,24 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     hud.seedMagView(null, f);
     return false;
   };
-  const actorsAt = (data: ReplayData, fs: Map<string, Fighter>, f: number): HeldFrame[] => {
+  /** the fighters of frame f posed, their joints' world matrices taken; `jointsOnly`: for nothing that draws them
+   *  (the effects' world stepping through frames), so their skeletons make only the joints' matrices */
+  const actorsAt = (data: ReplayData, fs: Map<string, Fighter>, f: number, jointsOnly = false): HeldFrame[] => {
     const { out, held, poseOne, holdOf } = framePoser(data, fs, f, viewerTrack(), true);
     const heldBy = new Map<Actor, { key: string; on: number; joint: number }>();
     const worlds = new Map<Actor, Float32Array>();
-    for (const h of held) { poseOne(h); worlds.set(h.a, worldByPart(h.a.st.internalCharacterId, h.fi.skeleton.world)); }
-    for (const h of held) {
-      const by = holdOf(h);
-      if (!by) continue;
-      heldBy.set(h.a, by);
-      poseOne(h);
-      worlds.set(h.a, worldByPart(h.a.st.internalCharacterId, h.fi.skeleton.world));
+    if (jointsOnly) for (const h of held) h.fi.skeleton.jointsOnly = true;
+    try {
+      for (const h of held) { poseOne(h); worlds.set(h.a, worldByPart(h.a.st.internalCharacterId, h.fi.skeleton.world)); }
+      for (const h of held) {
+        const by = holdOf(h);
+        if (!by) continue;
+        heldBy.set(h.a, by);
+        poseOne(h);
+        worlds.set(h.a, worldByPart(h.a.st.internalCharacterId, h.fi.skeleton.world));
+      }
+    } finally {
+      if (jointsOnly) for (const h of held) h.fi.skeleton.jointsOnly = false;
     }
     for (const h of held) out.push({ key: actorKey(h.a.player, h.a.nana), st: h.a.st, fighter: h.fi, world: worlds.get(h.a)!, heldBy: heldBy.get(h.a) });
     return out;
@@ -3321,7 +3329,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       posedOther = g !== f || !now;
     };
     const one = (g: number) => {
-      const actors = g === f && now ? now : actorsAt(data, fs, g);
+      const actors = g === f && now ? now : actorsAt(data, fs, g, true);
       w.step(g, actors);
       if (dyn) dynStep(g, actors, data);
     };
@@ -3707,7 +3715,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // (gameText false: the same frame drawn the way the player drew it before the game's own text, then back)
       const keep = st.lettering;
       if (!gameText) { st.lettering = null; (sc as unknown as { drawn: string }).drawn = ""; sc.draw(st.frame); }
-      const png = sc.canvas.toDataURL("image/png");
+      const png = sc.picture().toDataURL("image/png");
       if (!gameText) { st.lettering = keep; (sc as unknown as { drawn: string }).drawn = ""; sc.draw(st.frame); }
       return { mode: sc.mode, player: sc.player, gameText: !!st.lettering && gameText, png };
     },
@@ -4571,13 +4579,6 @@ function drawStand(r: Renderer, stand: Prop, st: PlayerState, scale: number, sha
 
 /** how many frames a fighter has been in its present state (0 on the frame
  *  it began), from the replay: the entry's states keep no count of their own */
-function stateAge(data: ReplayData, fno: number, player: number, nana: boolean): number {
-  const at = (g: number) => { const p = data.frames[g]?.players[player]; return nana ? p?.nanaState : p?.state; };
-  const s = at(fno)?.actionStateId;
-  let g = fno;
-  while (g > 0 && fno - g < 600 && at(g - 1)?.actionStateId === s) g--;
-  return fno - g;
-}
 
 // The angel platform under a fighter coming back after a lost stock, at its
 // own animation (it loops), sized for the fighter; without PlCo.dat a pale
