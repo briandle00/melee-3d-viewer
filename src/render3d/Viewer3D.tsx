@@ -39,7 +39,7 @@ import { EffectKit } from "./effects3d";
 import { Prop } from "./prop";
 import { fighterCnsModel, resolvePositionOrientation } from "./cns";
 import { blasterScale, sausageShown, trailShown } from "./itemrules";
-import { cobjViewingMtx, mtxFromGL, PSMTXMultVec, type Mtx } from "./gxmath";
+import { cobjViewingMtx, HSD_MtxGetScale, mtxFromGL, PSMTXMultVec, type Mtx } from "./gxmath";
 import type { FigaTree } from "./hsd";
 import { partSkips, partToModelJoint, worldByPart } from "./parts";
 import { Dynamics, animDriven, eulerToQuat, from44, mtxEuler, quatMtx, type DynPose } from "./dynamics";
@@ -5406,9 +5406,14 @@ function drawShield(r: Renderer, ek: EffectKit | undefined, a: Actor, data: Repl
     radius = f.modelScale * f.shieldSize * ((1 - least) * (Math.max(0, st.shieldSize) / full) * press + least);
   }
   const port = ek!.shieldColors[a.player] ?? color;
+  // (the bubble's size as efLib_Update takes it, EF_SCALE_INHERIT (efasync.c 0x417-0x41A): HSD_MtxGetScale of the
+  // shield joint's matrix, its y on all three axes - the joint ftCo_80091D58 scaled, under the fighter's - when the
+  // fighter's pose has that joint; else the size worked out from the shield's health and how hard it is held)
+  let size = radius / SHIELD_MODEL_RADIUS;
+  if (j > 0 && (j + 1) * 16 <= fa.world.length) size = HSD_MtxGetScale(mtxFromGL(fa.world, shieldM, j * 16), shieldS)[1];
   // (its tracks as their own flags have them: none of the three models' loops - the game's animation stops at
   // its end and holds there, the bubble's turning layer at its last turn, however long the shield is held)
-  pr.pose(age, c[0], c[1], c[2], radius / SHIELD_MODEL_RADIUS, 0, false);
+  pr.pose(age, c[0], c[1], c[2], size, 0, false);
   // how far the bubble's picture reaches: its card's own size in the model
   const W = pr.skeleton.world, k = pr.skeleton.n - 1;
   const drawn = Math.hypot(W[k * 16], W[k * 16 + 1], W[k * 16 + 2]);
@@ -5493,6 +5498,8 @@ function codePart(st: PlayerState, part: number, face: Face | undefined): number
 // the shield model at scale 1 is a bubble of radius 1: the game scales it by
 // the shield joint, whose scale is the bubble's radius
 const SHIELD_MODEL_RADIUS = 1;
+// (drawShield's: the shield joint's matrix and its scale)
+const shieldM = new Float32Array(12), shieldS = [0, 0, 0];
 // each shield state's model (the common effect file's), the texture its
 // colors go on, the states it runs through, whether it plays over and over,
 // and else how many frames it lasts (its life in the file: 10.1)
