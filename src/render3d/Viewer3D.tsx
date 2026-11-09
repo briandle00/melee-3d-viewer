@@ -3015,6 +3015,13 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     };
     // (the held items' turns, stepped with the fighters each frame is posed with: the game makes a held item's tied
     // joint's matrix once a frame, from the turn it took back the frame before - cns.ts)
+    // (a held item's joints as heldStep posed them on a frame: what a model held to one of its joints is turned by,
+    // FxWorld.itemOrient)
+    const heldWorlds = new Map<number, { frame: number; world: Float32Array }>();
+    w.itemPosed = (spawnId, f) => {
+      const e = heldWorlds.get(spawnId);
+      return e && e.frame === f ? e.world : null;
+    };
     const heldStep = (f: number, actors: ActorFrame[]) => {
       const tr = viewerTrack();
       const actorOf = (owner: number) => actors.find((x) => x.key === actorKey(owner, false));
@@ -3040,7 +3047,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         let left: Float32Array | null = null;
         drawArticleTracked(null, data, fs, it, f, jointOf, partJoint, undefined, undefined,
                            (id) => tr?.pose("jp", String(id), f - 123)?.joints ?? null,
-                           { cns, turn, left: (t) => { left = t; } });
+                           { cns, turn, left: (t) => { left = t; },
+                             world: (wm) => { heldWorlds.set(it.spawnId, { frame: f, world: wm.slice() }); } });
         if (left) { heldTurns.set(it.spawnId, { frame: f, prev: turn, rot: left }); seen.add(it.spawnId); }
       }
       // (and one hidden in Kirby's star: the star, his accessory 4, tied to that one's YRotN by lb_8000C2F8 -
@@ -5204,7 +5212,9 @@ function drawArticleTracked(r: Renderer | null, data: ReplayData, fs: Map<string
 /** a held item posed, not drawn (the held turns' step, heldStep): its constraints from these actors, its tied joint's
  *  turn the frame before, and what it is left with handed back */
 interface HeldPoseOnly { cns: (owner: number, part: number) => ((m: Mtx) => void) | null; turn: Float32Array | null;
-                         left: (turn: Float32Array) => void }
+                         left: (turn: Float32Array) => void;
+                         /** its joints' world matrices as posed (column-major 4 x 4s, by joint) */
+                         world?: (w: Float32Array) => void }
 
 function drawArticle(r: Renderer | null, data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number,
                      jointOf?: (owner: number, joint: number) => Float32Array | null,
@@ -5255,7 +5265,7 @@ function drawArticle(r: Renderer | null, data: ReplayData, fs: Map<string, Fight
       const turn = poseOnly ? poseOnly.turn : heldTurnNow?.(it.spawnId) ?? null;
       art.prop.poseHeld(t, resolve, heldItemScale(data, frame, it, owner, art.scale) ?? size, on.subarray(12, 15), false, art.attach,
                         turn, facingTurn, still !== null);
-      if (poseOnly) { poseOnly.left(art.prop.heldTurn(art.attach)); return true; }
+      if (poseOnly) { poseOnly.left(art.prop.heldTurn(art.attach)); poseOnly.world?.(art.prop.skeleton.world); return true; }
     } else if (poseOnly) return false;
     else art.prop.poseUnder(t, on, size, false, art.attach);
     if (!r) return false;

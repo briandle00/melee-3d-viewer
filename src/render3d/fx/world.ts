@@ -2187,6 +2187,9 @@ export class FxWorld {
    *  m00, m01, m02, m10, ..., m22] - its place from the item's own and its matrix's turn and size, the last
    *  change at or before the frame - or null (an older track): set by the player */
   trackItemJoint: ((item: number, joint: number, frame: number) => (number | string)[] | null) | null = null;
+  /** a held item's joints' world matrices as the player posed them on the frame being stepped (its constraints the
+   *  game's way, cns.ts), or null: set by the player */
+  itemPosed: ((item: number, frame: number) => Float32Array | null) | null = null;
   private itemJoints = new Map<string, Float32Array>();
   /** the world matrix of an item's joint on the frame being stepped: the track's turn at the item's place,
    *  else the item's place with no turn (as before the track said) */
@@ -2217,6 +2220,10 @@ export class FxWorld {
     if (!t || t.length < 14) return null;
     const f32 = Math.fround;
     const mtxOf = (j: number): Float32Array | null => {
+      // (the item's joint as the player posed it - the game's matrix, made from the item's own constraints - else
+      // the track's line, the simulator's)
+      const posed = this.itemPosed?.(item, this.stepping) ?? null;
+      if (posed && (j + 1) * 16 <= posed.length) return mtxFromGL(posed, new Float32Array(12), j * 16);
       const n = line(j);
       if (!n || n.length < 12) return null;
       const m = new Float32Array(12);
