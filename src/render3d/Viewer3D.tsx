@@ -38,7 +38,7 @@ import { HELD_MAKER, heldIn, holdOf, type Hold } from "./itemhold";
 import { EffectKit } from "./effects3d";
 import { Prop } from "./prop";
 import { fighterCnsModel, resolvePositionOrientation } from "./cns";
-import { blasterScale } from "./itemrules";
+import { blasterScale, sausageShown, trailShown } from "./itemrules";
 import type { Mtx } from "./gxmath";
 import type { FigaTree } from "./hsd";
 import { partSkips, partToModelJoint, worldByPart } from "./parts";
@@ -4401,6 +4401,13 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
                                  /** shown only between these frames of its animation, by state
                                   *  (its code hides and shows it as the frame passes them) */
                                  shownIn?: Record<number, [number, number]>;
+                                 /** hidden on every other frame of its life, shown the frame it is made: its
+                                  *  callback hides its root's child and all under it (HSD_JObjSetFlagsAll) while
+                                  *  its own count, from 0 as it is made and one more each frame, is odd */
+                                 blinks?: boolean;
+                                 /** in these states, hidden while its life (the replay's item timer, xD44) as a
+                                  *  whole number has its bit 2 clear */
+                                 lifeBlink?: number[];
                                  /** picked up by its owner as it is made (Item_8026AB54): its file's hidden joints
                                   *  under the root's first child shown (it_802742F4) */
                                  pickedUp?: boolean }> = {
@@ -4484,7 +4491,10 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
   // SpecialS1..9 355..363, in the air 364..372)
   0x78: { art: 6, held: heldAll(RTHUMB), still: (s) => (s >= 355 && s <= 372 ? ((s - 355) % 9) + 1 : null) },
   0x79: { art: 7, held: heldAll({ joint: 0 }) },
-  0x7a: { art: 8 },
+  // (the sausage, once down: shown and hidden by turns as its life runs out - itGamewatchchef_UnkMotion1_Anim shows it
+  // (it_8026BB20) while its life, as a whole number, has its bit 2 set, and hides it (it_8026BB44) while not: the
+  // replay's item timer is that life as the frame ends)
+  0x7a: { art: 8, lifeBlink: [1] },
   0x7c: { art: 9, held: heldAll({ joint: 0 }) },
   // Young Link's milk (his article 5: ftclink.c), drawn where the replay has it: made in his animation callback
   // (ftCl_AppealS_Anim: it_802C8B28, Fighter_procAnim at the GObj procs' priority 1) and picked up at once -
@@ -4504,7 +4514,8 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
   0x44: { art: 2, from: { 0: 1 } },
   0x4e: { art: 8 },
   0x45: { art: 3, from: { 0: 1 } },
-  0x46: { art: 4 }, 0x47: { art: 5 }, 0x48: { art: 6 }, 0x49: { art: 7 },
+  // (the trails: shown and hidden by turns, shown as made - itNesspkthundertrail_UnkMotion0_Anim)
+  0x46: { art: 4, blinks: true }, 0x47: { art: 5, blinks: true }, 0x48: { art: 6, blinks: true }, 0x49: { art: 7, blinks: true },
   // the bat and the yo-yo, in his hand (his joint 42, by number:
   // ftnessattacks4.c, itnessyoyo.c)
   0x65: { art: 9, held: { 0: { joint: 42 } } },
@@ -4954,6 +4965,8 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
   const art = articleOf(data, fs, it, frame);
   if (!art || a.gone?.includes(it.state)) return false;
   if (a.lifeIn?.state === it.state && art.special && itemAge(data, frame, it) >= art.special(a.lifeIn.attr)) return false;
+  if (a.blinks && !trailShown(itemAnimAge(data, frame, it))) return false;
+  if (a.lifeBlink?.includes(it.state) && !sausageShown(it.expirationTimer)) return false;
   const win = a.shownIn?.[it.state];
   if (win) {
     const t = itemAnimAge(data, frame, it) + (a.from?.[it.state] ?? 0);
