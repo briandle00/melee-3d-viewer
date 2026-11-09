@@ -33,6 +33,7 @@ export function effectOverAll(life: number): boolean {
 
 // (poseConstrained's: the root's own matrix, GX's 3 x 4)
 const ownM = new Float32Array(12), cnsM = new Float32Array(12), cnsV = [0, 0, 0];
+const cnsS = [1, 1, 1], cnsR = [0, 0, 0], cnsT = [0, 0, 0];
 
 export class Prop {
   skeleton: Skeleton;
@@ -66,7 +67,10 @@ export class Prop {
     this.anim = animJoint === null ? null : loadAnimJoint(a, animJoint);
     this.matAnim = matAnimJoint === null ? null : loadMatAnimJoint(a, matAnimJoint);
     this.rootScaled = !!this.anim?.[0]?.tracks.some((t) => t.type >= 8 && t.type <= 10);
+    for (let k = 0; k < 3; k++) this.rootTurned[k] = !!this.anim?.[0]?.tracks.some((t) => t.type === 1 + k);
   }
+  /** whether its animation sets the root's turn about x, y, z (HSD_A_J_ROTX..ROTZ on joint 0) */
+  private rootTurned = [false, false, false];
   /** whether its animation sets the root's scale (HSD_A_J_SCAX..SCAZ on joint 0) */
   private rootScaled: boolean;
 
@@ -320,13 +324,23 @@ export class Prop {
    *  animated turn is not added on top). `jointFrame`: the joints' animation at a frame of its own, the materials
    *  staying at `frame` (Samus's throw beam: lb_8000C2F8's constraints, its joints at the throw's speed) */
   poseConstrained(frame: number, parent: Float32Array, scale: number, loop = true, jointFrame = frame,
-                  orient: ((own: number[]) => Float32Array) | null = null) {
+                  orient: ((own: number[]) => Float32Array) | null = null, held: { turn: Float32Array | null } | null = null) {
     this.pose(frame, 0, 0, 0, scale, 0, loop, 0, 0, false, jointFrame);
     const sk = this.skeleton;
+    // (the root's own matrix as HSD_JObjMakeMatrix makes it before the constraints: HSD_MtxSRT of its scale and its
+    // turn - the turn the last frame's constraint left it (JObjUpdateFunc 0x37: HSD_MtxGetRotation of the matrix it
+    // set), where its animation does not set it - whose columns' lengths the constraint keeps)
+    if (held) {
+      const f32 = Math.fround, own = this.rootScaleSet && !this.rootScaled;
+      for (let k = 0; k < 3; k++) {
+        cnsS[k] = own ? f32(scale) : f32(sk.scale[k] * scale);
+        cnsR[k] = held.turn && !this.rootTurned[k] ? held.turn[k] : sk.rot[k];
+      }
+      HSD_MtxSRT(ownM, cnsS, cnsR, cnsT, null);
+    } else mtxFromGL(sk.world, ownM, 0);
     if (orient) {
       // (the axes as resolveCnsOrientation makes them, given the root's own columns' lengths, HSD_MtxColMag of its
       // matrix: `orient` - FxWorld.jointOrient - in float32, the game's order)
-      mtxFromGL(sk.world, ownM, 0);
       const o = orient([HSD_MtxColMag(ownM, 0), HSD_MtxColMag(ownM, 1), HSD_MtxColMag(ownM, 2)]);
       for (let c = 0; c < 3; c++) {
         for (let r = 0; r < 3; r++) this.place[c * 4 + r] = o[r * 4 + c];
@@ -338,11 +352,11 @@ export class Prop {
       for (let r = 12; r < 15; r++) this.place[r] = parent[r];
       this.place[15] = 1;
       sk.update(this.place);
+      if (held) held.turn = heldTurn(this.place, null);
       return;
     }
     // (resolveCnsOrientation for a target joint with no CLASSICAL_SCALE: each of its columns made unit - VECMag,
     // 1.0F / it over 1e-10F - and as long as the root's own, HSD_MtxColMag of its matrix; float32, the game's order)
-    mtxFromGL(sk.world, ownM, 0);
     mtxFromGL(parent, cnsM, 0);
     const f32 = Math.fround;
     for (let c = 0; c < 3; c++) {
@@ -361,6 +375,7 @@ export class Prop {
     for (let r = 12; r < 15; r++) this.place[r] = parent[r];
     this.place[15] = 1;
     sk.update(this.place);
+    if (held) held.turn = heldTurn(this.place, null);
   }
 
   /** tied to another model's joint by lb_8000C2F8 (a position and an orientation constraint: `resolve`, cns.ts

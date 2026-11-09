@@ -585,6 +585,9 @@ export class ParticleSystem {
     if (parent.gen) {
       g.tag = parent.gen.tag;
       g.follow = parent.gen.follow;
+      // (the same joint: a model's joint the parent kept once the model ran out is this one's too - the game's
+      // gchild->jobj = pp->gen->jobj, which holds the joint where it was)
+      g.keptJoint = parent.gen.keptJoint;
       g.onJoint = parent.gen.onJoint;
       g.model = parent.gen.model;
       g.stageAt = parent.gen.stageAt;
