@@ -39,7 +39,7 @@ import { EffectKit } from "./effects3d";
 import { Prop } from "./prop";
 import { fighterCnsModel, resolvePositionOrientation } from "./cns";
 import { blasterScale, sausageShown, trailShown } from "./itemrules";
-import type { Mtx } from "./gxmath";
+import { mtxFromGL, PSMTXMultVec, type Mtx } from "./gxmath";
 import type { FigaTree } from "./hsd";
 import { partSkips, partToModelJoint, worldByPart } from "./parts";
 import { Dynamics, animDriven, eulerToQuat, from44, mtxEuler, quatMtx, type DynPose } from "./dynamics";
@@ -495,6 +495,9 @@ function fallLeanOf(data: ReplayData, fno: number, st: PlayerState, player: numb
 
 /** the fighters left out of this frame's draw (one set, made once) */
 const offScreenSet = new Set<unknown>();
+
+/** a fighter's camera joint's world matrix as GX has it, for its shadow camera (scratch) */
+const shadowJoint = new Float32Array(12);
 
 /** a fighter's camera bone (the camera box's bone_pos): its place in the fighter's bone list (ftLib_800866DC; the
  *  model's joint past its part list's gaps, parts.ts) and the box's offset on it, world; without the joint, its
@@ -2016,9 +2019,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const cameraOf = (fi: Fighter, a: Actor) => {
         const joint = partToModelJoint(a.st.internalCharacterId, fi.cameraPart);
         if (joint < 0 || joint >= fi.skeleton.n) return null;
-        const W = fi.skeleton.world, o = fi.cameraOffset, k = joint * 16;
-        const bone = [0, 1, 2].map((i) => W[k + i] * o[0] + W[k + 4 + i] * o[1] + W[k + 8 + i] * o[2] + W[k + 12 + i]);
-        return shadowCamera(sl.pos, sl.interest, bone, (fi.cameraBox?.v[2] ?? 0) * (scales[a.player] ?? 1));
+        // (bone_pos: lb_8000B1CC - the joint's matrix times the attributes' offset, PSMTXMultVec, or its move when
+        // the offset is 0; the depth: ftCamera_80076018's xC.z times the fighter's scale.y, in single precision)
+        const o = fi.cameraOffset;
+        const M = mtxFromGL(fi.skeleton.world, shadowJoint, joint * 16);
+        const bone = o[0] || o[1] || o[2] ? PSMTXMultVec(M, o, [0, 0, 0]) as number[] : [M[3], M[7], M[11]];
+        return shadowCamera(sl.pos, sl.interest, bone, Math.fround(Math.fround(fi.cameraBox?.v[2] ?? 0) * Math.fround(scales[a.player] ?? 1)));
       };
       for (const a of actors) {
         const p = posed.find((q) => q.a === a);
@@ -2031,7 +2037,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const cam = cameraOf(fi, a);
         if (!cam) continue;
         const t = r.shadowTarget(shadowMaps.length);
-        r.beginShadow(t, cam.proj, cam.view, st.shadowIntensity);
+        r.beginShadow(t, cam.proj, cam.view, st.shadowIntensity, cam.gx);
         if (p) {
           const look = lookOf(fi, a, actorKey(a.player, a.nana));
           // (its low-detail model, as in a mirror: ftDrawCommon_80081200 switches every fighter to it first)

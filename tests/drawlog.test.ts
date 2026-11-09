@@ -7,7 +7,7 @@ import assertNode from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   DrawLog, RENDERER_NAMES, dlPrims, drawLogCommand, geoHash, gxHash, gxProjection, imageId, probes, tlutId, vertexSize,
-  gameTexMaps, normalMatrix,
+  gameTexMaps, normalMatrix, fogBack,
 } from "../src/render3d/drawlog.ts";
 import { LOBJ, RENDER, compileMaterial } from "../src/render3d/gx.ts";
 import { LightSet } from "../src/render3d/lightset.ts";
@@ -296,4 +296,11 @@ test("a UV set's texture matrix row is logged as the game's effective one: its t
   assertEquals(uvRow([1, 0, 0, 0.5], 1), [1, 0, 0, 0.5]);
   // (the others' rows as they are)
   assertEquals(uvRow([1, 2, 3, 4], 4), [1, 2, 3, 4]);
+});
+
+test("fog start and end are worked back as the capture reader works them back", () => {
+  // bot-fox_falco-1022 frame 1021 (the game's capture, decoded exactly): Final Destination's fog, A (times
+  // 2^B's shift) and C from the registers, p4 and p5 of the GX projection; start/end are the reader's numbers
+  const got = fogBack(-3.333444328745827e-05, -1.0000332593917847, 0.00019997358322143555, 1.0);
+  assertEquals(got, [5000.826825633383, 10001.653651266766]);
 });

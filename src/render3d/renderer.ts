@@ -1704,7 +1704,7 @@ void main() {
    *  shadow camera, every pixel the stage's shadow intensity (0..255) as the
    *  copy keeps it (shadowGray), two pixels in from each edge
    *  (HSD_ShadowStartRender); endShadow() puts the frame back */
-  beginShadow(t: RenderTarget, proj: Mat, view: Mat, intensity: number) {
+  beginShadow(t: RenderTarget, proj: Mat, view: Mat, intensity: number, gx: Float32Array | null = null) {
     const gl = this.gl;
     // The frame before's pictures are still bound to the shadow units (setShadows),
     // and the program's shadow samplers point at them: drawing into one of them is a
@@ -1717,7 +1717,8 @@ void main() {
     }
     gl.activeTexture(gl.TEXTURE0);
     this.unit = 0;
-    this.overlay(proj, view, t, [1, 1, 1, 1]);
+    // (with the GX projection it was made from, C_MTXOrtho's, for the draw log)
+    this.overlay(proj, view, t, [1, 1, 1, 1], false, gx);
     this.casting = true;
     const gray = shadowGray(intensity);
     gl.uniform4f(this.loc.uCast, gray, gray, gray, 1);
