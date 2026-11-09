@@ -2177,11 +2177,14 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
             kh.skin.passHidden = null;
           }
         }
-        // a costume's hat, on its joint as posed now, in the fighter's tint
+        // a costume's hat, on its joint as posed now, in the fighter's tint (in a mirror its low-detail
+        // meshes, as her body's: ftDrawCommon_80080C28 -> ftPr_Init_UnkIntBoolFunc0)
         const hat = fi.hat, hj = hat?.joint ?? -1;
         if (hat && (hj + 1) * 16 <= fi.skeleton.world.length) {
           if (poseHats) hat.prop.poseMatrix(fi.skeleton.world.subarray(hj * 16, hj * 16 + 16));
+          if (low) { hat.prop.skeleton.posePass(hat.lowHidden); hat.prop.skeleton.passHidden = hat.lowHidden; }
           r.drawSkeleton(hat.prop.skeleton, pass);
+          hat.prop.skeleton.passHidden = null;
         }
         if (sh) r.shiftDraws(0, 0);
       }
@@ -2632,6 +2635,15 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
             r.drawSkeleton(fi.skeleton, "opa");
             r.drawSkeleton(fi.skeleton, "xlu");
             fi.skeleton.passHidden = null;
+            // (a costume's hat too, its low-detail meshes: ftDrawCommon_80080C28's ftData_UnkMtxFunc0, ftPr_Init_UnkMtxFunc0)
+            const hat = fi.hat, hj = hat?.joint ?? -1;
+            if (hat && (hj + 1) * 16 <= fi.skeleton.world.length) {
+              hat.prop.poseMatrix(fi.skeleton.world.subarray(hj * 16, hj * 16 + 16));
+              if (low) { hat.prop.skeleton.posePass(hat.lowHidden); hat.prop.skeleton.passHidden = hat.lowHidden; }
+              r.drawSkeleton(hat.prop.skeleton, "opa");
+              r.drawSkeleton(hat.prop.skeleton, "xlu");
+              hat.prop.skeleton.passHidden = null;
+            }
             r.setTint(null);
           },
         });

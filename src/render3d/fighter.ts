@@ -275,6 +275,25 @@ export interface GameAnim {
 
 const MEWTWO_ID = 16;
 
+/** a parts description's (FtPartsDesc: model count, then a table of four lookups by costume) meshes, each lookup's
+ *  every variant together: the costume's lookup, else costume 0's (ftParts_8007487C) */
+function hatLookups(a: Archive, desc: number, costume: number): Set<number>[] {
+  const d = a.data, n = d.getUint32(desc), vis = ptr(a, desc + 4), out: Set<number>[] = [];
+  if (vis === null || n > 11) return out;
+  for (let k = 0; k < 4; k++) {
+    const lk = ptr(a, vis + costume * 16 + k * 4) ?? ptr(a, vis + k * 4), set = new Set<number>();
+    for (let m = 0; lk !== null && m < n; m++) {
+      const count = d.getUint32(lk + m * 8), list = ptr(a, lk + m * 8 + 4);
+      for (let v = 0; v < count && v < 64 && list !== null; v++) {
+        const c = d.getUint32(list + v * 8), ids = ptr(a, list + v * 8 + 4);
+        for (let i = 0; i < c && i < 256 && ids !== null; i++) set.add(d.getUint8(ids + i));
+      }
+    }
+    out.push(set);
+  }
+  return out;
+}
+
 export class Fighter {
   skeleton: Skeleton;
   /** its joint 1 (TransN) has nothing under it */
@@ -312,7 +331,7 @@ export class Fighter {
   private articleElements = new Map<string, number | null>();
   /** a costume's hat, a model of its own in the costume's file (Jigglypuff's
    *  bow, bonnet, headband and crown: ftpurin.c), and the joint it sits on */
-  hat: { prop: Prop; joint: number } | null = null;
+  hat: { prop: Prop; joint: number; hidden: Set<number>; lowHidden: Set<number> } | null = null;
 
   constructor(
     public internalId: number,
@@ -403,7 +422,24 @@ export class Fighter {
     // (the game copies its joint 6's matrix onto the hat each frame it draws it)
     const hat = [...md.publics].find(([k]) => k.endsWith("Hat_TopN_joint"));
     if (hat) {
-      try { this.hat = { prop: new Prop(md, hat[1], null, null, `${tag}:hat`), joint: 6 }; } catch { this.hat = null; }
+      try {
+        const prop = new Prop(md, hat[1], null, null, `${tag}:hat`);
+        // (its own parts' visibility: ftPr_Init_8013C360 lays her articles list's second entry's lookups on it -
+        // ftParts_8007487C, every lookup's meshes hidden - and her draw shows all of one lookup's meshes, no
+        // variant picked (ftPr_Init_UnkIntBoolFunc0: ftParts_80074CA0): lookup 0 as her body shows its own
+        // (ftDrawCommon_80080E18), lookup 1 in her low-detail draw (ftDrawCommon_80080C28: a stage's mirror and
+        // the magnifier))
+        const list = ptr(pl, ftData + 0x48), it1 = list === null ? null : ptr(pl, list + 4);
+        const looks = it1 === null ? [] : hatLookups(pl, it1 + 4, costume);
+        const hiddenBut = (k: number) => {
+          const h = new Set<number>();
+          looks.forEach((l, i) => { if (i !== k) l.forEach((x) => h.add(x)); });
+          looks[k]?.forEach((x) => h.delete(x));
+          return h;
+        };
+        this.hat = { prop, joint: 6, hidden: hiddenBut(0), lowHidden: hiddenBut(1) };
+        this.hat.hidden.forEach((i) => prop.skeleton.hidden.add(i));
+      } catch { this.hat = null; }
     }
 
     // which model parts show: the game's parts visibility tables (ftData+8)
