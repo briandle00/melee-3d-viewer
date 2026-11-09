@@ -1810,15 +1810,21 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const guarded = blend !== null && blend.anim < 0 && GUARD_POSED.has(a.st.actionStateId) &&
         fi.internalId !== YOSHI_ID;
       const leaned = blend !== null && blend.anim >= FALL_FIRST && blend.anim <= FALL_LAST;
-      const fresh = blend && ((blend.blendFrames > 0 && blend.blendAt < blend.blendFrames) || guarded || leaned)
-        ? trackAt!.poseSent("fj", owner, fno - 123) : null;
+      // (from track version 3 on the track says which line lays a part - of "fj" and "fq", its latest: quatTurned -
+      // so every part whose latest line is an Euler one is laid, sent this frame or not: a part the lean, the guard
+      // or the blend leaves as it was is the game's as it was. Jigglypuff's ear, falling, kept the viewer's own
+      // swing instead, 5 degrees off)
+      const v3 = !!posedBy && trackAt!.version >= 3;
+      const fresh = v3 ? eulerParts(trackAt!, owner, fno - 123)
+        : blend && ((blend.blendFrames > 0 && blend.blendAt < blend.blendFrames) || guarded || leaned)
+          ? trackAt!.poseSent("fj", owner, fno - 123) : null;
       let laid = posedBy ? layTrackSwing(fi, a.st.internalCharacterId, posedBy.joints, true, fresh) : false;
       // (and the ones the simulator runs - the chains a hurtbox sits on - as the game swung them, when the
       // track has them: "fp"; the same quaternion turns leave a chain's joints out of these lines too
       // (viewer_track.c skips them alike), so then only the ones this frame's line has: Zelda's dress kept its
       // roots where the move before left them through a 30-frame blend into her wait, Mewtwo's tail through a fall)
       const swungBy = trackAt?.pose("fp", owner, fno - 123);
-      const swungFresh = fresh ? trackAt!.poseSent("fp", owner, fno - 123) : null;
+      const swungFresh = v3 ? fresh : fresh ? trackAt!.poseSent("fp", owner, fno - 123) : null;
       if (swungBy && layTrackSwing(fi, a.st.internalCharacterId, swungBy.joints, true, swungFresh)) laid = true;
       // (and from track version 3 on, the parts a quaternion turns as the game turned them: "fq", each part whose
       // latest line is an "fq" one (quatTurned) - an animation's blend from TransN down, the guard, the fall's lean,
@@ -4842,8 +4848,12 @@ function hatQuats(tr: ViewerTrack | null, owner: string, g: number): HatQuats | 
   const q = tr && tr.version >= 3 ? tr.pose("fq", owner, g) : null;
   return q ? { joints: q.joints, turned: (part) => tr!.quatTurned(owner, part, g) } : null;
 }
+/** the parts whose latest "fj"/"fq" line at game frame `g` is an Euler one (track version 3): `has` as a set's */
+function eulerParts(tr: ViewerTrack, owner: string, g: number): { has(part: number): boolean } {
+  return { has: (part) => !tr.quatTurned(owner, part, g) };
+}
 function layTrackSwing(fi: Fighter, char: number, joints: Map<number, Float32Array>, all: boolean,
-                       only: ReadonlySet<number> | null = null): boolean {
+                       only: { has(part: number): boolean } | null = null): boolean {
   const sk = fi.skeleton;
   let laid = false;
   for (const [part, v] of joints) {
