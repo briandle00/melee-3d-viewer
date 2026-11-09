@@ -286,7 +286,8 @@ export class Prop {
     this.layTrackPose(a);
     if (this.rootAtOrigin) sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
     this.itemRootScale();
-    if (this.itemRoot && !this.rootScaled) sk.scale[0] = sk.scale[1] = sk.scale[2] = scale;
+    // (the root at the size the code gives it: an item's scl - Item_8026849C - or an accessory's, HSD_JObjSetScale)
+    if (!this.rootScaled) sk.scale[0] = sk.scale[1] = sk.scale[2] = scale;
     if (this.matAnim) {
       sk.resetMaterials();
       sk.applyMatAnims(this.matAnim, (j) => this.joints[j]?.dobjs ?? NO_DOBJS, frame, loop);

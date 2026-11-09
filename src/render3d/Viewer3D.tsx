@@ -901,7 +901,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   const fxPercent = new Map<string, Before>();
   /** each held item's tied joint's turn as the frame the effects' world stepped last left it (cns.ts heldTurn), and the
    *  turn its matrix was made from (the frame before's), by spawn id: the world's steps keep them, with its checkpoints */
-  const heldTurns = new Map<number, { frame: number; prev: Float32Array | null; rot: Float32Array }>();
+  const heldTurns = new Map<number | string, { frame: number; prev: Float32Array | null; rot: Float32Array }>();
   let failed = false;
   // whether this player holds the replay's playing up while it warms up
   // (replayStore.holdPlay): let go as it is ready, fails or goes
@@ -2043,8 +2043,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const fa = frameActors.find((x) => x.key === actorKey(a.player, a.nana));
         const j = ek.partToJoint(a.st.internalCharacterId, 3);
         const on = fi && star && fa && j >= 0 && (j + 1) * 16 <= fa.world.length ? fa.world.subarray(j * 16, j * 16 + 16) : null;
-        if (star && fi && on) {
-          star.poseUnder(stateAge(data, fno, a.player, a.nana), on, fi.commonAttr(0xdc) || 1, true, 0);
+        if (star && fi && fa && on) {
+          // (tied by its constraints, from the turn they left it the frame before: cns.ts, heldStep)
+          const model = fighterCnsModel(fa.st.internalCharacterId, fa.world, fi.skeleton.parent, fi.skeleton.flags);
+          const resolve = (m: Mtx) => { resolvePositionOrientation(m, model, j); };
+          const e = heldTurns.get(`star:${actorKey(a.player, a.nana)}`);
+          star.poseHeld(0, resolve, fi.commonAttr(0xdc) || 1, on.subarray(12, 15), true, 0, e && e.frame === fno ? e.prev : null);
           out = { fi, star };
         }
       }
@@ -2985,7 +2989,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const model = fighterCnsModel(fa.st.internalCharacterId, fa.world, sk.parent, sk.flags);
         return (m: Mtx) => { resolvePositionOrientation(m, model, part); };
       };
-      const seen = new Set<number>();
+      const seen = new Set<number | string>();
       for (const it of data.frames[f]?.items ?? []) {
         const before = heldTurns.get(it.spawnId);
         const turn = before && before.frame === f - 1 ? before.rot : null;
@@ -2994,6 +2998,23 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
                            (id) => tr?.pose("jp", String(id), f - 123)?.joints ?? null,
                            { cns, turn, left: (t) => { left = t; } });
         if (left) { heldTurns.set(it.spawnId, { frame: f, prev: turn, rot: left }); seen.add(it.spawnId); }
+      }
+      // (and one hidden in Kirby's star: the star, his accessory 4, tied to that one's YRotN by lb_8000C2F8 -
+      // ftCo_ThrownKirby.c inlineB2 - its turn stepped the same way, from the file's rest as the state begins)
+      const kirby = actors.find((x) => x.st.internalCharacterId === KIRBY);
+      for (const fa of actors) {
+        if (!kirby || fa === kirby || !KIRBY_STARS.has(fa.st.actionStateId)) continue;
+        const key = `star:${fa.key}`;
+        const star = kirby.fighter.accessory(4);
+        const part = ek.partToJoint(fa.st.internalCharacterId, 3);
+        const resolve = star ? cns(Number(fa.key.split(":")[0]), part) : null;
+        const on = jointOf(Number(fa.key.split(":")[0]), part);
+        if (!star || !resolve || !on || fa.key.split(":")[1] === "1") continue;
+        const before = heldTurns.get(key);
+        const turn = before && before.frame === f - 1 ? before.rot : null;
+        star.poseHeld(0, resolve, fa.fighter.commonAttr(0xdc) || 1, on.subarray(12, 15), true, 0, turn);
+        heldTurns.set(key, { frame: f, prev: turn, rot: star.heldTurn(0) });
+        seen.add(key);
       }
       for (const k of [...heldTurns.keys()]) if (!seen.has(k)) heldTurns.delete(k);
     };
@@ -3174,7 +3195,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   // drawn)
   const CATCH_UP = 1200, FILL_MS = 2, IDLE_FILL_MS = 12;
   // (with each the hit sparks' record of the fighters' percents, which the world's steps read and keep: fxPercent)
-  type Snap = { snap: FxSnapshot; percent: [string, Before][]; held: [number, { frame: number; prev: Float32Array | null; rot: Float32Array }][] };
+  type Snap = { snap: FxSnapshot; percent: [string, Before][]; held: [number | string, { frame: number; prev: Float32Array | null; rot: Float32Array }][] };
   type Checks = { store: Checkpoints<Snap>; key: unknown[]; exact: boolean; ahead?: Kept<Snap> };
   const saveCheck = (w: FxWorld): Kept<Snap> => {
     const snap = w.save();
