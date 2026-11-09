@@ -11,3 +11,17 @@ export function animTime(counter: number, frames: number): number {
   const t = Math.max(0, counter);
   return frames > 0 ? Math.min(t, frames) : t;
 }
+
+/**
+ * The frame an animation started at 0 and stepped once a frame shows on its
+ * frame t (0 the first): t + 1 steps of `rate`, each added in float32
+ * (HSD_AObjInterpretAnim: a first play lays frame 0, each later one adds the
+ * rate first). Samus's throw beam is made and played once as her throw
+ * begins (ftSs_Init_CreateThrowGrappleBeam) and played again the same frame
+ * in Fighter_procCollPos, so its first frame shows one step.
+ */
+export function steppedFrame(t: number, rate: number): number {
+  let f = 0;
+  for (let k = 0; k <= t; k++) f = Math.fround(f + rate);
+  return f;
+}

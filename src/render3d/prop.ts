@@ -249,9 +249,10 @@ export class Prop {
   /** at frame `frame`, held to another model's joint (its world matrix `parent`) by place and turn
    *  constraints (efLib_Create_AttachChild): the root takes the joint's place and axes, each axis as long as
    *  the root's own animation makes it (HSD's resolveCnsOrientation copies the target's axes, so the root's
-   *  animated turn is not added on top) */
-  poseConstrained(frame: number, parent: Float32Array, scale: number, loop = true) {
-    this.pose(frame, 0, 0, 0, scale, 0, loop);
+   *  animated turn is not added on top). `jointFrame`: the joints' animation at a frame of its own, the materials
+   *  staying at `frame` (Samus's throw beam: lb_8000C2F8's constraints, its joints at the throw's speed) */
+  poseConstrained(frame: number, parent: Float32Array, scale: number, loop = true, jointFrame = frame) {
+    this.pose(frame, 0, 0, 0, scale, 0, loop, 0, 0, false, jointFrame);
     const sk = this.skeleton;
     for (let c = 0; c < 3; c++) {
       const j = c * 4;

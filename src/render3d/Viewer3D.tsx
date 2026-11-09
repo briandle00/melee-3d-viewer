@@ -8,7 +8,7 @@
  * drawn, onFail says why and the page draws Slippi Lab's line art instead.
  */
 import { EffectBank } from "./fx/bank";
-import { animTime } from "./animtime";
+import { animTime, steppedFrame } from "./animtime";
 import { diagWarmed } from "~/diag";
 import { createEffect, createMemo, createSignal, Index, JSX, on as follow, onCleanup, onMount, Show, untrack } from "solid-js";
 import { unwrap } from "solid-js/store";
@@ -630,6 +630,14 @@ const KB_HELD: { kind: number; states: [number, number]; slot: number; part: num
 /** a grab's holder from its catch to its throw (Catch to ThrowLw, 212-222): the one whose victim_gobj the held
  *  one is, from ftCo_Catch_Enter until ftCo_800DDDE4 lets go; and the held one's states of such a grab
  *  (CapturePulledHi to CaptureWaitLw, ThrownF to ThrownLw) */
+/** Samus (internal id) and the throws (ThrowF to ThrowLw), whose beam is her accessory (ftSs_Init_CreateThrowGrappleBeam) */
+const SAMUS = 13, THROW_F = 219, THROW_LW = 222;
+/** the frame Samus's throw beam's joints are at on frame `t` of her throw (animtime.ts steppedFrame): the speed
+ *  the viewer track's animation for her has, else 1 */
+const throwBeamFrame = (tr: ViewerTrack | null, a: Actor, fno: number, t: number): number => {
+  const said = tr?.animAt(a.player, a.nana ? 1 : 0, fno - 123);
+  return steppedFrame(t, said ? Math.fround(said.rate) : 1);
+};
 const CATCHING_FIRST = 212, CATCHING_LAST = 222;
 const catching = (st: PlayerState) => st.actionStateId >= CATCHING_FIRST && st.actionStateId <= CATCHING_LAST;
 const caughtByCatch = (s: number) => (s >= 223 && s <= 228) || (s >= 239 && s <= 242);
@@ -2261,6 +2269,33 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     drawChains("opa");
     r.setLighting(lighting);
     drawChains("opa");
+    // Samus's throws: the grapple beam she throws with is her accessory, not the grab's item (that one is gone
+    // as the throw begins: it_802BAC3C from ftCo_CatchWait_IASA) - her articles' slot 4, the throw's own
+    // animation on it, made as the throw begins (ftSs_Init_CreateThrowGrappleBeam from ftCo_800DD398) and held
+    // to her ThrowN where it is and as it turns (lb_8000C2F8), at her fighter scale (fp->x34_scale.y, the
+    // player's own scale: not her model's), gone with the throw (Fighter_ChangeMotionState). Drawn with her
+    // (ftDrawCommon_800805C8, and in a stage's mirror ftDrawCommon_80080C28), its links facing the camera that
+    // draws them, so posed again under each. On the throw's frame t (0 its first) its joints are t + 1 steps of
+    // the throw's speed in (ftSs_Init_80128770 sets it on every joint's animation that does not loop), its
+    // materials t + 1 frames (their speed left 1) - animtime.ts steppedFrame
+    const playerScaleOf = playerScales(data.settings.playerSettings);
+    const throwBeams = (): Prop[] => {
+      const out: Prop[] = [];
+      if (layersOff.fighters) return out;
+      for (const a of actors) {
+        const s = a.st.actionStateId;
+        if (a.st.internalCharacterId !== SAMUS || s < THROW_F || s > THROW_LW) continue;
+        const fi = fs.get(`${SAMUS}:${a.costume}`);
+        const beam = fi?.throwAccessory(4, s - THROW_F) ?? null;
+        // (fp->parts[FtPart_ThrowN]: her own part slot 51, her cannon, as the grab's glow - not the named-part table)
+        const on = beam ? jointOf(a.player, THROWN_PART) : null;
+        if (!beam || !on) continue;
+        const t = stateAge(data, fno, a.player, a.nana);
+        beam.poseConstrained(t + 1, on, playerScaleOf[a.player] ?? 1, false, throwBeamFrame(trackAt, a, fno, t));
+        out.push(beam);
+      }
+      return out;
+    };
     // Fountain of Dreams' pond: what the game draws after the stage - the
     // fighters, the items, the effects - seen from below the floor into the
     // stage's mirror image, before the pond is drawn with it (grizumi.c)
@@ -2287,6 +2322,10 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       r.setLighting(lighting);
       drawFighters("opa", true);
       drawFighters("xlu", true);
+      // (Samus's throw beam with her: its links facing the mirror's camera, posed again under the main one after)
+      setBillboardView(axesM.view);
+      for (const beam of throwBeams()) { r.drawSkeleton(beam.skeleton, "opa"); r.drawSkeleton(beam.skeleton, "xlu"); }
+      setBillboardView(view, frameBB);
       if (!layersOff.items) for (const it of frame.items ?? []) drawArticleTracked(r, data, fs, it, fno, jointOf, partJoint, turnOf, heldShake, itemPose);
       // (and the chains: grIzumi_801CCEA0's links 4 to 6 in all three passes, once)
       drawChains("opa");
@@ -2403,6 +2442,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       prop.poseUnder(0, on, held.sized && fi ? fi.modelScale : 1, false, 0);
       r.drawSkeleton(prop.skeleton, "opa");
       r.drawSkeleton(prop.skeleton, "xlu");
+      r.endPass();
+    }
+    // Samus's throw beam (throwBeams), posed under the main camera, drawn after the fighters
+    for (const beam of throwBeams()) {
+      r.drawSkeleton(beam.skeleton, "opa");
+      r.drawSkeleton(beam.skeleton, "xlu");
       r.endPass();
     }
     // the stars of the ones in Kirby's (kirbyStarOf)

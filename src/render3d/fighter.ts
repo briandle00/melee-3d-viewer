@@ -662,6 +662,28 @@ export class Fighter {
     return out;
   }
 
+  /** a model its articles' list keeps with an animation for each throw (Samus's slot 4, UNK_SAMUS_S1: the
+   *  joint +0, the throws' animations +4 - a list, ThrowF first - an animation +8 and the material animation +0xC):
+   *  the throw's animation and the material animation on it, as ftSs_Init_CreateThrowGrappleBeam adds them (the
+   *  +8 animation is added first and the throw's replaces it on every joint: HSD_JObjAddAnim), or null */
+  throwAccessory(index: number, throwIndex: number): Prop | null {
+    const key = `throw:${index}:${throwIndex}`;
+    if (this.articleModels.has(key)) return this.articleModels.get(key)!;
+    const a = this.pl;
+    const list = ptr(a, this.ftData + 0x48);
+    const s1 = list === null ? null : ptr(a, list + index * 4);
+    const joint = s1 === null ? null : ptr(a, s1);
+    const anims = s1 === null ? null : ptr(a, s1 + 0x04);
+    const anim = anims === null ? null : ptr(a, anims + throwIndex * 4);
+    const mat = s1 === null ? null : ptr(a, s1 + 0x0c);
+    let out: Prop | null = null;
+    if (joint !== null) {
+      try { out = new Prop(a, joint, anim, mat, `throw:${this.internalId}:${index}:${throwIndex}`, false); } catch { out = null; }
+    }
+    this.articleModels.set(key, out);
+    return out;
+  }
+
   /** how far behind it the stand it enters on stands (fp->x40: the Ice
    *  Climbers' own attributes +0, the gap between Popo and Nana; 0 for the
    *  rest - ftpopo.c), before its size */
