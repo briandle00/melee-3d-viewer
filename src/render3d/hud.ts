@@ -26,6 +26,7 @@ import { applyMatAnim, Skeleton } from "./skeleton";
 import { ident, lookAt, Mat, mul } from "./math";
 import { gameProjection, gameView } from "./camera";
 import { madd, type Mtx } from "./gxmath";
+import { atan2f } from "./fx/gamemath";
 import { gameSrt } from "./prop";
 import type { PlayerState, ReplayData } from "../common/types";
 import type { EffectBank } from "./fx/bank";
@@ -1007,14 +1008,17 @@ export class Hud {
   /** the bubble at the screen's edge toward the fighter, its pointer turned to it */
   private drawLupe(r: Renderer, p: Hud["players"][number], sx: number, sy: number) {
     const m = p.lupe!;
-    const dx = sx - 320, dy = -(sy - 240);
+    // (ifMagnify_802FB8C0, in float32: the direction from the middle, its angle by the game's atan2f, the bubble at
+    // 0.09125f and 0.1f times where it meets the edge)
+    const f = Math.fround;
+    const dx = f(sx - 320), dy = f(-f(sy - 240));
     const [ex, ey] = edgePoint(dx, dy, edgeWidth(this.k));
     m.begin();
-    m.setRotZ(1, Math.atan2(dy, dx));
+    m.setRotZ(1, atan2f(dy, dx));
     const col = portColor(p.colorIdx);
     m.color(1, col);
     m.color(2, col, 0);
-    m.finish(0.09125 * ex, 0.1 * ey);
+    m.finish(f(f(0.09125) * ex), f(f(0.1) * ey));
     r.drawSkeleton(m.sk, "opa");
     r.drawSkeleton(m.sk, "xlu");
   }
