@@ -104,7 +104,7 @@
  */
 import { colorLightDir, type Tint } from "./fx/colanim";
 import { hasTrack, liveTrack, trackAnswer } from "./files";
-import { decodeTrackFloats } from "./trackcodec";
+import { decodeEventFloats, type PoseLines, poseLinesOf } from "./trackcodec";
 import { pageCache, trim } from "../state/pageCache";
 
 export type TrackEvent = [number, string, ...(number | string)[]];
@@ -116,6 +116,11 @@ export interface TrackData {
   exact?: boolean; diverged_at?: number | null;
   /** its floats are numbers already (decodeTrackFloats has been through its events) */
   decoded?: boolean;
+  /** the pose lines read from the compact form (readTrack), by type, kept compact rather than as events: a long
+   *  game has millions of their values. A pose type is here or in `events`, not both */
+  poses?: Record<string, PoseLines>;
+  /** read from the compact form: its types and each event's type, in order (trackEvents puts them back) */
+  layout?: { names: string[]; order: Uint16Array };
 }
 
 /** one owner's pose lines ("jp", "fp", "lm"), each with the joints as of it (the streamed ones: PoseStream) */
@@ -158,26 +163,28 @@ const NONE_SENT: ReadonlySet<number> = new Set();
  *  each step plays the lines since, into the one pose it hands out */
 class PoseStream {
   readonly frames: number[] = [];
-  readonly lines: TrackEvent[] = [];
+  /** the owner's lines, by index in the type's PoseLines */
+  readonly lines: number[] = [];
   /** the joints as of line k * POSE_EVERY (made as they are first passed) */
   private marks: Map<number, Float32Array>[] = [];
   /** the pose handed out, as of line `at` (-1: none yet) */
   private at = -1;
   readonly pose: TrackPose = { joints: new Map(), out: null, links: 0 };
 
-  constructor(private first: number, private width: number) {}
+  constructor(private src: PoseLines, private width: number) {}
 
   /** the joints line i and the lines before it on the same frame have values for (one set, made again each ask) */
   private sentSet = new Set<number>();
   sentOn(i: number): ReadonlySet<number> {
     const out = this.sentSet;
     out.clear();
+    const { flat, start, end } = this.src;
     for (let k = i; k >= 0 && this.frames[k] === this.frames[i]; k--) {
-      const e = this.lines[k];
-      let at = this.first;
-      while (at < e.length) {
-        out.add(Number(e[at]));
-        let mask = Number(e[at + 1]);
+      const l = this.lines[k];
+      let at = start[l];
+      while (at < end[l]) {
+        out.add(flat[at]);
+        let mask = flat[at + 1];
         at += 2;
         while (mask) { at += mask & 1; mask >>>= 1; }
       }
@@ -217,15 +224,16 @@ class PoseStream {
     return this.pose;
   }
 
-  private play(e: TrackEvent) {
-    const joints = this.pose.joints, w = this.width;
-    let i = this.first;
-    while (i < e.length) {
-      const j = Number(e[i++]);
-      const mask = Number(e[i++]);
+  private play(l: number) {
+    const joints = this.pose.joints, w = this.width, { flat, end } = this.src;
+    let i = this.src.start[l];
+    const e = end[l];
+    while (i < e) {
+      const j = flat[i++];
+      const mask = flat[i++];
       let v = joints.get(j);
       if (!v) joints.set(j, (v = new Float32Array(w).fill(NaN)));
-      for (let k = 0; k < w; k++) if (mask & (1 << k)) v[k] = Number(e[i++]);
+      for (let k = 0; k < w; k++) if (mask & (1 << k)) v[k] = flat[i++];
     }
   }
 }
@@ -254,6 +262,8 @@ export class ViewerTrack {
   private instants = new Map<string, TrackEvent[]>();
   /** every instant, in the order the track has them (within a frame too) */
   private allInstants: TrackEvent[] = [];
+  /** the pose lines, compact, by type (TrackData.poses, or made here from a track's pose events) */
+  private poses = new Map<string, PoseLines>();
   readonly seconds: number;
   /** the track's version (TrackData.version) */
   readonly version: number;
@@ -262,8 +272,9 @@ export class ViewerTrack {
   readonly until: number;
 
   constructor(data: TrackData) {
-    // (a track handed over with its floats still as words: read them now)
-    if (!data.decoded) { decodeTrackFloats(data.events); data.decoded = true; }
+    // (a track handed over with its floats still as words (a JSON track): read below, those of the events kept - a
+    // pose line's words go straight into its lines' floats, poseLinesOf, not made numbers in the events first)
+    const words = !data.decoded;
     this.seconds = data.seconds ?? 0;
     this.version = data.version ?? 0;
     // (a track that says it is not exact without saying where holds for none of it)
@@ -273,8 +284,18 @@ export class ViewerTrack {
                                               e[0] < this.until);
     // (a stable sort: two changes on one frame keep the order they were made in)
     events.sort((a, b) => a[0] - b[0]);
+    // (the pose lines kept compact: those read so (readTrack), and a JSON track's pose events, made so here)
+    const poseEvents = new Map<string, TrackEvent[]>();
+    for (const [type, lines] of Object.entries(data.poses ?? {})) this.poses.set(type, lines);
     for (const e of events) {
       const type = e[1], n = KEYS[type];
+      if (type in POSES) {
+        let list = poseEvents.get(type);
+        if (!list) poseEvents.set(type, (list = []));
+        list.push(e);
+        continue;
+      }
+      if (words) decodeEventFloats(e);
       if (n === undefined) {
         let list = this.instants.get(type);
         if (!list) this.instants.set(type, (list = []));
@@ -289,11 +310,36 @@ export class ViewerTrack {
       if (!list) byKey.set(key, (list = []));
       list.push(e);
     }
+    for (const [type, list] of poseEvents) {
+      const how = POSES[type];
+      this.poses.set(type, poseLinesOf(list, how.key + (how.links ? 1 : 0)));
+    }
   }
 
   /** whether the track says anything of this type (else the replay's way is used) */
   has(type: string): boolean {
-    return this.states.has(type) || this.instants.has(type);
+    return this.states.has(type) || this.instants.has(type) || this.poses.has(type);
+  }
+
+  /** a pose type's lines before `until`, by owner (its first `key` head numbers joined by ":"): line indices */
+  private ownersOf(type: string): Map<string, number[]> {
+    const src = this.poses.get(type)!, how = POSES[type], out = new Map<string, number[]>();
+    const { h, heads, frames } = src;
+    for (let l = 0; l < frames.length; l++) {
+      if (frames[l] >= this.until) continue;
+      let key = String(heads[l * h]);
+      for (let k = 1; k < how.key; k++) key += ":" + heads[l * h + k];
+      let list = out.get(key);
+      if (!list) out.set(key, (list = []));
+      list.push(l);
+    }
+    // (in frame order, two lines of a frame as they came: as the events' stable sort had them)
+    for (const list of out.values()) {
+      for (let k = 1; k < list.length; k++) {
+        if (frames[list[k]] < frames[list[k - 1]]) { list.sort((x, y) => frames[x] - frames[y] || x - y); break; }
+      }
+    }
+    return out;
   }
 
   /** whether it holds on this game frame (before the simulator's game went another way) */
@@ -466,32 +512,35 @@ export class ViewerTrack {
     if (byKey) return byKey;
     byKey = new Map();
     this.poseSnaps.set(type, byKey);
-    const how = POSES[type];
-    if (!how) return byKey;
-    for (const e of this.instants.get(type) ?? []) {
-      const key = e.slice(2, 2 + how.key).join(":");
-      let list = byKey.get(key);
-      if (!list) byKey.set(key, (list = []));
-      const prev = list.length ? list[list.length - 1] : null;
-      const joints = new Map(prev?.joints);
-      const out = how.out ? new Map(prev?.out) : null;
-      let i = 2 + how.key;
-      const links = how.links ? Number(e[i++]) : 0;
-      const sent = new Set<number>(prev && prev.frame === e[0] ? prev.sent : []);
-      while (i < e.length) {
-        const j = how.pair ? Number(e[i]) + LINK_JOINTS * Number(e[i + 1]) : Number(e[i]);
-        i += how.pair ? 2 : 1;
-        sent.add(j);
-        if (out) out.set(j, Number(e[i++]));
-        const mask = Number(e[i++]);
-        const had = joints.get(j);
-        const v = had ? Float32Array.from(had) : new Float32Array(how.width).fill(NaN);
-        for (let k = 0; k < how.width; k++) if (mask & (1 << k)) v[k] = Number(e[i++]);
-        joints.set(j, v);
+    const how = POSES[type], src = this.poses.get(type);
+    if (!how || !src) return byKey;
+    const { flat, start, end, heads, frames, h } = src;
+    for (const [key, lines] of this.ownersOf(type)) {
+      const list: PoseSnap[] = [];
+      byKey.set(key, list);
+      for (const l of lines) {
+        const frame = frames[l];
+        const prev = list.length ? list[list.length - 1] : null;
+        const joints = new Map(prev?.joints);
+        const out = how.out ? new Map(prev?.out) : null;
+        const links = how.links ? heads[l * h + how.key] : 0;
+        const sent = new Set<number>(prev && prev.frame === frame ? prev.sent : []);
+        let i = start[l];
+        while (i < end[l]) {
+          const j = how.pair ? flat[i] + LINK_JOINTS * flat[i + 1] : flat[i];
+          i += how.pair ? 2 : 1;
+          sent.add(j);
+          if (out) out.set(j, flat[i++]);
+          const mask = flat[i++];
+          const had = joints.get(j);
+          const v = had ? Float32Array.from(had) : new Float32Array(how.width).fill(NaN);
+          for (let k = 0; k < how.width; k++) if (mask & (1 << k)) v[k] = flat[i++];
+          joints.set(j, v);
+        }
+        // (two lines of one owner on a frame: the second holds both)
+        if (prev && prev.frame === frame) list.pop();
+        list.push({ frame, joints, out, links, sent });
       }
-      // (two lines of one owner on a frame: the second holds both)
-      if (prev && prev.frame === e[0]) list.pop();
-      list.push({ frame: e[0], joints, out, links, sent });
     }
     return byKey;
   }
@@ -504,13 +553,12 @@ export class ViewerTrack {
     if (byKey) return byKey;
     byKey = new Map();
     this.poseStreams.set(type, byKey);
-    const how = POSES[type];
-    for (const e of this.instants.get(type) ?? []) {
-      const key = e.slice(2, 2 + how.key).join(":");
-      let s = byKey.get(key);
-      if (!s) byKey.set(key, (s = new PoseStream(2 + how.key, how.width)));
-      s.frames.push(e[0]);
-      s.lines.push(e);
+    const how = POSES[type], src = this.poses.get(type);
+    if (!src) return byKey;
+    for (const [key, lines] of this.ownersOf(type)) {
+      const s = new PoseStream(src, how.width);
+      byKey.set(key, s);
+      for (const l of lines) { s.frames.push(src.frames[l]); s.lines.push(l); }
     }
     return byKey;
   }
@@ -519,7 +567,7 @@ export class ViewerTrack {
    *  item spawn id, "fp" and "fj" by `port:sub:character`, "sp" by stage part. A streamed type's ("sp",
    *  "fj") is the owner's one pose, played to the frame: good until the next ask for the same owner */
   pose(type: string, key: string, frame: number): TrackPose | null {
-    if (frame >= this.until || !this.instants.has(type)) return null;
+    if (frame >= this.until || !this.poses.has(type)) return null;
     if (STREAMED.has(type)) {
       const s = this.streamsOf(type).get(key);
       if (!s || !s.frames.length || s.frames[0] > frame) return null;
@@ -546,7 +594,7 @@ export class ViewerTrack {
    *  no line then, null when the track has no lines of the owner's at or before it. A streamed type's ("sp",
    *  "fj") is good until the next ask */
   poseSent(type: string, key: string, frame: number): ReadonlySet<number> | null {
-    if (frame >= this.until || !this.instants.has(type)) return null;
+    if (frame >= this.until || !this.poses.has(type)) return null;
     if (!STREAMED.has(type)) {
       const at = this.pose(type, key, frame) as PoseSnap | null;
       return at ? (at.frame === frame ? at.sent : NONE_SENT) : null;
@@ -570,20 +618,23 @@ export class ViewerTrack {
     if (!byKey) {
       byKey = new Map();
       this.partFrames.set(type, byKey);
-      const how = POSES[type];
-      for (const e of this.instants.get(type) ?? []) {
-        const k = e.slice(2, 2 + how.key).join(":");
-        let parts = byKey.get(k);
-        if (!parts) byKey.set(k, (parts = new Map()));
-        let i = 2 + how.key;
-        while (i < e.length) {
-          const part = Number(e[i]);
-          let mask = Number(e[i + 1]);
-          i += 2;
-          let list = parts.get(part);
-          if (!list) parts.set(part, (list = []));
-          if (list[list.length - 1] !== e[0]) list.push(e[0]);
-          while (mask) { i += mask & 1; mask >>>= 1; }
+      const src = this.poses.get(type);
+      for (const [k, lines] of src ? this.ownersOf(type) : []) {
+        const parts = new Map<number, number[]>();
+        byKey.set(k, parts);
+        const { flat, start, end, frames } = src!;
+        for (const l of lines) {
+          const frame = frames[l];
+          let i = start[l];
+          while (i < end[l]) {
+            const part = flat[i];
+            let mask = flat[i + 1];
+            i += 2;
+            let list = parts.get(part);
+            if (!list) parts.set(part, (list = []));
+            if (list[list.length - 1] !== frame) list.push(frame);
+            while (mask) { i += mask & 1; mask >>>= 1; }
+          }
         }
       }
     }

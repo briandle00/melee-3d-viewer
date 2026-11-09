@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { gunzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { decodeTrackFloats, readTrack } from "../src/render3d/trackcodec.ts";
+import { decodeTrackFloats, readTrack, trackEvents } from "../src/render3d/trackcodec.ts";
 import { ViewerTrack } from "../src/render3d/track.ts";
 import { readGameFile, withGameFiles } from "./game-files.ts";
 
@@ -36,9 +36,10 @@ test("the compact form's \"fh\" lines read back to the JSON's, bit for bit", () 
   const want = JSON.parse(readFileSync(dir + "track-fh.json", "utf8"));
   decodeTrackFloats(want.events);
   const got = readTrack(new Uint8Array(gunzipSync(readFileSync(dir + "track-fh.vtb"))));
-  assert.equal(got.events.length, want.events.length);
+  const all = trackEvents(got);
+  assert.equal(all.length, want.events.length);
   want.events.forEach((a: (number | string)[], i: number) => {
-    a.forEach((v, k) => assert.ok(Object.is(v, got.events[i][k]), `event ${i} (${a[1]}) value ${k}`));
+    a.forEach((v, k) => assert.ok(Object.is(v, all[i][k]), `event ${i} (${a[1]}) value ${k}`));
   });
   assert.ok(new ViewerTrack(got).pose("fh", "1:0:15", 59)!.joints.has(3));
 });

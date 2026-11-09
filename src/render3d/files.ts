@@ -24,7 +24,7 @@ import { HudKit, stageMagnifierColors } from "./hud";
 import { bgFlashTables } from "./fx/bgflash";
 import type { ColAnimTables } from "./fx/colanim";
 import { pageCache, sharedPromise, trim } from "../state/pageCache";
-import { decodeTrack, decodeTrackFloats } from "./trackcodec";
+import { decodeTrack } from "./trackcodec";
 import { motionTableFromDol, textFontFromDol } from "./dol";
 import { plateFontFromText } from "./plates";
 import type { ViewerTrack } from "./track";
@@ -214,7 +214,8 @@ export async function trackAnswer(replayUrl: string): Promise<unknown | null> {
     // (the compact form, trackcodec.ts, is gzipped; the simulator's export is JSON)
     if (u[0] === 0x1f && u[1] === 0x8b) return { state: "ready", track: await decodeTrack(buf) };
     const t = JSON.parse(new TextDecoder().decode(u));
-    if (t && Array.isArray(t.events)) { decodeTrackFloats(t.events); t.decoded = true; return { state: "ready", track: t }; }
+    // (its floats still words: the ViewerTrack made of it reads them, a pose line's straight into its lines)
+    if (t && Array.isArray(t.events)) return { state: "ready", track: t };
     return t?.state ? t : { state: "none", reason: "not a viewer track" };
   } catch {
     return null;
