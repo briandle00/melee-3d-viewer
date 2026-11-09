@@ -422,7 +422,10 @@ export class ParticleSystem {
   endOwned(g: Generator) {
     if (!g.dead) {
       if (g.srt && !g.srt.player && (g.type & 0x100) && g.gameSrt !== false) g.type |= 0x80;
-      if (!this.release(g)) { g.follow = null; g.onJoint = false; }
+      // (one that stays - a particle of its is left - keeps its joint: hsd_8039D3AC leaves gen->jobj, and each
+      // generator pass still takes it to the joint, hsd_8039D214; a child generator one of its particles makes is
+      // on that joint too)
+      this.release(g);
     }
     this.passed();
   }
@@ -433,7 +436,10 @@ export class ParticleSystem {
   end(g: Generator, withParticles = false) {
     if (!g.dead) {
       if (withParticles) g.type |= 0x80;
-      if (!this.release(g)) { g.follow = null; g.onJoint = false; }
+      // (one that stays - a particle of its is left - keeps its joint: hsd_8039D3AC leaves gen->jobj, and each
+      // generator pass still takes it to the joint, hsd_8039D214; a child generator one of its particles makes is
+      // on that joint too)
+      this.release(g);
     }
     this.passed();
   }
