@@ -23,7 +23,7 @@
  */
 import { AObj, Archive, Image, JObj, MatAnim, loadAnimJoint, loadJoint, loadMatAnimJoint, parseArchive, ptr } from "./hsd";
 import { applyMatAnim, Skeleton } from "./skeleton";
-import { ident, lookAt, Mat, mul } from "./math";
+import { ident, Mat, mul } from "./math";
 import { gameProjection, gameView } from "./camera";
 import { C_MTXOrtho, madd, projectionToGL, type Mtx } from "./gxmath";
 import { atan2f } from "./fx/gamemath";
@@ -58,11 +58,20 @@ interface Renderer {
   overlay(proj: Mat, view: Mat, target?: unknown, clear?: [number, number, number, number] | null, mirrored?: boolean,
           gx?: Float32Array | null): void;
   endOverlay(): void;
+  setLightsView(v: Float32Array | null): void;
   target(w: number, h: number): RenderTarget;
   bindImage(image: Image, tex: unknown): void;
   warm(sk: Skeleton): void;
   drawParticles(data: Float32Array, batches: ReturnType<typeof buildParticles>["batches"]): void;
   readonly pictureHeight: number;
+}
+
+/** the magnifier camera's view of a fighter (GL, column major), from its camera box bone_pos: ifMagnify_802FBBDC's
+ *  HSD_CObjSetInterest(bone), interest_pos.z = 300.0f, HSD_CObjSetEyePosition - roll 0 (ifMagnify_803F97E8) - and
+ *  the view HSD_CObjSetupViewingMtx makes of them, in float32 (camera.ts gameView). The fighters' lights in the
+ *  pictures are set up through the view the last picture left (Hud.draw) */
+export function magnifierView(out: Float32Array, bone: ArrayLike<number>): Float32Array {
+  return gameView(out, [bone[0], bone[1], 300], [bone[0], bone[1], bone[2]]);
 }
 
 interface ModelDesc { joint: number; anims: number[]; mats: number[] }
@@ -588,6 +597,11 @@ export class Hud {
     const magnified: { p: Hud["players"][number]; sx: number; sy: number }[] = [];
     // (the magnifier waits for the HUD to be on: the match clock's start, frame 0)
     if (gameFrame >= 0) {
+      // (the fighters' lights in the pictures: set up once, through the magnifier's camera as the frame before left
+      // it - its last picture's view - before it moves to each fighter: ifMagnify_802FBBDC's first
+      // HSD_CObjSetCurrent and HSD_GObj_80390ED0(gobj, 7))
+      const lit = Float32Array.from(this.magView);
+      r.setLightsView(lit);
       for (const p of this.players) {
         const a = actors.find((x) => x.player === p.slot);
         // (not for one KO'd, asleep or coming back on the angel platform: ftLib_80086ED0)
@@ -610,6 +624,7 @@ export class Hud {
         magnified.push({ p, sx: px, sy: py });
         out.magnified.push(p.slot);
       }
+      r.setLightsView(null);
     }
     // --- the tags over the fighters: a flat 640 x 480 camera, pixel units. fn_802FCC44 places each in the HUD's
     // procs (17), before Fighter_procPlayer (22) writes the frame's place to the player's record and before the
@@ -889,6 +904,8 @@ export class Hud {
 
   /** the magnifier's picture: the fighter from in front, flat, framed on its
    *  camera bone, over the stage's colors for where it is (ifmagnify.c) */
+  /** the magnifier camera's view as its last picture left it (GL; at first its CObjDesc's: eye (0, 0, 300), interest 0) */
+  private magView = gameView(new Float32Array(16), [0, 0, 300], [0, 0, 0]);
   private picture(r: Renderer, pic: RenderTarget, a: HudActor) {
     const [bx, by, bz] = a.bone!;
     // (ifMagnify_802FBBDC, in float32: the camera's ortho rect - ifMagnify_802FC618 made it 0.1f times the 64 by 64
@@ -901,7 +918,10 @@ export class Hud {
     C_MTXOrtho(this.picGx, top, bottom, left, right, 0.1, 32768);
     projectionToGL(this.picGx, this.picProj);
     for (const k of [1, 5, 9, 13]) this.picProj[k] = -this.picProj[k];
-    const view = gameView(new Float32Array(16), [bx, by, 300], [bx, by, bz]);
+    // (the view: magnifierView, the game's float32 HSD_CObjSetupViewingMtx with the eye at z 300; kept for the lights,
+    // which the game sets through the view the previous frame's last picture left)
+    const view = magnifierView(new Float32Array(16), [bx, by, bz]);
+    this.magView.set(view);
     const bg = this.background(a.st.xPosition, a.st.yPosition);
     r.overlay(this.picProj, view, pic, [bg[0], bg[1], bg[2], 1], true, this.picGx);
     a.draw();

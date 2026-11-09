@@ -2067,6 +2067,20 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       kirbyStars.set(a, out);
       return out;
     };
+    // the camera box's bone_pos of a fighter, as the game's camera code reads it (the shadow camera's and the
+    // magnifier's): lb_8000B1CC - the camera joint's matrix (ftLib_800866DC: attributes +0x16C name it by its place
+    // in the fighter's bone list, fp->parts) times the attributes' offset, PSMTXMultVec, or its move when the offset
+    // is 0; kept through a state whose camera callback does not take it (shadow.ts cameraBoxBone); null without
+    // the joint
+    const boxBone = (fi: Fighter, a: Actor): number[] | null => {
+      const joint = partToModelJoint(a.st.internalCharacterId, fi.cameraPart);
+      if (joint < 0 || joint >= fi.skeleton.n) return null;
+      const o = fi.cameraOffset;
+      const M = mtxFromGL(fi.skeleton.world, shadowJoint, joint * 16);
+      const now = o[0] || o[1] || o[2] ? PSMTXMultVec(M, o, [0, 0, 0]) as number[] : [M[3], M[7], M[11]];
+      const at = (g: number) => { const q = data.frames[g]?.players[a.player]; return (a.nana ? q?.nanaState : q?.state)?.actionStateId ?? -1; };
+      return cameraBoxBone(cameraBones, actorKey(a.player, a.nana), fno, now, at);
+    };
     // the fighters' shadows (shadow.ts): each drawn flat into its own picture
     // through its shadow camera, before the stage, which takes them
     const shadowMaps: { tex: WebGLTexture; mtx: Float32Array; y: number; laid: boolean }[] = [];
@@ -2076,16 +2090,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // (the shadow's camera on the fighter's camera bone, ftLib_800866DC: attributes +0x16C name it by its
       // place in the fighter's bone list, fp->parts, not by a common part's name)
       const cameraOf = (fi: Fighter, a: Actor) => {
-        const joint = partToModelJoint(a.st.internalCharacterId, fi.cameraPart);
-        if (joint < 0 || joint >= fi.skeleton.n) return null;
-        // (bone_pos: lb_8000B1CC - the joint's matrix times the attributes' offset, PSMTXMultVec, or its move when
-        // the offset is 0; the depth: ftCamera_80076018's xC.z times the fighter's scale.y, in single precision)
-        const o = fi.cameraOffset;
-        const M = mtxFromGL(fi.skeleton.world, shadowJoint, joint * 16);
-        const now = o[0] || o[1] || o[2] ? PSMTXMultVec(M, o, [0, 0, 0]) as number[] : [M[3], M[7], M[11]];
-        const at = (g: number) => { const q = data.frames[g]?.players[a.player]; return (a.nana ? q?.nanaState : q?.state)?.actionStateId ?? -1; };
-        const bone = cameraBoxBone(cameraBones, actorKey(a.player, a.nana), fno, now, at);
-        return shadowCamera(sl.pos, sl.interest, bone, Math.fround(Math.fround(fi.cameraBox?.v[2] ?? 0) * Math.fround(scales[a.player] ?? 1)));
+        const bone = boxBone(fi, a);
+        return bone ? shadowCamera(sl.pos, sl.interest, bone, Math.fround(Math.fround(fi.cameraBox?.v[2] ?? 0) * Math.fround(scales[a.player] ?? 1))) : null;
       };
       for (const a of actors) {
         const p = posed.find((q) => q.a === a);
@@ -2724,7 +2730,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const magnify = drawn || (trackHidden(a) && !(hideBits(a) & 1) && !hidden(a.st));
         // (the camera bone: its place in the fighter's bone list, ftLib_800866DC; the model's joint past its
         // part list's gaps, parts.ts)
-        const bone = magnify ? cameraBone(fi, a.st) : null;
+        const bone = magnify ? (boxBone(fi, a) as [number, number, number] | null) ?? cameraBone(fi, a.st) : null;
         // (where the player's record has it when the tag is placed: the frame before's place, hud.ts)
         const pst = data.frames[fno - 1]?.players[a.player]?.state;
         const pko = pst && gone(pst) ? koAt(data, fno - 1, a.player, false, pst, camInvAt(fno - 1)) : null;
