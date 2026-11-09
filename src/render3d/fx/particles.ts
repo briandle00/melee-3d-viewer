@@ -13,7 +13,7 @@
 import { CmdList, EffectBank } from "./bank";
 import { atan2f, cosf, sinf, tanf } from "./gamemath";
 import { APP_ONCE, appMatrix, mtxGetScale, mtxSRT } from "./appsrt";
-import { madd } from "../gxmath";
+import { madd, msub, nmsub, PSMTXConcat, PSMTXIdentity, PSMTXMultVec, PSVECNormalize, sqrtf } from "../gxmath";
 
 // particle kind bits (HSD_ParticleKind)
 export const K = {
@@ -200,6 +200,10 @@ export interface Generator {
 }
 
 const TAU = Math.PI * 2;
+/** the game's float constants: FLT_MIN (1.1754944e-38F), FLT_EPSILON (1.1920929e-7F), 1.5707964F, and the sphere's
+ *  0.001F (a double of that float) */
+const FLT_MIN = Math.fround(1.1754944e-38), EPSILON = Math.fround(1.1920929e-7), HALF_PI = Math.fround(Math.PI / 2);
+const SPHERE_EPS = Math.fround(0.001);
 
 const f32 = Math.fround;
 
@@ -241,7 +245,7 @@ export class ParticleSystem {
       cmd: c.cmd, radius: c.radius, angle: c.angle, random: c.random, count: 0, aux: [],
       follow: null, srt: null, numChild: 0, dead: false, maxAge: 600, age: 0, uid: ++this.madeCount, made: "own",
     };
-    if (g.kind & 0x100) g.count = g.random < 0 ? (1 + g.random > 1.1920929e-7 ? 1 : 0) : f32(0.9999999);
+    if (g.kind & 0x100) g.count = g.random < 0 ? (f32(1 + g.random) > EPSILON ? 1 : 0) : f32(0.9999999);
     else if (g.random < 0) g.count = 0;
     else {
       const was = [this.rng.kind, this.rng.cmd];
@@ -260,12 +264,12 @@ export class ParticleSystem {
       g.aux = [c.param1, c.param2, c.param3, c.param1, 0, 0, 0, c.param2, 0, 0, 0, c.param3,
                (c.param1 < 0 ? 1 : 0) | (c.param2 < 0 ? 2 : 0) | (c.param3 < 0 ? 4 : 0)];
     } else if (shape === 8) {
-      const speed = Math.hypot(g.vx, g.vy, g.vz);
-      const mag = Math.hypot(g.vx, g.vz);
-      let lat = Math.abs(c.param1), sp = speed;
-      if (c.param1 < 0) sp = -sp;
-      g.aux = [sp, mag < 1e-30 ? (g.vy >= 0 ? Math.PI / 2 : -Math.PI / 2) : atan2f(g.vy, mag),
-               Math.abs(g.vx) < 1e-30 ? (g.vz >= 0 ? Math.PI / 2 : -Math.PI / 2) : atan2f(g.vz, g.vx), lat, c.param2];
+      // (hsd_8039F05C: sqrtf of vz^2 + (vx^2 + vy^2) and of vx^2 + vz^2, each product and sum rounded)
+      const speed = sqrtf(f32(f32(g.vz * g.vz) + f32(f32(g.vx * g.vx) + f32(g.vy * g.vy))));
+      const mag = sqrtf(f32(f32(g.vx * g.vx) + f32(g.vz * g.vz)));
+      const lat = Math.abs(c.param1), sp = c.param1 < 0 ? -speed : speed;
+      g.aux = [sp, mag < FLT_MIN ? (g.vy >= 0 ? HALF_PI : -HALF_PI) : atan2f(g.vy, mag),
+               Math.abs(g.vx) < FLT_MIN ? (g.vz >= 0 ? HALF_PI : -HALF_PI) : atan2f(g.vz, g.vx), lat, c.param2];
     }
     // (one whose particles go under a transform of its own)
     if (g.kind & 0x20000) {
@@ -356,7 +360,7 @@ export class ParticleSystem {
       g.age++;
       this.follow(g);
       if (g.random < 0) g.count = f32(g.count - g.random);
-      else { this.rng.kind = 2; this.rng.cmd = g.cmdId; g.count = f32(g.count + f32(g.random * this.rng.next())); }
+      else { this.rng.kind = 2; this.rng.cmd = g.cmdId; g.count = madd(g.random, this.rng.next(), g.count); }
       if (g.count >= 1) g.count = this.emit(g);
       if (g.genLife !== 0) {
         g.genLife--;
@@ -441,14 +445,18 @@ export class ParticleSystem {
   placeOnce(g: Generator, w: Float32Array) {
     if (g.type & 0x200) { g.px = w[12]; g.py = w[13]; g.pz = w[14]; }
     if ((g.type & 0x800) && g.srt && g.srt.owner === g) { g.srt.tx = w[12]; g.srt.ty = w[13]; g.srt.tz = w[14]; }
+    // (the joint's three axes PSVECNormalize'd, the motion through them: col0 * vx + col1 * vy + col2 * vz, two fmadds
+    // on the col1 product)
     const r = turnOf(w);
     const [vx, vy, vz] = [g.vx, g.vy, g.vz];
-    g.vx = f32(r[0] * vx + r[1] * vy + r[2] * vz);
-    g.vy = f32(r[3] * vx + r[4] * vy + r[5] * vz);
-    g.vz = f32(r[6] * vx + r[7] * vy + r[8] * vz);
+    g.vx = madd(r[2], vz, madd(r[0], vx, f32(r[1] * vy)));
+    g.vy = madd(r[5], vz, madd(r[3], vx, f32(r[4] * vy)));
+    g.vz = madd(r[8], vz, madd(r[6], vx, f32(r[7] * vy)));
     if ((g.type & 0xf) === 1) {
+      // (the line through the joint's matrix itself, unnormalized: mtx[r][0] ax + mtx[r][1] ay + mtx[r][2] az)
       const [ax, ay, az] = g.aux;
-      g.aux = [f32(w[0] * ax + w[4] * ay + w[8] * az), f32(w[1] * ax + w[5] * ay + w[9] * az), f32(w[2] * ax + w[6] * ay + w[10] * az)];
+      g.aux = [madd(w[8], az, madd(w[0], ax, f32(w[4] * ay))), madd(w[9], az, madd(w[1], ax, f32(w[5] * ay))),
+               madd(w[10], az, madd(w[2], ax, f32(w[6] * ay)))];
     }
     g.follow = null;
     g.onJoint = false;
@@ -620,59 +628,63 @@ export class ParticleSystem {
   }
 
   private emitInner(g: Generator): number {
+    // hsd_8039DAD4, a step at a time in single precision as main.dol takes it (-fp_contract: a * b + c one fmadds)
     const R = this.rng;
-    const speed = f32(Math.sqrt(f32(f32(g.vz * g.vz) + f32(f32(g.vx * g.vx) + f32(g.vy * g.vy)))));
-    // the emission frame: identity, or along the velocity
-    let m = [1, 0, 0, 0, 1, 0, 0, 0, 1]; // row-major 3x3
+    // (the velocity's length: sqrtf of vz^2 + (vx^2 + vy^2), each product and sum rounded, no fused step)
+    const speed = sqrtf(f32(f32(g.vz * g.vz) + f32(f32(g.vx * g.vx) + f32(g.vy * g.vy))));
+    // the emission frame (rot_mtx): identity, the joint's turn (each axis PSVECNormalize'd), then along the velocity
+    const rot = PSMTXIdentity(this.emitRot);
     const shape = g.type & 0xf;
-    if (shape !== 1 && speed > 1.1920929e-7) {
-      const nx = f32(g.vx / speed), ny = f32(g.vy / speed), nz = f32(g.vz / speed);
-      const az = f32(Math.abs(nz) < 1.1754944e-38 ? (ny >= 0 ? Math.PI / 2 : -Math.PI / 2) : atan2f(ny, nz));
-      const ca = sinf(az), sa = cosf(az); // the game's names are swapped; its values are kept
-      const pz = f32(f32(ny * ca) + f32(nz * sa));
-      const el = f32(Math.abs(pz) < 1.1754944e-38 ? (nx >= 0 ? Math.PI / 2 : -Math.PI / 2) : atan2f(nx, pz));
-      const se = sinf(el), ce = cosf(el);
-      m = [ce, 0, se, f32(-ca * se), sa, f32(ca * ce), f32(-sa * se), -ca, f32(sa * ce)];
-    }
-    // (made on a joint: the joint's turn, then the frame along the velocity)
     let r = g.rot;
     if (!r && g.follow && (g.type & 0x500) === 0x500 && !(g.kind & 0x30000)) {
       const w = g.follow(g);
       if (w) r = turnOf(w);
     }
     if (r && !(g.kind & 0x30000)) {
-      m = [r[0] * m[0] + r[1] * m[3] + r[2] * m[6], r[0] * m[1] + r[1] * m[4] + r[2] * m[7], r[0] * m[2] + r[1] * m[5] + r[2] * m[8],
-           r[3] * m[0] + r[4] * m[3] + r[5] * m[6], r[3] * m[1] + r[4] * m[4] + r[5] * m[7], r[3] * m[2] + r[4] * m[5] + r[5] * m[8],
-           r[6] * m[0] + r[7] * m[3] + r[8] * m[6], r[6] * m[1] + r[7] * m[4] + r[8] * m[7], r[6] * m[2] + r[7] * m[5] + r[8] * m[8]];
+      rot[0] = r[0]; rot[1] = r[1]; rot[2] = r[2];
+      rot[4] = r[3]; rot[5] = r[4]; rot[6] = r[5];
+      rot[8] = r[6]; rot[9] = r[7]; rot[10] = r[8];
     }
-    m = m.map(f32);
-    const mul = (x: number, y: number, z: number) =>
-      [f32(m[0] * x + m[1] * y + m[2] * z), f32(m[3] * x + m[4] * y + m[5] * z), f32(m[6] * x + m[7] * y + m[8] * z)];
-    // (a tornado's two turns, off the emission frame)
+    if (shape !== 1 && speed > EPSILON) {
+      const n = PSVECNormalize([g.vx, g.vy, g.vz], this.emitN);
+      const az = Math.abs(n[2]) < FLT_MIN ? (n[1] >= 0 ? HALF_PI : -HALF_PI) : atan2f(n[1], n[2]);
+      const ca = sinf(az), sa = cosf(az); // (the game's names are swapped; its values are kept)
+      const pz = madd(n[1], ca, f32(n[2] * sa));
+      const el = Math.abs(pz) < FLT_MIN ? (n[0] >= 0 ? HALF_PI : -HALF_PI) : atan2f(n[0], pz);
+      const se = sinf(el), ce = cosf(el);
+      const t = this.emitTrig;
+      t[0] = ce; t[1] = 0; t[2] = se; t[3] = 0;
+      t[4] = f32(-ca * se); t[5] = sa; t[6] = f32(ca * ce); t[7] = 0;
+      t[8] = f32(-sa * se); t[9] = -ca; t[10] = f32(sa * ce); t[11] = 0;
+      PSMTXConcat(rot, t, rot);
+    }
+    // (a tornado's two turns, off the emission frame: rot[1][2], rot[2][2], rot[0][2])
     let turn1 = 0, turn3 = 0;
     if (shape === 2) {
-      turn1 = Math.abs(m[8]) < 1e-30 ? (m[5] >= 0 ? Math.PI / 2 : -Math.PI / 2) : atan2f(m[5], m[8]);
-      const comb = m[8] * cosf(turn1) + m[5] * sinf(turn1);
-      turn3 = Math.abs(comb) < 1e-30 ? (m[2] >= 0 ? Math.PI / 2 : -Math.PI / 2) : atan2f(m[2], comb);
+      turn1 = Math.abs(rot[10]) < FLT_MIN ? (rot[6] >= 0 ? HALF_PI : -HALF_PI) : atan2f(rot[6], rot[10]);
+      const comb = madd(rot[6], sinf(turn1), f32(rot[10] * cosf(turn1)));
+      turn3 = Math.abs(comb) < FLT_MIN ? (rot[2] >= 0 ? HALF_PI : -HALF_PI) : atan2f(rot[2], comb);
     }
+    const ring = shape === 0 || shape === 3 || shape === 4 || shape === 6 || shape === 7;
     let curAngle = 0, step = 0;
     if (g.angle < 0) {
-      if (shape === 0 || shape === 3 || shape === 4 || shape === 6 || shape === 7) {
+      if (ring) {
         const rnd = R.next();
         step = f32(f32(g.aux[1] - g.aux[0]) / Math.trunc(g.count));
-        curAngle = f32(f32(step * rnd) + g.aux[0]);
+        curAngle = madd(step, rnd, g.aux[0]);
       } else {
-        curAngle = f32(Math.PI * R.next() * 2);
+        curAngle = f32(2 * (Math.PI * R.next()));
         step = f32(TAU / Math.trunc(g.count));
       }
     }
+    const e = this.emitE, v = this.emitV;
     while (g.count >= 1) {
-      if (shape === 0 || shape === 3 || shape === 4 || shape === 6 || shape === 7) {
+      if (ring) {
         let rr: number, radius: number;
         if (g.radius < 0) { rr = -g.radius; radius = 1; }
         else {
           radius = R.next();
-          if (shape === 3 || shape === 4) radius = f32(Math.sqrt(radius));
+          if (shape === 3 || shape === 4) radius = sqrtf(radius);
           rr = f32(radius * g.radius);
         }
         let cone: number;
@@ -680,83 +692,94 @@ export class ParticleSystem {
           const h = g.aux[2];
           if (g.angle < 0) {
             curAngle = f32(curAngle + step);
-            cone = f32(Math.abs(rr) < 1e-30 ? (h >= 0 ? -g.angle : Math.PI - g.angle) : Math.PI / 2 - f32(atan2f(h, rr)) - g.angle);
+            cone = Math.abs(rr) < FLT_MIN ? (h >= 0 ? -g.angle : f32(Math.PI - g.angle)) : f32(Math.PI / 2 - atan2f(h, rr) - g.angle);
           } else {
-            curAngle = f32(f32(f32(g.aux[1] - g.aux[0]) * R.next()) + g.aux[0]);
-            cone = f32(Math.abs(rr) < 1e-30 ? (h >= 0 ? g.angle : Math.PI + g.angle) : g.angle + (Math.PI / 2 - f32(atan2f(h, rr))));
+            curAngle = madd(f32(g.aux[1] - g.aux[0]), R.next(), g.aux[0]);
+            cone = Math.abs(rr) < FLT_MIN ? (h >= 0 ? g.angle : f32(Math.PI + g.angle)) : f32(g.angle + (Math.PI / 2 - atan2f(h, rr)));
           }
         } else if (shape === 7) {
           if (g.angle < 0) { cone = f32(Math.PI / 2 - g.angle); curAngle = f32(curAngle + step); }
-          else { curAngle = f32(f32(f32(g.aux[1] - g.aux[0]) * R.next()) + g.aux[0]); cone = f32(Math.PI / 2 + g.angle); }
+          else { curAngle = madd(f32(g.aux[1] - g.aux[0]), R.next(), g.aux[0]); cone = f32(Math.PI / 2 + g.angle); }
         } else if (g.angle < 0) {
           curAngle = f32(curAngle + step);
           cone = f32(radius * -g.angle);
         } else {
-          curAngle = f32(f32(f32(g.aux[1] - g.aux[0]) * R.next()) + g.aux[0]);
           cone = f32(radius * g.angle);
+          curAngle = madd(f32(g.aux[1] - g.aux[0]), R.next(), g.aux[0]);
         }
-        let ex = f32(rr * cosf(curAngle)), ey = f32(rr * sinf(curAngle)), ez = 0;
+        e[0] = f32(rr * cosf(curAngle)); e[1] = f32(rr * sinf(curAngle)); e[2] = 0;
         if (shape === 6 || shape === 7) {
-          ez = R.next();
-          if (shape === 6) { ex *= 1 - ez; ey *= 1 - ez; }
-          ez *= g.aux[2];
+          e[2] = R.next();
+          if (shape === 6) { const k = f32(1 - e[2]); e[0] = f32(e[0] * k); e[1] = f32(e[1] * k); }
+          e[2] = f32(e[2] * g.aux[2]);
         }
         const sc = f32(speed * sinf(cone));
-        let vx = f32(sc * cosf(curAngle)), vy = f32(sc * sinf(curAngle)), vz = f32(speed * cosf(cone));
-        if (shape === 3) { vx *= radius; vy *= radius; vz *= radius; }
-        const e = mul(ex, ey, ez), v = mul(vx, vy, vz);
+        v[0] = f32(sc * cosf(curAngle)); v[1] = f32(sc * sinf(curAngle)); v[2] = f32(speed * cosf(cone));
+        if (shape === 3) { v[0] = f32(v[0] * radius); v[1] = f32(v[1] * radius); v[2] = f32(v[2] * radius); }
+        PSMTXMultVec(rot, e, e);
+        PSMTXMultVec(rot, v, v);
         this.spawn(g, g.bank, g.kind, g.texGroup, g.cmd, g.life, f32(e[0] + g.px), f32(e[1] + g.py), f32(e[2] + g.pz),
                    v[0], v[1], v[2], g.size, g.grav, g.fric, true);
       } else if (shape === 1) {
-        const r = R.next();
-        const e = mul(r * g.aux[0], r * g.aux[1], r * g.aux[2]);
-        const v = mul(g.vx, g.vy, g.vz);
+        const rnd = R.next();
+        e[0] = f32(rnd * g.aux[0]); e[1] = f32(rnd * g.aux[1]); e[2] = f32(rnd * g.aux[2]);
+        PSMTXMultVec(rot, e, e);
+        v[0] = g.vx; v[1] = g.vy; v[2] = g.vz;
+        PSMTXMultVec(rot, v, v);
         this.spawn(g, g.bank, g.kind, g.texGroup, g.cmd, g.life, f32(e[0] + g.px), f32(e[1] + g.py), f32(e[2] + g.pz),
                    v[0], v[1], v[2], g.size, g.grav, g.fric, true);
       } else if (shape === 5) {
         let ex = R.next(), ey = R.next(), ez = R.next();
-        const [sx, sy, sz] = g.aux, flag = g.aux[12];
-        const edge = (v: number) => (v > 0.5 ? 1 : 0);
+        const a = g.aux, sx = a[0], sy = a[1], sz = a[2], flag = a[12];
+        const edge = (q: number) => (q > 0.5 ? 1 : 0);
         if (flag === 1) ex = edge(ex);
         else if (flag === 2) ey = edge(ey);
         else if (flag === 4) ez = edge(ez);
-        else if (flag === 3) { if (R.next() > sx / (sx + sy)) ey = edge(ey); else ex = edge(ex); }
-        else if (flag === 5) { if (R.next() > sx / (sx + sz)) ez = edge(ez); else ex = edge(ex); }
-        else if (flag === 6) { if (R.next() > sy / (sy + sz)) ez = edge(ez); else ey = edge(ey); }
+        else if (flag === 3) { if (R.next() > f32(sx / f32(sx + sy))) ey = edge(ey); else ex = edge(ex); }
+        else if (flag === 5) { if (R.next() > f32(sx / f32(sx + sz))) ez = edge(ez); else ex = edge(ex); }
+        else if (flag === 6) { if (R.next() > f32(sy / f32(sy + sz))) ez = edge(ez); else ey = edge(ey); }
         else if (flag === 7) {
-          const rnd = R.next(), r0 = 1 / (sx * (sy + sz) + sy * sz);
-          if (rnd < r0 * (sx * sy)) ez = edge(ez);
-          else if (rnd > 1 - r0 * (sx * sz)) ey = edge(ey);
+          const rnd = R.next(), r0 = f32(1 / madd(sx, f32(sy + sz), f32(sy * sz)));
+          if (rnd < f32(r0 * f32(sx * sy))) ez = edge(ez);
+          else if (rnd > nmsub(r0, f32(sx * sz), 1)) ey = edge(ey);
           else ex = edge(ex);
         }
-        ex -= 0.5; ey -= 0.5; ez -= 0.5;
-        const a = g.aux;
-        const e = mul(a[3] * ex + a[6] * ey + a[9] * ez, a[4] * ex + a[7] * ey + a[10] * ez, a[5] * ex + a[8] * ey + a[11] * ez);
-        const sc = speed / Math.hypot(a[9], a[10], a[11]);
-        const v = mul(a[9] * sc, a[10] * sc, a[11] * sc);
+        ex = f32(ex - 0.5); ey = f32(ey - 0.5); ez = f32(ez - 0.5);
+        // (the box's axes: xx a[3], xy a[4], xz a[5], yx a[6], yy a[7], yz a[8], zx a[9], zy a[10], zz a[11])
+        e[0] = madd(a[9], ez, madd(a[3], ex, f32(a[6] * ey)));
+        e[1] = madd(a[10], ez, madd(a[4], ex, f32(a[7] * ey)));
+        e[2] = madd(a[11], ez, madd(a[5], ex, f32(a[8] * ey)));
+        PSMTXMultVec(rot, e, e);
+        const mag = sqrtf(f32(f32(a[11] * a[11]) + f32(f32(a[9] * a[9]) + f32(a[10] * a[10]))));
+        const sc = f32(speed / mag);
+        v[0] = f32(a[9] * sc); v[1] = f32(a[10] * sc); v[2] = f32(a[11] * sc);
+        PSMTXMultVec(rot, v, v);
         this.spawn(g, g.bank, g.kind, g.texGroup, g.cmd, g.life, f32(e[0] + g.px), f32(e[1] + g.py), f32(e[2] + g.pz),
                    v[0], v[1], v[2], g.size, g.grav, g.fric, true);
       } else if (shape === 8) {
-        const rlat = g.aux[3];
+        // (aux[0] the speed, signed; aux[3] the latitude's range, the game's aux.sphere.latRange)
+        const r0 = g.aux[3];
         let lat: number;
-        if (rlat === 0 || Math.abs(rlat - Math.PI) < 0.001) {
-          lat = (Math.PI / 2) * Math.sqrt(R.next());
-          if (R.next() < 0.5) lat = Math.PI - lat;
-        } else lat = rlat * Math.sqrt(R.next());
-        const lon = TAU * R.next();
-        const rr = g.radius < 0 ? -g.radius : g.radius * Math.sqrt(R.next());
-        const dir = mul(sinf(lat) * cosf(lon), sinf(lat) * sinf(lon), cosf(lat));
-        let sv = g.aux[0];
-        let v = [dir[0] * sv, dir[1] * sv, dir[2] * sv];
-        if (g.radius >= 0 && sv < 0) { const k = rr / (g.radius || 1); v = v.map((c) => c * k); }
-        this.spawn(g, g.bank, g.kind, g.texGroup, g.cmd, g.life, rr * dir[0] + g.px, rr * dir[1] + g.py, rr * dir[2] + g.pz,
+        if (r0 === 0 || Math.abs(r0 - Math.PI) < SPHERE_EPS) {
+          lat = f32((Math.PI / 2) * sqrtf(R.next()));
+          if (R.next() < 0.5) lat = f32(Math.PI - lat);
+        } else lat = f32(r0 * sqrtf(R.next()));
+        const lon = f32(2 * (Math.PI * R.next()));
+        const rr = g.radius < 0 ? -g.radius : f32(g.radius * sqrtf(R.next()));
+        const sl = sinf(lat);
+        v[0] = f32(sl * cosf(lon)); v[1] = f32(sl * sinf(lon)); v[2] = cosf(lat);
+        PSMTXMultVec(rot, v, e);
+        const sp = g.aux[0];
+        v[0] = f32(e[0] * sp); v[1] = f32(e[1] * sp); v[2] = f32(e[2] * sp);
+        if (g.radius >= 0 && sp < 0) { const k = f32(rr / g.radius); v[0] = f32(v[0] * k); v[1] = f32(v[1] * k); v[2] = f32(v[2] * k); }
+        this.spawn(g, g.bank, g.kind, g.texGroup, g.cmd, g.life, madd(rr, e[0], g.px), madd(rr, e[1], g.py), madd(rr, e[2], g.pz),
                    v[0], v[1], v[2], g.size, g.grav, g.fric, true);
       } else if (shape === 2) {
         // a tornado: its particles circle the generator (their motion holds
         // the angle round it, how far out and how far along; run()'s own way)
         const out = g.radius < 0 ? 1 : R.next();
-        if (g.angle < 0) curAngle += step;
-        else curAngle = 2 * (Math.PI * R.next());
+        if (g.angle < 0) curAngle = f32(curAngle + step);
+        else curAngle = f32(2 * (Math.PI * R.next()));
         g.aux[0] = speed;
         this.spawn(g, g.bank, g.kind | K.TORNADO, g.texGroup, g.cmd, g.life, 0, 0, 0, curAngle, out, 0, g.size, turn1, turn3, true);
       }
@@ -764,6 +787,11 @@ export class ParticleSystem {
     }
     return g.count;
   }
+  private emitRot = new Float32Array(12);
+  private emitTrig = new Float32Array(12);
+  private emitN = new Float32Array(3);
+  private emitE = new Float32Array(3);
+  private emitV = new Float32Array(3);
 
   // ---------------------------------------------------------------- interpreter
 
@@ -788,21 +816,28 @@ export class ParticleSystem {
     if (p.life === 0) return this.remove(p, prev);
     if (p.kind & K.TORNADO) {
       // round its generator: out by the radius and the cone, along by its speed
+      // (hsd_8039930C's tornado step, single precision in main.dol's order)
       const g = p.gen!;
       const sinA = sinf(p.grav), sinB = sinf(p.fric), cosA = cosf(p.grav), cosB = cosf(p.fric);
       p.vz = f32(p.vz + (g.aux[0] ?? 0));
-      const R = f32((Math.abs(g.radius) + p.vz * tanf(Math.abs(g.angle))) * p.vy);
+      const R = f32(madd(p.vz, tanf(Math.abs(g.angle)), Math.abs(g.radius)) * p.vy);
       p.vx = f32(p.vx + g.grav);
-      const d = R * cosf(p.vx), e = R * sinf(p.vx), vz = p.vz;
-      p.px = f32(g.px + (d * cosB + vz * sinB));
-      p.py = f32(g.py + (cosB * (vz * sinA) + (sinB * (-d * sinA) + e * cosA)));
-      p.pz = f32(g.pz + (cosB * (vz * cosA) + (sinB * (-d * cosA) - e * sinA)));
+      const d = f32(R * cosf(p.vx)), e = f32(R * sinf(p.vx)), nd = -d, vz = p.vz;
+      p.px = f32(g.px + madd(d, cosB, f32(vz * sinB)));
+      p.py = f32(g.py + madd(cosB, f32(vz * sinA), madd(sinB, f32(nd * sinA), f32(e * cosA))));
+      p.pz = f32(g.pz + madd(cosB, f32(vz * cosA), msub(sinB, f32(nd * cosA), f32(e * sinA))));
     } else {
       if (p.kind & K.GRAV) p.vy = f32(p.vy - p.grav);
       if (p.kind & K.FRIC) { p.vx = f32(p.vx * p.fric); p.vy = f32(p.vy * p.fric); p.vz = f32(p.vz * p.fric); }
       p.px = f32(p.px + p.vx); p.py = f32(p.py + p.vy); p.pz = f32(p.pz + p.vz);
     }
-    if (p.kind & K.LEADS) this.leaders[(p.kind & 0x7000) >> 12] = [p.px, p.py, p.pz];
+    if (p.kind & K.LEADS) {
+      // (the game keeps a joint at it: made with no place, then moved by the difference to its matrix's place,
+      // HSD_JObjAddTranslationX/Y/Z of pos - mtx[r][3] - the place the others read back is that joint's)
+      const i = (p.kind & 0x7000) >> 12;
+      const t = this.leaders[i] ??= [0, 0, 0];
+      t[0] = f32(t[0] + f32(p.px - t[0])); t[1] = f32(t[1] + f32(p.py - t[1])); t[2] = f32(t[2] + f32(p.pz - t[2]));
+    }
     return p.next;
   }
 
@@ -829,7 +864,6 @@ export class ParticleSystem {
     const dv = new DataView(c.buffer, c.byteOffset, c.byteLength);
     const float = () => { const v = pc + 4 <= c.length ? dv.getFloat32(pc) : 0; pc += 4; return v; };
     const count = () => { let n = byte(); if (n & 0x80) n = ((n & 0x7f) << 8) + byte(); return n; };
-    const clamp = (v: number) => Math.max(0, Math.min(255, v)) | 0;
     // the color shown now, when a fade is under way (settles it before a new one)
     const settle = (cur: Col, target: Col, remain: number, n: number) => {
       if (!n) return;
@@ -853,9 +887,9 @@ export class ParticleSystem {
         if (cls > 0x98) { cls = op & 0xf0; if (cls !== 0xc0 && cls !== 0xd0) cls = op; }
         switch (cls) {
           case 0x80: if (op & 1) p.px = float(); if (op & 2) p.py = float(); if (op & 4) p.pz = float(); break;
-          case 0x88: if (op & 1) p.px += float(); if (op & 2) p.py += float(); if (op & 4) p.pz += float(); break;
+          case 0x88: if (op & 1) p.px = f32(p.px + float()); if (op & 2) p.py = f32(p.py + float()); if (op & 4) p.pz = f32(p.pz + float()); break;
           case 0x90: if (op & 1) p.vx = float(); if (op & 2) p.vy = float(); if (op & 4) p.vz = float(); break;
-          case 0x98: if (op & 1) p.vx += float(); if (op & 2) p.vy += float(); if (op & 4) p.vz += float(); break;
+          case 0x98: if (op & 1) p.vx = f32(p.vx + float()); if (op & 2) p.vy = f32(p.vy + float()); if (op & 4) p.vz = f32(p.vz + float()); break;
           case 0xa0: p.sizeCount = count(); p.sizeTarget = float(); if (!p.sizeCount) p.size = p.sizeTarget; break;
           case 0xa1: p.kind &= ~K.DISP_TEX; break;
           case 0xa2: p.grav = float(); p.kind = p.grav === 0 ? p.kind & ~K.GRAV : p.kind | K.GRAV; break;
@@ -866,11 +900,17 @@ export class ParticleSystem {
           case 0xef: case 0xf0: { const idx = (byte() << 8) + byte(); const fl = byte(); this.childGen(p, idx, fl); break; }
           case 0xa6: { const base = (byte() << 8) + byte(); const rnd = (byte() << 8) + byte(); p.life = (base + Math.trunc(f32(rnd * R.next()))) & 0xffff; break; }
           case 0xa7: { const t = byte(); if (t >= Math.trunc(f32(100 * R.next()))) { p.life = 1; p.pc = pc; p.wait = 0; return; } break; }
-          case 0xa8: { const x = float(), y = float(), z = float(); p.px += 2 * x * R.next() - x; p.py += 2 * y * R.next() - y; p.pz += 2 * z * R.next() - z; break; }
+          case 0xa8: {
+            // (pos += 2v * rnd - v: one fmsubs on the rounded 2v, then the add)
+            let x = float(); p.px = f32(p.px + msub(f32(2 * x), R.next(), x));
+            x = float(); p.py = f32(p.py + msub(f32(2 * x), R.next(), x));
+            x = float(); p.pz = f32(p.pz + msub(f32(2 * x), R.next(), x));
+            break;
+          }
           case 0xa9: this.spread(p, float()); break;
           case 0xaa: { const idx = (byte() << 8) + byte(); const rnd = (byte() << 8) + byte(); this.child(p, idx + Math.trunc(f32(rnd * R.next())), false); break; }
-          case 0xab: { const s = float(); p.vx *= s; p.vy *= s; p.vz *= s; break; }
-          case 0xac: { p.sizeCount = count(); p.sizeTarget = float(); const r = float(); p.sizeTarget += r * R.next(); if (!p.sizeCount) p.size = p.sizeTarget; break; }
+          case 0xab: { const s = float(); p.vx = f32(p.vx * s); p.vy = f32(p.vy * s); p.vz = f32(p.vz * s); break; }
+          case 0xac: { p.sizeCount = count(); p.sizeTarget = float(); const r = float(); p.sizeTarget = madd(r, R.next(), p.sizeTarget); if (!p.sizeCount) p.size = p.sizeTarget; break; }
           case 0xad: p.kind |= K.PRIMENV; break;
           case 0xae: p.kind &= ~(K.MIRROR_S | K.MIRROR_T); break;
           case 0xaf: p.kind = (p.kind & ~K.MIRROR_T) | K.MIRROR_S; break;
@@ -909,16 +949,17 @@ export class ParticleSystem {
             break;
           }
           case 0xb4: case 0xb5: break;
-          case 0xb6: p.rotateCount = count(); p.rotateTarget += float(); if (!p.rotateCount) p.rotate = p.rotateTarget; break;
+          case 0xb6: p.rotateCount = count(); p.rotateTarget = f32(p.rotateTarget + float()); if (!p.rotateCount) p.rotate = p.rotateTarget; break;
           case 0xb7: {
             // its motion turned to head for the leading particle, as fast as it goes now
             const at = this.leaders[byte() & 7];
             if (!at) break;
-            const speed = f32(Math.sqrt(f32(f32(p.vz * p.vz) + f32(f32(p.vx * p.vx) + f32(p.vy * p.vy)))));
+            // (the speed's square with no fused step, the distance's with two; each root MSL's sqrtf)
+            const speed = sqrtf(f32(f32(p.vz * p.vz) + f32(f32(p.vx * p.vx) + f32(p.vy * p.vy))));
             const dx = f32(at[0] - p.px), dy = f32(at[1] - p.py), dz = f32(at[2] - p.pz);
-            const far = f32(f32(dz * dz) + f32(f32(dx * dx) + f32(dy * dy)));
+            const far = madd(dz, dz, madd(dx, dx, f32(dy * dy)));
             if (far === 0) break;
-            const k = f32(speed / f32(Math.sqrt(far)));
+            const k = f32(speed / sqrtf(far));
             p.vx = f32(dx * k); p.vy = f32(dy * k); p.vz = f32(dz * k);
             break;
           }
@@ -928,30 +969,32 @@ export class ParticleSystem {
             const force = float(), range = float();
             if (!at || range < 0) break;
             const dx = f32(at[0] - p.px), dy = f32(at[1] - p.py), dz = f32(at[2] - p.pz);
-            const far = f32(f32(f32(dx * dx) + f32(dy * dy)) + f32(dz * dz));
+            // (hsd_803991D8: dx^2 + dy^2 + dz^2 fused on the dy product; v += k d each one fmadds)
+            const far = madd(dz, dz, madd(dx, dx, f32(dy * dy)));
             if (far <= f32(range * range)) { p.life = 1; p.pc = pc; p.wait = 0; return; }
             if (far === 0) break;
             const k = f32(force / far);
-            p.vx = f32(p.vx + f32(k * dx)); p.vy = f32(p.vy + f32(k * dy)); p.vz = f32(p.vz + f32(k * dz));
+            p.vx = madd(k, dx, p.vx); p.vy = madd(k, dy, p.vy); p.vz = madd(k, dz, p.vz);
             break;
           }
           case 0xba: case 0xbb: {
             const prim = cls === 0xba;
             const cur = prim ? p.prim : p.env, tgt = prim ? p.primTarget : p.envTarget;
             settle(cur, tgt, prim ? p.primRemain : p.envRemain, prim ? p.primCount : p.envCount);
-            for (const k of ["r", "g", "b", "a"] as const) { const dd = (byte() << 24) >> 24; tgt[k] = clamp(tgt[k] + dd * 2 * R.next()); }
+            for (const k of ["r", "g", "b", "a"] as const) { const rnd = R.next(); const dd = (byte() << 24) >> 24; tgt[k] = toU8(f32(tgt[k] + f32(dd * 2 * rnd))); }
             if (prim) { if (!p.primCount) p.prim = { ...tgt }; else p.primRemain = p.primCount; }
             else { if (!p.envCount) p.env = { ...tgt }; else p.envRemain = p.envCount; }
             break;
           }
-          case 0xbc: { p.pose = byte(); const r = byte(); p.pose = Math.trunc(r * R.next() + p.pose); const tg = p.bank.texGroups[p.texGroup]; if (tg && tg.offsets[p.pose] !== undefined) p.kind |= K.DISP_TEX; break; }
+          case 0xbc: { p.pose = byte(); const r = byte(); p.pose = Math.trunc(madd(r, R.next(), p.pose)); const tg = p.bank.texGroups[p.texGroup]; if (tg && tg.offsets[p.pose] !== undefined) p.kind |= K.DISP_TEX; break; }
           case 0xbd: {
-            let s = float(); const r = float(); s += r * R.next();
-            const mag = Math.hypot(p.vx, p.vy, p.vz);
-            if (mag > 1e-10) { s /= mag; p.vx *= s; p.vy *= s; p.vz *= s; }
+            // (the speed's square with no fused step, MSL's sqrtf; over 1e-10F the motion takes the new speed)
+            let s = float(); const r = float(); s = madd(r, R.next(), s);
+            const mag = sqrtf(f32(f32(p.vz * p.vz) + f32(f32(p.vx * p.vx) + f32(p.vy * p.vy))));
+            if (mag > TINY) { s = f32(s / mag); p.vx = f32(p.vx * s); p.vy = f32(p.vy * s); p.vz = f32(p.vz * s); }
             break;
           }
-          case 0xbe: p.vx *= float(); p.vy *= float(); p.vz *= float(); break;
+          case 0xbe: p.vx = f32(p.vx * float()); p.vy = f32(p.vy * float()); p.vz = f32(p.vz * float()); break;
           case 0xbf: p.kind |= ((byte() & 7) << 12) | K.LEADS; break;
           case 0xc0: case 0xd0: {
             const prim = cls === 0xc0;
@@ -968,9 +1011,10 @@ export class ParticleSystem {
             settle(p.prim, p.primTarget, p.primRemain, p.primCount);
             settle(p.env, p.envTarget, p.envRemain, p.envCount);
             for (const k of ["r", "g", "b", "a"] as const) {
-              const dd = ((byte() << 24) >> 24) * 2 * R.next();
-              p.primTarget[k] = clamp(p.primTarget[k] + dd);
-              p.envTarget[k] = clamp(p.envTarget[k] + dd);
+              const rnd = R.next();
+              const dd = f32(((byte() << 24) >> 24) * 2 * rnd);
+              p.primTarget[k] = toU8(f32(p.primTarget[k] + dd));
+              p.envTarget[k] = toU8(f32(p.envTarget[k] + dd));
             }
             if (!p.primCount) p.prim = { ...p.primTarget };
             p.primRemain = p.primCount;
@@ -982,17 +1026,20 @@ export class ParticleSystem {
             settle(p.prim, p.primTarget, p.primRemain, p.primCount);
             settle(p.env, p.envTarget, p.envRemain, p.envCount);
             const flags = byte(), timing = byte();
-            const scale = timing ? Math.trunc((timing + 1) * R.next()) / timing : R.next();
+            const scale = timing ? f32(Math.trunc(f32((timing + 1) * R.next())) / timing) : R.next();
             for (const [bit, k] of [[1, "r"], [2, "g"], [4, "b"]] as const) {
               if (!(flags & bit)) continue;
-              const dd = scale * ((byte() << 24) >> 24) * 2;
-              if (flags & 0x10) p.primTarget[k] = clamp(p.primTarget[k] + dd);
-              if (flags & 0x20) p.envTarget[k] = clamp(p.envTarget[k] + dd);
+              const dd = f32(scale * (((byte() << 24) >> 24) * 2));
+              if (flags & 0x10) p.primTarget[k] = toU8(f32(p.primTarget[k] + dd));
+              if (flags & 0x20) p.envTarget[k] = toU8(f32(p.envTarget[k] + dd));
             }
             if (flags & 8) {
-              const dd = (((byte() << 24) >> 24) * 2 * Math.trunc((timing + 1) * R.next())) / (timing || 1);
-              if (flags & 0x10) p.primTarget.a = clamp(p.primTarget.a + dd);
-              if (flags & 0x20) p.envTarget.a = clamp(p.envTarget.a + dd);
+              // (a draw of its own; with timing 0 the game divides 0 by 0, and the NaN makes the byte 0)
+              const rnd = R.next();
+              const n = Math.trunc(f32((timing + 1) * rnd));
+              const dd = f32(f32(((byte() << 24) >> 24) * 2 * n) / timing);
+              if (flags & 0x10) p.primTarget.a = toU8(f32(p.primTarget.a + dd));
+              if (flags & 0x20) p.envTarget.a = toU8(f32(p.envTarget.a + dd));
             }
             if (!p.primCount) p.prim = { ...p.primTarget };
             p.primRemain = p.primCount;
@@ -1016,8 +1063,8 @@ export class ParticleSystem {
           case 0xea: case 0xeb: { count(); const fl = byte(); if (fl & 1) byte(); if (fl & 8) byte(); break; }
           case 0xed: {
             let base = float(); const range = float(), timing = byte();
-            base += timing ? (range * Math.trunc((timing + 1) * R.next())) / timing : range * R.next();
-            p.rotateTarget += base; p.rotate += base;
+            base = timing ? f32(base + f32(f32(range * Math.trunc(f32((timing + 1) * R.next()))) / timing)) : madd(range, R.next(), base);
+            p.rotateTarget = f32(p.rotateTarget + base); p.rotate = f32(p.rotate + base);
             break;
           }
           case 0xfa: p.loopCount = byte(); p.loopPtr = pc; break;
@@ -1040,19 +1087,18 @@ export class ParticleSystem {
     const vx = p.vx, vy = p.vy, vz = p.vz;
     const az = f32(Math.abs(vz) < 1.1754944e-38 ? (vy >= 0 ? Math.PI / 2 : -Math.PI / 2) : atan2f(vy, vz));
     const sa = sinf(az), ca = cosf(az);
-    const t = f32(f32(vy * sa) + f32(vz * ca));
+    const t = madd(vy, sa, f32(vz * ca));
     const el = f32(Math.abs(t) < 1.1754944e-38 ? (vx >= 0 ? Math.PI / 2 : -Math.PI / 2) : atan2f(vx, t));
     const se = sinf(el), ce = cosf(el);
-    const sq = f32(f32(f32(vx * vx) + f32(vy * vy)) + f32(vz * vz));
-    const mag = sq > 0 ? f32(Math.sqrt(sq)) : sq;
+    const mag = sqrtf(madd(vz, vz, madd(vx, vx, f32(vy * vy))));
     const wasKind = this.rng.kind;
     this.rng.kind = 5;
     const roll = f32(Math.PI * this.rng.next() * 2);
     this.rng.kind = wasKind;
     const sAng = f32(mag * sinf(angle)), cr = f32(sAng * cosf(roll)), sr = f32(sAng * sinf(roll)), cAng = f32(mag * cosf(angle));
-    p.vx = f32(f32(cr * ce) + f32(cAng * se));
-    p.vy = f32(f32(ce * f32(cAng * sa)) + f32(f32(se * f32(-cr * sa)) + f32(sr * ca)));
-    p.vz = f32(f32(ce * f32(cAng * ca)) + f32(f32(se * f32(-cr * ca)) - f32(sr * sa)));
+    p.vx = madd(cr, ce, f32(cAng * se));
+    p.vy = madd(ce, f32(cAng * sa), madd(se, f32(-cr * sa), f32(sr * ca)));
+    p.vz = madd(ce, f32(cAng * ca), msub(se, f32(-cr * ca), f32(sr * sa)));
   }
 }
 
@@ -1064,14 +1110,24 @@ const between = (target: number, from: number, left: number) => (((target << 16)
 /** a joint's turn alone (its world matrix's three axes, each of length one),
  *  row-major 3x3: what an emission on the joint is turned by */
 function turnOf(w: Float32Array): number[] {
-  const out = new Array(9);
+  // (each axis PSVECNormalize'd, as hsd_8039DAD4 and hsd_8039D71C take them)
+  const out = new Array(9), a = [0, 0, 0];
   for (let c = 0; c < 3; c++) {
-    const x = w[c * 4], y = w[c * 4 + 1], z = w[c * 4 + 2];
-    const n = Math.hypot(x, y, z) || 1;
-    out[c] = f32(x / n); out[3 + c] = f32(y / n); out[6 + c] = f32(z / n);
+    PSVECNormalize([w[c * 4], w[c * 4 + 1], w[c * 4 + 2]], a);
+    out[c] = a[0]; out[3 + c] = a[1]; out[6 + c] = a[2];
   }
   return out;
 }
+
+/** a color byte as the game makes one of a float: below 0 is 0, over 255 is 255, then (u8)(s32) - fctiwz, which
+ *  makes a NaN 0x80000000, its low byte 0 */
+function toU8(v: number): number {
+  if (v < 0) v = 0;
+  if (v > 255) v = 255;
+  return Number.isNaN(v) ? 0 : Math.trunc(v) & 0xff;
+}
+/** 1e-10F, the speed 0xBD scales from */
+const TINY = Math.fround(1e-10);
 
 /** a point through a particle transform (scale, then rotation X, Y, Z, then translate) */
 export function srtApply(s: AppSRT, x: number, y: number, z: number): [number, number, number] {
