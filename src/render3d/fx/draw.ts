@@ -12,7 +12,7 @@
 import { K, Particle } from "./particles";
 import type { Sprite } from "./bank";
 import { appExtents, appMatrix, drawPoint, followMatrix, mtxDir, mtxPoint } from "./appsrt";
-import { madd, msub, PSMTXInverse, PSMTXMultVec, PSMTXRotAxisRad, mtxFromGL } from "../gxmath";
+import { madd, msub, PSMTXConcat, PSMTXInverse, PSMTXMultVec, PSMTXRotAxisRad, mtxFromGL } from "../gxmath";
 import { atan2f, cosf, sinf, tanf } from "./gamemath";
 
 export const FLOATS = 17; // pos 3, uv 2, prim 4, env 4, alpha-compare 3, textured 1
@@ -24,6 +24,8 @@ export interface Batch {
   near: boolean;
   zwrite: boolean;
   nozcomp: boolean;
+  /** its corners are in the camera's space (psDispSubAppSRT's GX_PNMTX1): drawn through the projection alone */
+  view?: boolean;
   first: number; // quad index
   count: number;
 }
@@ -62,6 +64,7 @@ const curV = [0, 0, 0], prevV = [0, 0, 0], curW = [0, 0, 0], prevW = [0, 0, 0];
 const FLT_EPSILON = 1.1920929e-7, FLT_MIN = 1.1754944e-38;
 
 const lastT = [0, 0, 0];
+const HALF_PI_F = Math.fround(Math.PI / 2), ssM = new Float32Array(12), appV = new Float32Array(12);
 const f32 = Math.fround;
 // (psUpdateBillboardAxes: the inverse view's right plus and minus its up, per axis - HSD_PSDisp_804D7914..7928 - and
 // psDispSub's turn and corners, kept)
@@ -149,17 +152,76 @@ export function tornadoLast(p: Particle, out: number[]): number[] {
   const g = p.gen;
   // (the game reads a generator it does not have here: never so in its lists)
   if (!g) { out[0] = p.px; out[1] = p.py; out[2] = p.pz; return out; }
-  const f32 = Math.fround;
-  const sina = sinf(p.grav), sinb = sinf(p.fric), cosa = cosf(p.grav), cosb = cosf(p.fric);
+  // (calcTornadoLastPos, the tornado step's own fused order on the step-back motion)
+  const sinA = sinf(p.grav), sinB = sinf(p.fric), cosA = cosf(p.grav), cosB = cosf(p.fric);
   const vz0 = f32(p.vz - (g.aux[0] ?? 0)), vx0 = f32(p.vx - g.grav);
-  let radius = Math.abs(g.radius);
-  radius = f32(radius + f32(vz0 * tanf(Math.abs(g.angle))));
-  radius = f32(radius * p.vy);
-  const px = f32(radius * cosf(vx0)), py = f32(radius * sinf(vx0)), pz = vz0;
-  out[0] = f32(f32(f32(px * cosb) + f32(pz * sinb)) + g.px);
-  out[1] = f32(f32(f32(f32(-px * sina) * sinb) + f32(py * cosa)) + f32(f32(pz * sina) * cosb)) + g.py;
-  out[2] = f32(f32(f32(f32(-px * cosa) * sinb) - f32(py * sina)) + f32(f32(pz * cosa) * cosb)) + g.pz;
-  out[1] = f32(out[1]); out[2] = f32(out[2]);
+  const R = f32(madd(vz0, tanf(Math.abs(g.angle)), Math.abs(g.radius)) * p.vy);
+  const d = f32(R * cosf(vx0)), e = f32(R * sinf(vx0)), nd = -d;
+  out[0] = f32(g.px + madd(d, cosB, f32(vz0 * sinB)));
+  out[1] = f32(g.py + madd(cosB, f32(vz0 * sinA), madd(sinB, f32(nd * sinA), f32(e * cosA))));
+  out[2] = f32(g.pz + madd(cosB, f32(vz0 * cosA), msub(sinB, f32(nd * cosA), f32(e * sinA))));
+  return out;
+}
+
+/** A particle under a transform as psDispSubAppSRT draws it: in the camera's space (GX_PNMTX1, the projection
+ *  alone after it). `ss`: the draw matrix - the view times the transform's matrix (PSMTXConcat(vmtx, mmtx)), or for
+ *  a transform that only follows its follow matrix; `ex`, `ey`: |vmtx mmtx col 0| size and |col 1| size. Its place
+ *  and where it was a step back through `ss` (drawPoint), the corners' half-extents (ax, ay) = (ex, ey) and
+ *  (bx, by) = (ex, -ey), turned when the turn is more than 0.01 (cosf and sinf, c ax - s ay one fmsubs on s ay,
+ *  s ax + c ay one fmadds on c ay) by its rotation, or for a trail or a direction particle by its way across the
+ *  picture: the place less where it was through the projection's first two rows times `ss`, each over its depth
+ *  (-1.0f / w), atan2f of the two (plus its rotation, a direction particle). Corners: place less a, less b, plus a,
+ *  plus b - a trail's first and last from where it was. All float32 in main.dol's order. Into `out` (12 floats);
+ *  null when its depth or the old one is 0 (the game draws nothing) */
+export function appSrtCorners(p: Particle, ss: Float32Array, ex: number, ey: number, gx: ArrayLike<number> | null,
+                              out: Float32Array): Float32Array | null {
+  const tornado = (p.kind & K.TORNADO) !== 0;
+  drawPoint(ss, p.px, p.py, p.pz, curV);
+  let lx: number, ly: number, lz: number;
+  if (tornado) { tornadoLast(p, lastT); lx = lastT[0]; ly = lastT[1]; lz = lastT[2]; }
+  else { lx = f32(p.px - p.vx); ly = f32(p.py - p.vy); lz = f32(p.pz - p.vz); }
+  drawPoint(ss, lx, ly, lz, prevV);
+  let ax = ex, ay = ey, bx = ex, by = -ey;
+  const trail = (p.kind & K.TRAIL) !== 0;
+  let angle: number;
+  if (trail || p.kind & K.DIRVEC) {
+    let vf1: number, vf2: number;
+    if (gx && gx[15] === 0) {
+      // (perspective: s808 s804 f16 f20 the x row, f12 f8 f11 f13 the y row, each prj * ss + prj * ss fused on its
+      // first product; w the draw matrix's third row)
+      const p1 = gx[0], p2 = gx[2], p3 = gx[5], p4 = gx[6];
+      const w0 = f32(ss[11] + madd(ss[10], p.pz, madd(ss[8], p.px, f32(ss[9] * p.py))));
+      const x0 = madd(p1, ss[0], f32(p2 * ss[8])), x1 = madd(p1, ss[1], f32(p2 * ss[9]));
+      const x2 = madd(p1, ss[2], f32(p2 * ss[10])), x3 = madd(p1, ss[3], f32(p2 * ss[11]));
+      const y0 = madd(p3, ss[4], f32(p4 * ss[8])), y1 = madd(p3, ss[5], f32(p4 * ss[9]));
+      const y2 = madd(p3, ss[6], f32(p4 * ss[10])), y3 = madd(p3, ss[7], f32(p4 * ss[11]));
+      if (w0 === 0) return null;
+      const w0inv = f32(-1 / w0);
+      const w1 = f32(ss[11] + madd(ss[10], lz, madd(ss[8], lx, f32(ss[9] * ly))));
+      if (w1 === 0) return null;
+      const w1inv = f32(-1 / w1);
+      const prevX = f32(x3 + madd(x2, lz, madd(x0, lx, f32(x1 * ly))));
+      const prevY = f32(y3 + madd(y2, lz, madd(y0, lx, f32(y1 * ly))));
+      const curX = f32(x3 + madd(x2, p.pz, madd(x0, p.px, f32(x1 * p.py))));
+      const curY = f32(y3 + madd(y2, p.pz, madd(y0, p.px, f32(y1 * p.py))));
+      vf1 = msub(w0inv, curX, f32(w1inv * prevX));
+      vf2 = msub(w0inv, curY, f32(w1inv * prevY));
+    } else return null;
+    angle = Math.abs(vf2) < FLT_MIN ? (-vf1 >= 0 ? HALF_PI_F : -HALF_PI_F) : atan2f(-vf1, vf2);
+    if (p.kind & K.DIRVEC) angle = f32(angle + p.rotate);
+  } else angle = p.rotate;
+  if (Math.abs(angle) > 0.01) {
+    const c = cosf(angle), s = sinf(angle);
+    const oax = ax, obx = bx;
+    ax = msub(c, ax, f32(s * ay)); ay = madd(s, oax, f32(c * ay));
+    bx = msub(c, bx, f32(s * by)); by = madd(s, obx, f32(c * by));
+  }
+  const cx = curV[0], cy = curV[1], cz = curV[2];
+  const qx = trail ? prevV[0] : cx, qy = trail ? prevV[1] : cy, qz = trail ? prevV[2] : cz;
+  out[0] = f32(qx - ax); out[1] = f32(qy - ay); out[2] = qz;
+  out[3] = f32(cx - bx); out[4] = f32(cy - by); out[5] = cz;
+  out[6] = f32(cx + ax); out[7] = f32(cy + ay); out[8] = cz;
+  out[9] = f32(qx + bx); out[10] = f32(qy + by); out[11] = qz;
   return out;
 }
 
@@ -179,6 +241,13 @@ export function buildParticles(list: Particle[],
   if (order.length < list.length) { order = new Int32Array(list.length * 2); batchOf = new Int32Array(list.length * 2); }
   let kept = 0;
   let cur: Batch | null = null;
+  // (with the camera's view, a follow-only transform's particles are placed as the game places them: in its
+  // space, then back into the world for the renderer, which takes them through the view again)
+  const haveView = !!axes.view && PSMTXInverse(mtxFromGL(axes.view, viewG, 0), viewInv) === 1;
+  // (with a perspective camera's GX projection: psDispSub's pvmtx, for the trails' and direction particles' turn)
+  const perspective = !!axes.gxProj && axes.gxProj[15] === 0;
+  // (a particle under a transform, with the camera's view, as psDispSubAppSRT draws it: in the camera's space)
+  const inView = (p: Particle) => !!p.srt && haveView && !shift && (perspective || !(p.kind & (K.TRAIL | K.DIRVEC)));
   for (let pass = 0; pass < 2; pass++) {
     for (let i = 0; i < list.length; i++) {
       const p = list[i];
@@ -188,10 +257,13 @@ export function buildParticles(list: Particle[],
       const additive = ((p.kind >>> 22) & 3) === 1;
       const zwrite = pass === 0;
       const near = (p.kind & K.TEX_NEAR) !== 0;
-      if (!cur || cur.sprite !== sprite || cur.additive !== additive || cur.zwrite !== zwrite || cur.near !== near) {
+      const view = inView(p);
+      if (!cur || cur.sprite !== sprite || cur.additive !== additive || cur.zwrite !== zwrite || cur.near !== near ||
+          !!cur.view !== view) {
         cur = pool[groups.length] ??= { sprite: null, additive: false, near: false, zwrite: false, nozcomp: false, first: 0, count: 0 };
         // (every particle tests depth: psDispParticles sets GX_LEQUAL whatever its kind)
         cur.sprite = sprite; cur.additive = additive; cur.near = near; cur.zwrite = zwrite; cur.nozcomp = false;
+        cur.view = view;
         cur.first = kept; cur.count = 0;
         groups.push(cur);
       }
@@ -205,9 +277,6 @@ export function buildParticles(list: Particle[],
   if (scratch.length < need) scratch = new Float32Array(need * 2);
   const out = scratch;
   let o = 0;
-  // (with the camera's view, a follow-only transform's particles are placed as the game places them: in its
-  // space, then back into the world for the renderer, which takes them through the view again)
-  const haveView = !!axes.view && PSMTXInverse(mtxFromGL(axes.view, viewG, 0), viewInv) === 1;
   if (haveView) {
     bbAxes[0] = f32(viewInv[0] + viewInv[1]); bbAxes[1] = f32(viewInv[0] - viewInv[1]);
     bbAxes[2] = f32(viewInv[4] + viewInv[5]); bbAxes[3] = f32(viewInv[4] - viewInv[5]);
@@ -234,7 +303,16 @@ export function buildParticles(list: Particle[],
     let cx = p.px, cy = p.py, cz = p.pz, ex = p.size, ey = p.size;
     let wx = lvx, wy = lvy, wz = lvz;
     const srt = p.srt;
-    if (srt) {
+    let inSpace: Float32Array | null = null;
+    if (srt && groups[batchOf[qi]].view) {
+      // (psDispSubAppSRT: the draw matrix, vmtx mmtx or the follow matrix; the quad's size from vmtx mmtx either way)
+      const m = appMatrix(srt);
+      [ex, ey] = appExtents(m, p.size, axes.view);
+      const ss = srt.view ? followMatrix(srt, viewG, followM) : PSMTXConcat(viewG, m, ssM);
+      inSpace = appSrtCorners(p, ss, ex, ey, axes.gxProj ?? null, appV);
+      // (a depth of 0, now or a step back: the game draws nothing - a quad of no size here)
+      if (!inSpace) { appV.fill(0); inSpace = appV; }
+    } else if (srt) {
       if (srt.view && haveView) {
         // psDispSubAppSRT's xA2 path: the quad sized by |vmtx mmtx| as any transform's, the particle placed by
         // the follow matrix (the transform's place through the view, that matrix's scale alone), where it was a
@@ -325,7 +403,8 @@ export function buildParticles(list: Particle[],
       const a = corners[k * 2], b = corners[k * 2 + 1];
       const back = trail && (k === 0 || k === 3) ? 1 : 0;
       const ox = cx - back * wx, oy = cy - back * wy, oz = cz - back * wz;
-      if (exact) { out[o++] = exact[k * 3]; out[o++] = exact[k * 3 + 1]; out[o++] = exact[k * 3 + 2]; }
+      if (inSpace) { out[o++] = inSpace[k * 3]; out[o++] = inSpace[k * 3 + 1]; out[o++] = inSpace[k * 3 + 2]; }
+      else if (exact) { out[o++] = exact[k * 3]; out[o++] = exact[k * 3 + 1]; out[o++] = exact[k * 3 + 2]; }
       else { out[o++] = ox + a * R[0] + b * U[0]; out[o++] = oy + a * R[1] + b * U[1]; out[o++] = oz + a * R[2] + b * U[2]; }
       out[o++] = uv[k * 2] * ms; out[o++] = uv[k * 2 + 1] * mt + mtOff;
       // (a trail's tail: its alpha times the particle's trail, kept to 8 bits as GXColor4u8 takes it)

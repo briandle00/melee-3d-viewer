@@ -742,12 +742,14 @@ export class DrawLog {
 
   private particles(data: Float32Array, batches: Batch[]) {
     const s = this.inner;
-    const vp = s.overlayVP ?? s.viewProj;
+    const vp0 = s.overlayVP ?? s.viewProj;
     const [PW, PH] = this.target ?? [640, 480];
     // (a camera that turns the picture over has its rows the other way)
     const flip = s.mirrored && this.target !== null;
     const r1 = (v: number) => Math.round(v * 10) / 10;
     for (const b of batches) {
+      // (a batch in the camera's space: through the projection alone, as the renderer draws it)
+      const vp = b.view ? s.camProj : vp0;
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       // (each quad's own box, in the batch's order and the picture's pixels: the game draws each particle, and each
       // glyph, on its own; a lettering batch - the name plates' or Stadium's screen's - the picture's corner each reads too)
@@ -799,7 +801,7 @@ export class DrawLog {
 
 interface Batch { sprite: { key: string; w: number; h: number; src?: { archive: Archive; image: Image } } | null; additive: boolean;
                   near: boolean; zwrite: boolean;
-                  nozcomp: boolean; first: number; count: number }
+                  nozcomp: boolean; view?: boolean; first: number; count: number }
 
 // ---------------------------------------------------------------- the debug handle's entry
 
