@@ -565,6 +565,28 @@ export class StadiumScreen implements StageLogic {
   readonly size: [number, number] = [W, H];
   readonly tint: [number, number, number] = [150, 180, 160];
 
+  /** The copies the game's two buffers hold on frame `frame` (the replay's index), for a seek to make again: for the
+   *  match's buffer and the close-up's, the last frame before it whose copy went there (a frame's copy is the frame
+   *  before's mode's: captureRect), with that buffer's size. None for a buffer nothing has been copied into yet. */
+  copiesBefore(frame: number): { w: number; h: number; frame: number }[] {
+    const out: { w: number; h: number; frame: number }[] = [];
+    for (const m of [7, 8]) {
+      for (let k = this.shown.length - 1; k >= 0; k--) {
+        const s = this.shown[k];
+        if (s.mode !== m) continue;
+        // (the mode runs on frames [at, next); the copies it makes are those of the frames after them)
+        const end = k + 1 < this.shown.length ? this.shown[k + 1].at : Infinity;
+        const last = Math.min(end, frame - 1);
+        if (last >= s.at + 1) {
+          const [w, h] = this.copySize(m);
+          out.push({ w, h, frame: last });
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
   /** the size of the picture the game copies the match into in a mode (lb_800121FC's RGB565 buffers in
    *  grpstadium.c: 640 x 406 for the match, 124 x 80 for a close-up), else the text page's */
   copySize(mode = this.mode): [number, number] {
