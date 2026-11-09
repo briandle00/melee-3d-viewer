@@ -880,7 +880,9 @@ export class Hud {
     const half = 6.4 * a.zoom;
     // (drawn upside down: the texture's first row is the picture's top)
     ortho(this.picProj, -half, half, half, -half, 0.1, 32768);
-    const view = lookAt(new Float32Array(16), [bx, by, bz + 300], [bx, by, bz]);
+    // (ifMagnify's camera: its interest the camera bone, its eye the same place at z 300 - HSD_CObjSetInterest,
+    // then interest_pos.z = 300.0f and HSD_CObjSetEyePosition - its view HSD_CObjSetupViewingMtx's, in float32)
+    const view = gameView(new Float32Array(16), [bx, by, 300], [bx, by, bz]);
     const bg = this.background(a.st.xPosition, a.st.yPosition);
     r.overlay(this.picProj, view, pic, [bg[0], bg[1], bg[2], 1], true);
     a.draw();
