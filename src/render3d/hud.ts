@@ -25,6 +25,7 @@ import { AObj, Archive, Image, JObj, MatAnim, loadAnimJoint, loadJoint, loadMatA
 import { applyMatAnim, Skeleton } from "./skeleton";
 import { ident, lookAt, Mat, mul } from "./math";
 import { gameProjection, gameView } from "./camera";
+import { madd, type Mtx } from "./gxmath";
 import { gameSrt } from "./prop";
 import type { PlayerState, ReplayData } from "../common/types";
 import type { EffectBank } from "./fx/bank";
@@ -537,7 +538,8 @@ export class Hud {
    *  on the picture's own edges. `tagViewProj` is the match camera as the frame before left it (the tags': see
    *  below), `viewProj` without it. */
   draw(r: Renderer, f: number, viewProj: Mat, actors: HudActor[], bank: EffectBank | null = null,
-       aspect = this.kit.cam.aspect, tracked: TrackedBursts | null = null, tagViewProj: Mat = viewProj) {
+       aspect = this.kit.cam.aspect, tracked: TrackedBursts | null = null, tagViewProj: Mat = viewProj,
+       tagCam: TagCamera | null = null) {
     const gameFrame = f + FIRST_FRAME;
     // the picture's width over the game's
     // (a picture of the game's own shape takes the game's cameras as they are: within a part in a hundred, 1)
@@ -578,7 +580,8 @@ export class Hud {
     // frame's render makes the camera's matrices again (lbVector_WorldToScreen reads the cobj's): the place and
     // the camera of the frame before
     ortho(this.flatProj, 320 - 320 * k, 320 + 320 * k, -480, 0, 0.1, 32768);
-    lookAt(this.flatView, [0, 0, 300], [0, 0, 0]);
+    // (nametag_CObjDesc's eye and interest, its viewing matrix as HSD makes it: float32, C_MTXLookAt)
+    gameView(this.flatView, [0, 0, 300], [0, 0, 0]);
     let tagsBegun = false;
     for (const p of this.players) {
       if (!p.tag || !p.life.tag[f]) continue;
@@ -587,7 +590,15 @@ export class Hud {
       // move hides, a Kirby's swallowed one, keeps its tag)
       if (!a) continue;
       const pos = a.tagAt ?? a.at ?? [a.st.xPosition, a.st.yPosition, 0];
-      const [sx, sy, w] = toScreen(tagViewProj, [pos[0], pos[1] + a.nameTagHeight - 2.5, pos[2]], k);
+      // (fn_802FCC44: the place, vec.y += Player_800360D8 (the nametag height), vec.y -= 2.5f, in float32; then
+      // lbVector_WorldToScreen with the match camera's viewing matrix as the frame before set it up - float32, as
+      // GXProject computes - when the camera is known, and the picture is the game's shape)
+      let sx: number, sy: number, w: number;
+      if (tagCam && k === 1) {
+        const y = Math.fround(Math.fround(Math.fround(pos[1]) + Math.fround(a.nameTagHeight)) - 2.5);
+        const sc = worldToScreen(tagCam.view, tagCam.gx, Math.fround(pos[0]), y, Math.fround(pos[2]));
+        [sx, sy, w] = [sc[0], sc[1], 1];
+      } else [sx, sy, w] = toScreen(tagViewProj, [pos[0], pos[1] + a.nameTagHeight - 2.5, pos[2]], k);
       if (w <= 0) continue;
       const m = p.tag;
       m.begin();
@@ -1033,6 +1044,40 @@ export function fighterShown(vp: Mat, view: Mat, bone: [number, number, number],
 }
 
 /** a point of the world on the game's 640 x 480 screen (x right, y down), and its w */
+/** a camera as lbVector_WorldToScreen reads it: the cobj's viewing matrix (GX's 3 x 4, row major) and its projection
+ *  as MTXPerspective makes it (row major 4 x 4) */
+export interface TagCamera { view: Mtx; gx: Float32Array }
+
+const f32 = Math.fround;
+/** lbVector_WorldToScreen(cobj, p, out, 0) on a perspective camera with the game's viewport (0, 0, 640, 480):
+ *  the point moved in front of the camera when it is not (f1 > -0.01f: a madd chain, -fp_contract on), then
+ *  GXProject (libdolphin, -fp_contract off: every product and sum rounded on its own) -> [sx, sy, sz] */
+export function worldToScreen(m: Mtx, gx: ArrayLike<number>, x: number, y: number, z: number): [number, number, number] {
+  // (lbvector.c: f1 = mv[2][0] * x + mv[2][1] * y + mv[2][2] * z + mv[2][3], fused as MWCC does)
+  let f1 = f32(f32(m[8] * x));
+  f1 = madd(m[9], y, f1);
+  f1 = madd(m[10], z, f1);
+  f1 = f32(f1 + m[11]);
+  if (f1 > f32(-0.01)) {
+    f1 = f32(f32(-f1) - f32(0.01));
+    x = f32(x + f32(m[8] * f1));
+    y = f32(y + f32(m[9] * f1));
+    z = f32(z + f32(m[10] * f1));
+  }
+  const row = (r: number) => f32(m[r * 4 + 3] + f32(f32(m[r * 4 + 2] * z) + f32(f32(m[r * 4] * x) + f32(m[r * 4 + 1] * y))));
+  const ex = row(0), ey = row(1), ez = row(2);
+  // (projection[1..6]: MTXPerspective's [0][0], [0][2], [1][1], [1][2], [2][2], [2][3])
+  const xc = f32(f32(ex * gx[0]) + f32(ez * gx[2]));
+  const yc = f32(f32(ey * gx[5]) + f32(ez * gx[6]));
+  const zc = f32(gx[11] + f32(ez * gx[10]));
+  const wc = f32(1 / f32(-ez));
+  const vp = [0, 0, 640, 480, 0, 1];
+  const sx = f32(f32(vp[2] / 2) + f32(vp[0] + f32(wc * f32(f32(xc * vp[2]) / 2))));
+  const sy = f32(f32(vp[3] / 2) + f32(vp[1] + f32(wc * f32(f32(f32(-yc) * vp[3]) / 2))));
+  const sz = f32(vp[5] + f32(wc * f32(zc * f32(vp[5] - vp[4]))));
+  return [sx, sy, sz];
+}
+
 export function toScreen(vp: Mat, p: [number, number, number], k = 1): [number, number, number] {
   const [x, y, z] = p;
   const cw = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
