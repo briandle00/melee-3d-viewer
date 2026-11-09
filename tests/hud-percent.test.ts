@@ -98,3 +98,17 @@ test("crouching counts the tag up from Squat; SquatWait after Squat keeps the co
   assert.equal(l.tag[11 + 48], 0);
   assert.equal(l.tag[11 + 49], 1);
 });
+
+test("after a shake that ends once the digits' animation has, they stand at their stored places", async () => {
+  const { digitRest } = await import("../src/render3d/hudlogic.ts");
+  // (ifStatus_802F4EDC stores the digits' places while lb_8000B09C says the animation runs - its last frame 29 of
+  // 30 - and ifStatus_802F4B84 puts them back there as its shake ends)
+  assert.equal(digitRest(100, null, 30), false);          // no hit: where the animation left them
+  assert.equal(digitRest(25, 20, 30), false);             // shaking while it runs: on its own frame's places
+  assert.equal(digitRest(29, 15, 30), false);             // a shake over before it ends (15 + 9 = 24): its end's places
+  assert.equal(digitRest(40, 15, 30), false);
+  assert.equal(digitRest(31, 25, 30), true);              // a shake still going as it ends: the stored places
+  assert.equal(digitRest(34, 25, 30), true);              // put back there (25 + 9)
+  assert.equal(digitRest(500, 25, 30), true);             // and there they stay
+  assert.equal(digitRest(500, 400, 30), true);
+});

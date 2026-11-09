@@ -34,7 +34,7 @@ import { buildParticles } from "./fx/draw";
 import {
   FIRST_FRAME, GO_FRAME, HUNDREDS, markFrame, ONES, PlayerHud, portColor, portColorIndex, SIGN, TAG_IDLE, TAG_LAUNCH, TAG_LAUNCH_SPEED,
   TENS, timerAt, edgePoint, edgeWidth, tagFrame, nametagFrame, chevronFrame, type ArrowTable, arrowTable, copyArrowTable,
-  arrowsAssign, arrowsPlace,
+  arrowsAssign, arrowsPlace, digitRest,
 } from "./hudlogic";
 import { PLATE_FONT, quad, tagText, texQuad, textPicture } from "./hudtext";
 import { glyphAtlas, PLATE_FULL, plateTexts, rawBytes, type PlateFont, type PlateText } from "./plates";
@@ -728,15 +728,20 @@ export class Hud {
       if (p.num && !hidden) {
         const m = p.num;
         // (its entry animations are done by frame 31)
-        if (!m.same(`${v.percent}|${v.layout.frame.join()}|${v.color}|${v.layout.dx}|${v.layout.shown}|${v.anim}|${Math.min(v.animFrame, 31)}|${v.spaced}|${v.offset.join()}`)) {
+        const end = m.animLength(v.anim);
+        const rest = digitRest(v.animFrame, v.hitAnimFrame, end);
+        if (!m.same(`${v.percent}|${v.layout.frame.join()}|${v.color}|${v.layout.dx}|${v.layout.shown}|${v.anim}|${Math.min(v.animFrame, 31)}|${v.spaced}|${v.offset.join()}|${rest}`)) {
           m.begin();
+          // (the digits at their stored places: the animation's last running frame's - see digitRest)
+          if (rest) m.anim(v.anim, end - 1);
+          const stored = rest ? [HUNDREDS, TENS, ONES, SIGN].map((k) => m.trans(k + 1)) : null;
           m.anim(v.anim, v.animFrame);
           for (const k of [HUNDREDS, TENS, ONES, SIGN]) {
             const j = k + 1;
             if (k === SIGN) m.mat(j, 0, 0);
             else m.mat(j, 0, v.layout.frame[k], 1);
             m.color(j, v.color);
-            const [x, y] = m.trans(j);
+            const [x, y] = stored ? stored[[HUNDREDS, TENS, ONES, SIGN].indexOf(k)] : m.trans(j);
             m.setTrans(j, x + (v.spaced ? v.layout.dx[k] : 0) + v.offset[k][0], y + v.offset[k][1]);
             if (!v.layout.shown[k]) m.hide(j);
           }

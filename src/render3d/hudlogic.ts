@@ -250,6 +250,20 @@ export interface PercentView {
   spaced: boolean;
   /** frames since the KO, when the percent is scattering */
   scatter: number | null;
+  /** the animation frame of the last hit since the animation began (its shake), or null: the shake sets the digits
+   *  at their stored places (ifStatus_802F4B84), which ifStatus_802F4EDC takes from the digits only while the
+   *  animation runs (lb_8000B09C) - after it has ended, at its last running frame's (digitRest) */
+  hitAnimFrame: number | null;
+}
+
+/** Whether the percent's digits stand at their stored places rather than where their animation (`end` frames long)
+ *  leaves them, at animation frame `t` with the last hit at animation frame `hit`: shaking once the animation has
+ *  ended (the shake adds to the stored places), or after a shake whose last frame - the one that puts the digits back
+ *  at their stored places - came after it ended. The stored places are the animation's at frame end - 1. */
+export function digitRest(t: number, hit: number | null, end: number): boolean {
+  if (hit === null || hit > t) return false;
+  const restore = hit + SHAKE_FRAMES - 1;
+  return t >= end && (t < restore || restore >= end);
 }
 
 export interface StockView {
@@ -440,6 +454,7 @@ export class PlayerHud {
     const layout = { ...digitLayout(now), frame: digitLayout(this.pct[Math.max(l.from, at - 1)] ?? 0).frame };
     const offset: [number, number][] = [[0, 0], [0, 0], [0, 0], [0, 0]];
     const hit = this.hitAt[at];
+    const animStart = at - animFrame;
     let spaced = true;
     if (hit >= 0 && at - hit <= SHAKE_FRAMES - 1) {
       spaced = false;
@@ -454,7 +469,7 @@ export class PlayerHud {
       }
     }
     return { percent, color: percentColor(now), anim, animFrame, layout, offset, spaced,
-             scatter: exploding ? i - l.ko! : null };
+             scatter: exploding ? i - l.ko! : null, hitAnimFrame: hit >= animStart && hit >= 0 ? hit - animStart : null };
   }
 
   /** the stock icons lost from `from` to `to` (frames): which icon, when */
