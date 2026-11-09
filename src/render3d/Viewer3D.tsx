@@ -70,6 +70,7 @@ import { PoseLog, poseLogCommand } from "./poselog";
 import type { ColAnimTables, Tint as ColTint } from "./fx/colanim";
 import { BgFlash, FLASH_CAMERA, flashQuad } from "./fx/bgflash";
 import { itemAnimation, itemAnimationIndex } from "./item-animation";
+import { illusionCopyAt } from "./illusion";
 import { samusBombClocks, samusBombRotation } from "./item-facing";
 import { shyGuyAnim, shyGuyClock } from "./shyguy";
 import { THUNDERS, thunderScaleY } from "./thunder";
@@ -2373,6 +2374,16 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         // HSD_JObjMakePositionMtx in HSD_JObjDisp, so grIzumi_801CCEA0's camera turns them to itself; the main
         // camera's pass poses them again)
         setBillboardView(axesM.view);
+        // (the shield's bubble and the reflector are effect models too, efasync.c 0x417-0x41A and efalt.c
+        // 0x488-0x48A, drawn by the player's own code above the water: in the pond as well, with the rest)
+        const shapesM = shapesAt(viewerTrack(), fno);
+        for (const a of actors) {
+          if (hidden(a.st)) continue;
+          const key = actorKey(a.player, a.nana);
+          drawShield(r, ek, a, data, frameActors.find((x) => x.key === key), fno, shapesM?.shieldAt(key, fno - 123) ?? undefined, false);
+          const sh = shapesM ? shapesM.shineAt(key, fno - 123, heldOf(data, a.player, a.nana)) : shineAt(data, fno, a.player, a.nana);
+          if (sh) drawReflector(r, ek, a, sh);
+        }
         drawFxModels(r, fxw);
         setBillboardView(view, frameBB);
         const mine = fxw.particlesOf(false);
@@ -5116,7 +5127,7 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
   // drawn after it, itfoxillusion.c it_8029CD18)
   const illusion = ILLUSIONS.has(it.typeId);
   if (!illusion || it.state !== 2) drawProp(r, art);
-  const copy = illusion ? illusionCopyAt(data, fs, it, frame) : null;
+  const copy = illusion ? illusionCopy(data, fs, it, frame) : null;
   if (copy) {
     art.prop.poseScaled(copy[0], copy[1], 0, [scale, scale, scale], turn ? turn[1] : rotationY);
     drawProp(r, art);
@@ -5126,48 +5137,13 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
 
 /** Fox's Illusion and Falco's Phantasm (itfoxillusion.c) */
 const ILLUSIONS = new Set([0x38, 0x39]);
-/** Fox's (and Falco's) SpecialSStart, SpecialS, SpecialSEnd, SpecialAirSStart, SpecialAirS, SpecialAirSEnd */
-const FOX_S_START = 347, FOX_S = 348, FOX_S_AIR_START = 350, FOX_S_AIR = 351, FOX_S_LAST = 352;
-
-/** where the Illusion's copy stands, or null before it is made. Its anim callback (itFoxillusion_UnkMotion0_Anim,
- *  states 0 and 1) makes it once its owner's move variable 2 is 2 (it_8029CD78: the model again, at rest, the
- *  item's turn and scl), and each frame's phys puts it at the owner's ghostEffectPos[3] - his place after each
- *  dash frame's phys (ftFox_SpecialS_SetPhys: SpecialS, SpecialAirS) four places back, all four his place as
- *  the start began (ftFox_SpecialS_SetVars) */
-function illusionCopyAt(data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number): [number, number] | null {
+/** where the Illusion's copy stands (illusion.ts), or null before it is made */
+function illusionCopy(data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number): [number, number] | null {
   const fi = ownerOf(data, fs, it, frame);
   if (!fi) return null;
-  const stAt = (g: number) => data.frames[g]?.players[it.owner]?.state;
-  const itemAt = (g: number) => data.frames[g]?.items?.find((q) => q.spawnId === it.spawnId);
-  // (made: the first frame of its life its owner's script has set variable 2 to 2 by his state's counter)
-  let made = false;
-  for (let g = frame; g >= 0 && frame - g < 120; g--) {
-    const q = g === frame ? it : itemAt(g);
-    if (!q) break;
-    const st = stAt(g);
-    if (!st || q.state > 1 || (st.actionStateId !== FOX_S && st.actionStateId !== FOX_S_AIR)) continue;
-    let v = 0;
-    for (const e of fi.scriptFor(st.actionStateId)) {
-      if (e.kind === "cmdVar" && e.index === 2 && e.frame <= st.actionStateFrameCounter + 0.001) v = e.value;
-    }
-    if (v === 2) { made = true; break; }
-  }
-  if (!made) return null;
-  // (the dash frames' places, the latest first, back to the start)
-  const back: [number, number][] = [];
-  for (let g = frame; g >= 0 && frame - g < 120 && back.length < 4; g--) {
-    const st = stAt(g);
-    if (!st || st.actionStateId < FOX_S_START || st.actionStateId > FOX_S_LAST) break;
-    if (st.actionStateId === FOX_S || st.actionStateId === FOX_S_AIR) back.push([st.xPosition, st.yPosition]);
-    else if (st.actionStateId === FOX_S_START || st.actionStateId === FOX_S_AIR_START) {
-      // (the start's first frame)
-      let e = g;
-      while (e > 0 && stAt(e - 1)?.actionStateId === st.actionStateId) e--;
-      const s0 = stAt(e)!;
-      while (back.length < 4) back.push([s0.xPosition, s0.yPosition]);
-    }
-  }
-  return back.length >= 4 ? back[3] : null;
+  return illusionCopyAt((g) => data.frames[g]?.players[it.owner]?.state,
+                        (g) => (g === frame ? it : data.frames[g]?.items?.find((q) => q.spawnId === it.spawnId))?.state,
+                        (s) => fi.scriptFor(s), frame);
 }
 
 /** Mr. Game & Watch's torch (forward smash, itgamewatchfire.c) */
@@ -5353,7 +5329,7 @@ function shieldSize(st: PlayerState, inputs: PlayerInputs | undefined): number |
 // tenths digit: prop.ts effectOverAll), so it covers the fighter inside it
 // and anything else that crosses it.
 function drawShield(r: Renderer, ek: EffectKit | undefined, a: Actor, data: ReplayData, fa: ActorFrame | undefined,
-                    fno: number, said?: { m: number; age: number }) {
+                    fno: number, said?: { m: number; age: number }, log = true) {
   const st = a.st;
   let radius = shieldSize(st, a.inputs);
   if (radius === null) return;
@@ -5384,7 +5360,7 @@ function drawShield(r: Renderer, ek: EffectKit | undefined, a: Actor, data: Repl
   age += SHIELD_LEAD;
   // one that plays once is gone when its time is up (a shield in its stun
   // shows none after its strike's bubble)
-  if (!which.loop && age >= which.life) { drawnShields.push({ player: a.player, state: st.actionStateId, age, gone: true }); return; }
+  if (!which.loop && age >= which.life) { if (log) drawnShields.push({ player: a.player, state: st.actionStateId, age, gone: true }); return; }
   const pr = ek?.bank?.prop(which.m, 0, true);
   if (!pr || !fa) { r.drawSphere(c, radius, color, 0.45); return; }
   const f = fa.fighter, j = f.shieldJoint;
@@ -5421,7 +5397,7 @@ function drawShield(r: Renderer, ek: EffectKit | undefined, a: Actor, data: Repl
   }
   r.drawSkeleton(pr.skeleton, "xlu");
   r.endPass();
-  drawnShields.push({ player: a.player, state: st.actionStateId, age, model: which.m, at: c.map((v) => +v.toFixed(1)), radius: +radius.toFixed(2), drawn: +drawn.toFixed(2), alpha });
+  if (log) drawnShields.push({ player: a.player, state: st.actionStateId, age, model: which.m, at: c.map((v) => +v.toFixed(1)), radius: +radius.toFixed(2), drawn: +drawn.toFixed(2), alpha });
 }
 // the shields drawn on the last frame (the checks read them)
 let drawnShields: Record<string, unknown>[] = [];

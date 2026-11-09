@@ -12,7 +12,7 @@
 import { K, Particle } from "./particles";
 import type { Sprite } from "./bank";
 import { appExtents, appMatrix, drawPoint, followMatrix, mtxDir, mtxPoint } from "./appsrt";
-import { PSMTXInverse, PSMTXMultVec, mtxFromGL } from "../gxmath";
+import { madd, msub, PSMTXInverse, PSMTXMultVec, PSMTXRotAxisRad, mtxFromGL } from "../gxmath";
 import { cosf, sinf, tanf } from "./gamemath";
 
 export const FLOATS = 17; // pos 3, uv 2, prim 4, env 4, alpha-compare 3, textured 1
@@ -62,6 +62,42 @@ const curV = [0, 0, 0], prevV = [0, 0, 0], curW = [0, 0, 0], prevW = [0, 0, 0];
 const FLT_EPSILON = 1.1920929e-7, FLT_MIN = 1.1754944e-38;
 
 const lastT = [0, 0, 0];
+const f32 = Math.fround;
+// (psUpdateBillboardAxes: the inverse view's right plus and minus its up, per axis - HSD_PSDisp_804D7914..7928 - and
+// psDispSub's turn and corners, kept)
+const bbAxes = new Float32Array(6), rotM = new Float32Array(12), rotAxis = [0, 0, 0], exactV = new Float32Array(12);
+
+/** A plain particle's corners as psDispSub makes them (no transform of its own, not a trail or a direction
+ *  particle): its size times the billboard axes (psUpdateBillboardAxes, from the inverse of the view), turned by its
+ *  rotation about right x up when that is more than 0.01 (PSMTXRotAxisRad, the axis and the turn as the game's
+ *  fused multiply-adds round them), the four corners its place less right, less up, plus right, plus up
+ *  (psDispSubMakePolygon) - in float32, the game's order, so a corner the camera sees almost edge on lands where the
+ *  game's does. Into `out` (12 floats) */
+export function psDispSubCorners(p: Particle, axes: Float32Array, out: Float32Array): Float32Array {
+  const size = p.size;
+  let rx = f32(axes[0] * size), ux = f32(axes[1] * size), ry = f32(axes[2] * size), uy = f32(axes[3] * size);
+  let rz = f32(axes[4] * size), uz = f32(axes[5] * size);
+  const angle = p.rotate;
+  if (Math.abs(angle) > 0.01) {
+    rotAxis[0] = msub(ry, uz, f32(rz * uy));
+    rotAxis[1] = msub(rz, ux, f32(rx * uz));
+    rotAxis[2] = msub(rx, uy, f32(ry * ux));
+    const m = PSMTXRotAxisRad(rotM, rotAxis, angle);
+    const nrx = madd(m[2], rz, madd(m[0], rx, f32(m[1] * ry)));
+    const nry = madd(m[6], rz, madd(m[4], rx, f32(m[5] * ry)));
+    const nrz = madd(m[10], rz, madd(m[8], rx, f32(m[9] * ry)));
+    const nux = madd(m[2], uz, madd(m[0], ux, f32(m[1] * uy)));
+    const nuy = madd(m[6], uz, madd(m[4], ux, f32(m[5] * uy)));
+    const nuz = madd(m[10], uz, madd(m[8], ux, f32(m[9] * uy)));
+    rx = nrx; ry = nry; rz = nrz; ux = nux; uy = nuy; uz = nuz;
+  }
+  const x = p.px, y = p.py, z = p.pz;
+  out[0] = f32(x - rx); out[1] = f32(y - ry); out[2] = f32(z - rz);
+  out[3] = f32(x - ux); out[4] = f32(y - uy); out[5] = f32(z - uz);
+  out[6] = f32(x + rx); out[7] = f32(y + ry); out[8] = f32(z + rz);
+  out[9] = f32(x + ux); out[10] = f32(y + uy); out[11] = f32(z + uz);
+  return out;
+}
 /** where a tornado particle was a step back (psdisp.c calcTornadoLastPos): its angle round its generator and its
  *  way along less a step of its generator's, in its generator's space - its trail's tail and its way across the
  *  picture are drawn from it (a tornado's velocity is no motion). Until 2026-11-09 they were drawn from its
@@ -128,6 +164,11 @@ export function buildParticles(list: Particle[],
   // (with the camera's view, a follow-only transform's particles are placed as the game places them: in its
   // space, then back into the world for the renderer, which takes them through the view again)
   const haveView = !!axes.view && PSMTXInverse(mtxFromGL(axes.view, viewG, 0), viewInv) === 1;
+  if (haveView) {
+    bbAxes[0] = f32(viewInv[0] + viewInv[1]); bbAxes[1] = f32(viewInv[0] - viewInv[1]);
+    bbAxes[2] = f32(viewInv[4] + viewInv[5]); bbAxes[3] = f32(viewInv[4] - viewInv[5]);
+    bbAxes[4] = f32(viewInv[8] + viewInv[9]); bbAxes[5] = f32(viewInv[8] - viewInv[9]);
+  }
   for (let qi = 0; qi < kept; qi++) {
     const p = list[order[qi]];
     const textured = groups[batchOf[qi]].sprite ? 1 : 0;
@@ -214,6 +255,8 @@ export function buildParticles(list: Particle[],
     const rx = c * ex - s * ey, ry = s * ex + c * ey, ux = c * ex + s * ey, uy = s * ex - c * ey;
     // corners, across and up the picture from its middle: -R, -U, +R, +U
     // (a trail's first and last from where it was: one step of its velocity back, in the world - psDispSubMakePolygon)
+    // (a plain one's as the game makes them, with the camera's view: psDispSubCorners)
+    const exact = haveView && !srt && !moved && !(p.kind & (K.TRAIL | K.DIRVEC)) ? psDispSubCorners(p, bbAxes, exactV) : null;
     const corners = CORNERS;
     corners[0] = -rx; corners[1] = -ry; corners[2] = -ux; corners[3] = -uy;
     corners[4] = rx; corners[5] = ry; corners[6] = ux; corners[7] = uy;
@@ -236,7 +279,8 @@ export function buildParticles(list: Particle[],
       const a = corners[k * 2], b = corners[k * 2 + 1];
       const back = trail && (k === 0 || k === 3) ? 1 : 0;
       const ox = cx - back * wx, oy = cy - back * wy, oz = cz - back * wz;
-      out[o++] = ox + a * R[0] + b * U[0]; out[o++] = oy + a * R[1] + b * U[1]; out[o++] = oz + a * R[2] + b * U[2];
+      if (exact) { out[o++] = exact[k * 3]; out[o++] = exact[k * 3 + 1]; out[o++] = exact[k * 3 + 2]; }
+      else { out[o++] = ox + a * R[0] + b * U[0]; out[o++] = oy + a * R[1] + b * U[1]; out[o++] = oz + a * R[2] + b * U[2]; }
       out[o++] = uv[k * 2] * ms; out[o++] = uv[k * 2 + 1] * mt + mtOff;
       // (a trail's tail: its alpha times the particle's trail, kept to 8 bits as GXColor4u8 takes it)
       const tail = trail && (k === 0 || k === 3);
