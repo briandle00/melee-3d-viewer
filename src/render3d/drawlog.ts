@@ -237,6 +237,17 @@ export function f32(x: number): number | null {
 /** GX's projection numbers from a GL projection (column major): GX keeps
  *  depth in [-1, 0] where GL has [-1, 1], so its third row is half of GL's
  *  third minus its fourth (kept as float32: the GPU's arithmetic) */
+/** a fog's start and end in eye depth, worked back from the registers' A (times 2^B's shift) and C through a
+ *  perspective projection's p4 and p5 (GX: z' = p4 z + p5), as the capture reader works them back from a capture,
+ *  op for op in double precision; null when the near and far are one */
+export function fogBack(p4: number, p5: number, a: number, c: number): [number, number] | null {
+  const far = p5 / p4;
+  const near = -p4 * far / (1 - p4);
+  if (far === near) return null;
+  const span = far * near / ((far - near) * a);
+  return [c * span, c * span + span];
+}
+
 export function gxProjection(p: ArrayLike<number>, num: (x: number) => number = (x) => rnd(x)): (number | string)[] {
   const persp = p[11] === -1;
   const z0 = Math.fround((p[10] - p[11]) / 2), z1 = Math.fround((p[14] - p[15]) / 2);
@@ -560,10 +571,16 @@ export class DrawLog {
     const g = this.inner.camGx;
     const near = g && g[14] === -1 && g[10] !== 1 ? g[11] / (g[10] - 1) : null;
     const dec = r ? fogDecoded(near !== null && Number.isFinite(near) ? { ...r, near } : r) : null;
+    // (start and end worked back exactly as the capture reader works them back - far = p5 / p4,
+    // near = -p4 far / (1 - p4), span = far near / ((far - near) A), start = C span, end = C span + span, in double
+    // precision from the projection's float32 p4 and p5 - so the same registers give the same numbers on both sides)
+    const back = dec && g && g[14] === -1 && g[10] !== 0 && g[10] !== 1 && dec.a ? fogBack(g[10], g[11], dec.a, dec.c) : null;
     return { type: FOG_TYPE[f.type & 7] ?? String(f.type & 7), ortho: ((f.type >> 3) & 1) === 1,
-             start: dec ? dec.start : this.num(f.start), end: dec ? dec.end : this.num(f.end),
+             start: back ? back[0] : dec ? dec.start : this.num(f.start), end: back ? back[1] : dec ? dec.end : this.num(f.end),
              set_start: this.num(f.start), set_end: this.num(f.end),
              color: f.color.map((v) => Math.round(v * 255)),
+             // (the four BP words GXSetFog sends, their 24 bits: what the game's capture has as fog.raw)
+             ...(r ? { raw: [r.fog0, r.fog1, r.fog2, r.fog3].map((w) => w & 0xffffff) } : {}),
              ...(r && dec ? { regs: [r.fog0, r.fog1, r.fog2, r.fog3, r.fogclr].map(hx), a: dec.a, b: dec.b, c: dec.c,
                               a_reg: this.num(r.a), b_mag: r.bMag, b_shift: r.bShift, c_reg: this.num(r.c), fsel: r.fsel, proj: r.proj,
                               near: this.num(r.near), far: this.num(r.far) } : {}) };
