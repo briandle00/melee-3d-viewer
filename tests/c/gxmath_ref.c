@@ -671,6 +671,92 @@ static void cobjViewingMtx(Mtx m, const float* eye, const float* interest, float
     C_MTXLookAt(m, eye, up, interest);
 }
 
+/* ---------------------------------------------------------------- the runtime math's atanf and acosf, quatlib.c */
+
+static const float ATAN[46] = {
+    1.0f, -0.3333333134651184f, 0.1999988704919815f, -0.14281649887561798f, 0.11041180044412613f,
+    -0.08459755778312683f, 0.04714243486523628f, 6.828420162200928f, 3.239828109741211f, 2.0f, 1.4464620351791382f,
+    1.1715729236602783f, 1.039566159248352f, 7.1350000325764995e-06f, 8.200000252145401e-07f, 0.0f,
+    6.299999881775875e-07f, 0.0f, 0.0f, 0.0f, 0.3926900029182434f, 0.5890486240386963f, 0.7853981256484985f,
+    0.9817469716072083f, 1.1780970096588135f, 1.3744460344314575f, 0.0f, 9.081698408408556e-06f,
+    2.3000000126671694e-08f, 6.30000016599297e-08f, 7.040000014058023e-07f, 2.499999993688107e-07f,
+    7.900000014160469e-07f, 2.414212942123413f, 1.4966057538986206f, 1.0f, 0.6681786179542542f,
+    0.4142135679721832f, 0.1989123672246933f, 5.620000251838064e-07f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+};
+static const float STRETCH[4] = { 0.534511148929596f, 0.8206787705421448f, 1.218503475189209f, 1.870868444442749f };
+
+static float atanf_msl(float value)
+{
+    int neg = signbit(value) != 0, at = -1, over = 0, k;
+    float x = fabsf(value), r, sq, poly, out;
+    if (x >= 2.4142136573791504f) {
+        over = 1;
+        r = 1.0f / x;
+    } else if (0.4142135679721832f < x) {
+        at = 0;
+        for (k = 0; k < 4; k++) at += x >= STRETCH[k];
+        float a = ATAN[39 + at], b = ATAN[33 + at];
+        r = 1.0f / (b + (x + a));
+        r = -fmaf(r, ATAN[7 + at], -b) + -fmaf(r, ATAN[13 + at], -a);
+    } else r = x;
+    sq = r * r;
+    poly = ATAN[6];
+    for (k = 5; k >= 1; k--) poly = fmaf(sq, poly, ATAN[k]);
+    out = fmaf(r * sq, poly, r);
+    out = out + ATAN[27 + at];
+    out = out + ATAN[20 + at];
+    if (over) {
+        out = out - 1.5707963267948966f;
+        return neg ? out : -out;
+    }
+    return neg ? -out : out;
+}
+
+/* runtime/math.c's acosf (lbRefract's): frsqrte rounded to a float, three Newton steps (3 - g^2 r fused), atanf */
+static float acosf_msl(float x)
+{
+    float r = fmaf(-x, x, 1.0f);
+    if (r > 0) {
+        float g = (float) frsqrte(r);
+        for (int k = 0; k < 3; k++) g = (0.5f * g) * fmaf(-(g * g), r, 3.0f);
+        r = g;
+    } else r = r != 0 ? NAN : INFINITY;
+    return 1.5707963267948966f - atanf_msl(x * r);
+}
+
+/* quatlib.c's EulerToQuat: the first product of each expression fused, the second a rounded chain */
+static void EulerToQuat(const float* e, float* q)
+{
+    float cx = cosf_msl(0.5f * e[0]), cy = cosf_msl(0.5f * e[1]), cz = cosf_msl(0.5f * e[2]);
+    float sx = sinf_msl(0.5f * e[0]), sy = sinf_msl(0.5f * e[1]), sz = sinf_msl(0.5f * e[2]);
+    float ss = sy * sz, cc = cy * cz;
+    q[3] = fmaf(cx, cc, sx * ss);
+    q[0] = fmaf(sx, cc, -(cx * ss));
+    q[1] = fmaf(cz, cx * sy, sz * (sx * cy));
+    q[2] = fmaf(sz, cx * cy, -(cz * (sx * sy)));
+}
+
+/* quatlib.c's HSD_QuatLib_8037EF28 (as the simulator builds it: each lane one fmadds over a rounded fmuls) */
+static void QuatSlerp(const float* p, const float* q, float* out, float t)
+{
+    float cosom = fmaf(p[3], q[3], fmaf(p[2], q[2], fmaf(p[0], q[0], p[1] * q[1]))), sp, sq;
+    if ((1.0f + cosom) > 1e-10f) {
+        if ((1.0f - cosom) > 1e-10f) {
+            float theta = acosf_msl(cosom), sinom = sinf_msl(theta);
+            sp = sinf_msl((1.0f - t) * theta) / sinom;
+            sq = sinf_msl(t * theta) / sinom;
+        } else { sq = t; sp = (float) (1.0 - (double) t); }
+    } else if (t < 0.5f) {
+        sp = sinf_msl((float) (M_PI / 2 * (1.0f - (2.0f * t))));
+        sq = sinf_msl((float) (M_PI / 2 * (2.0f * t)));
+    } else {
+        float t2 = 2.0f * (t - 0.5f);
+        sp = sinf_msl((float) (M_PI / 2 * (1.0f - t2)));
+        sq = sinf_msl((float) (M_PI / 2 * t2));
+    }
+    for (int k = 0; k < 4; k++) out[k] = fmaf(sp, p[k], sq * q[k]);
+}
+
 /* ---------------------------------------------------------------- the driver */
 
 #ifndef GXMATH_REF_NO_MAIN
@@ -688,7 +774,7 @@ int main(int argc, char** argv)
         { "lookat", 9, 12 }, { "perspective", 4, 16 }, { "frustum", 6, 16 }, { "ortho", 6, 16 }, { "srt", 13, 12 },
         { "srtquat", 14, 12 }, { "scaledadd", 25, 12 }, { "invconcat", 24, 12 }, { "sqrtf", 1, 1 }, { "sinf", 1, 1 },
         { "cosf", 1, 1 }, { "tanf", 1, 1 }, { "frsqrte", 1, 2 }, { "fres", 1, 1 }, { "view", 7, 12 }, { "mkrot", 3, 12 }, { "texmtx", 12, 12 }, { "billboard", 15, 12 },
-        { "invxpose", 12, 12 }, { "getscale", 12, 3 },
+        { "invxpose", 12, 12 }, { "getscale", 12, 3 }, { "acosf", 1, 1 }, { "eulerquat", 3, 4 }, { "slerp", 9, 4 },
     };
     int k = -1;
     for (int i = 0; i < (int) (sizeof F / sizeof F[0]); i++) if (!strcmp(F[i].name, fn)) k = i;
@@ -729,6 +815,9 @@ int main(int argc, char** argv)
         case 28: memcpy(A, a, 48); memset(C, 0, 48); mkBillBoard((int) a[12], (int) a[13], a[14], A, C); memcpy(r, C, 48); break;
         case 29: memcpy(A, a, 48); HSD_MtxInverseTranspose(A, C); memcpy(r, C, 48); break;
         case 30: memcpy(A, a, 48); HSD_MtxGetScale(A, r); break;
+        case 31: r[0] = acosf_msl(a[0]); break;
+        case 32: EulerToQuat(a, r); break;
+        case 33: QuatSlerp(a, a + 4, r, a[8]); break;
         }
         fwrite(r, 4, F[k].nout, out);
     }

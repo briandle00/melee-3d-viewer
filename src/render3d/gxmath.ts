@@ -28,7 +28,7 @@
  * versions of these functions next to them, compiled and run on the same
  * inputs, and every result must be the same bits.
  */
-import { cosf, sinf, tanf } from "./fx/gamemath";
+import { atanf, cosf, sinf, tanf } from "./fx/gamemath";
 
 export const f32 = Math.fround;
 
@@ -201,6 +201,21 @@ export function sqrtf(x: number): number {
   let g = frsqrte(x);
   for (let k = 0; k < 3; k++) g = (0.5 * g) * fma64(-x, g * g, 3.0);
   return f32(x * g);
+}
+
+const HALF_PI_F32 = f32(Math.PI / 2);
+/** the game's acosf (its runtime math, after lbRefract: the decompilation's runtime/math.c): 1 / sqrt(1 - x^2)
+ *  from the Gekko's frsqrte rounded to a float and three single-precision Newton steps, each 3 - g^2 r one
+ *  fused fnmadd, then a quarter turn less atanf(x / sqrt(1 - x^2)) */
+export function acosf(value: number): number {
+  const x = f32(value);
+  let r = madd(-x, x, 1);
+  if (r > 0) {
+    let g = f32(frsqrte(r));
+    for (let k = 0; k < 3; k++) g = f32(f32(0.5 * g) * madd(-f32(g * g), r, 3));
+    r = g;
+  } else r = r !== 0 ? NaN : Infinity;
+  return f32(HALF_PI_F32 - atanf(f32(x * r)));
 }
 
 // ---------------------------------------------------------------- vectors (vec.c)
@@ -495,6 +510,49 @@ export function HSD_MtxSRT(m: Mtx, scale: Vec, rot: Vec, trans: Vec, parentScale
   m[10] = f32(cosY * f32(z0 * cosX));
   m[3] = f32(trans[0]); m[7] = f32(trans[1]); m[11] = f32(trans[2]);
   return m;
+}
+
+/** EulerToQuat (quatlib.c): a turn by x, y, z as a quaternion (x, y, z, w); the first product of each
+ *  expression fused (GALE01 0x8037EED0-0x8037EEF0), the second a rounded fmuls chain */
+export function EulerToQuat(e: ArrayLike<number>, q: Vec): Vec {
+  const cx = cosf(f32(0.5 * e[0])), cy = cosf(f32(0.5 * e[1])), cz = cosf(f32(0.5 * e[2]));
+  const sx = sinf(f32(0.5 * e[0])), sy = sinf(f32(0.5 * e[1])), sz = sinf(f32(0.5 * e[2]));
+  const ss = f32(sy * sz), cc = f32(cy * cz);
+  q[3] = madd(cx, cc, f32(sx * ss));
+  q[0] = msub(sx, cc, f32(cx * ss));
+  q[1] = madd(cz, f32(cx * sy), f32(sz * f32(sx * cy)));
+  q[2] = msub(sz, f32(cx * cy), f32(cz * f32(sx * sy)));
+  return q;
+}
+
+const EPS10 = f32(1e-10);
+
+/** HSD_QuatLib_8037EF28 (quatlib.c): from p toward q by t, along the sphere; the dot product fused from the
+ *  rounded y product (GALE01 0x8037EF6C-0x8037EF94), each output one fmadds over a rounded fmuls. (Its last
+ *  branch, the two nearly opposite and t past half way, takes p itself, not the turned copy it made: as the
+ *  game) */
+export function HSD_QuatLib_8037EF28(p: ArrayLike<number>, q: ArrayLike<number>, out: Vec, t: number): Vec {
+  t = f32(t);
+  const cosom = madd(p[3], q[3], madd(p[2], q[2], madd(p[0], q[0], f32(p[1] * q[1]))));
+  let sp: number, sq: number;
+  if (f32(1 + cosom) > EPS10) {
+    if (f32(1 - cosom) > EPS10) {
+      const theta = acosf(cosom), sinom = sinf(theta);
+      sp = f32(sinf(f32(f32(1 - t) * theta)) / sinom);
+      sq = f32(sinf(f32(t * theta)) / sinom);
+    } else { sq = t; sp = f32(1 - t); }
+  } else if (t < 0.5) {
+    sp = sinf(f32((Math.PI / 2) * f32(1 - f32(2 * t))));
+    sq = sinf(f32((Math.PI / 2) * f32(2 * t)));
+  } else {
+    const t2 = f32(2 * f32(t - 0.5));
+    sp = sinf(f32((Math.PI / 2) * f32(1 - t2)));
+    sq = sinf(f32((Math.PI / 2) * t2));
+  }
+  const x = madd(sp, p[0], f32(sq * q[0])), y = madd(sp, p[1], f32(sq * q[1]));
+  const z = madd(sp, p[2], f32(sq * q[2])), w = madd(sp, p[3], f32(sq * q[3]));
+  out[0] = x; out[1] = y; out[2] = z; out[3] = w;
+  return out;
 }
 
 const srtA = new Float32Array(12), srtB = new Float32Array(12);
