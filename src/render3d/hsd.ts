@@ -12,6 +12,7 @@
  * own files, from your own disk, at runtime.
  */
 import { srt } from "./math";
+import { madd } from "./gxmath";
 
 export interface Archive {
   data: DataView; // the data block (pointers are offsets into it)
@@ -924,11 +925,28 @@ export function sample(keys: Key[], t: number): number | null {
   if (k.kind === 0) return k.p0;
   if (k.duration === 0) return k.p1;
   const dt = Math.min(Math.max(t - k.time, 0), k.duration);
-  const u = dt / k.duration;
-  if (k.kind === 1) return k.p0 + (k.p1 - k.p0) * u;
-  // Hermite with per-frame slopes, as sysdolphin's splines are
-  const u2 = u * u, u3 = u2 * u, D = k.duration;
-  return k.p0 * (2 * u3 - 3 * u2 + 1) + k.p1 * (-2 * u3 + 3 * u2) + k.d0 * D * (u3 - 2 * u2 + u) + k.d1 * D * (u3 - u2);
+  // (as FObjUpdateAnim makes it, in float32: the line d0 * time + p0 with d0 = (p1 - p0) / fterm, the spline
+  // splGetHelmite(1.0 / fterm, time, p0, p1, d0, d1); sysdolphin is built -fp_contract on, so each product added
+  // to a sum is one fused multiply-add)
+  const f = Math.fround;
+  const time = f(dt), p0 = f(k.p0), p1 = f(k.p1);
+  if (k.kind === 1) return madd(f(f(p1 - p0) / f(k.duration)), time, p0);
+  return splGetHelmite(f(1 / k.duration), time, p0, p1, f(k.d0), f(k.d1));
+}
+
+/** sysdolphin's spline.c splGetHelmite: Hermite in time units with per-frame slopes, float32, its products fused
+ *  into the sums they feed (fmadds) */
+export function splGetHelmite(fterm: number, time: number, p0: number, p1: number, d0: number, d1: number): number {
+  const f = Math.fround;
+  const t2 = f(time * time);
+  const T2 = f(fterm * fterm);
+  const t2_T = f(t2 * fterm);
+  const t3_T2 = f(T2 * f(t2 * time));
+  const _2t3_T3 = f(f(2 * t3_T2) * fterm);
+  const _3t2_T2 = f(f(3 * t2) * T2);
+  const a = f(t3_T2 - t2_T);
+  const inner = madd(p0, f(1 + f(_2t3_T3 - _3t2_T2)), f(p1 * f(-_2t3_T3 + _3t2_T2)));
+  return madd(d1, a, madd(d0, f(time + f(a - t2_T)), inner));
 }
 
 /** a key list with the key last sampled (sample()) */
