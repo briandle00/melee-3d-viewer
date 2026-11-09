@@ -22,8 +22,9 @@ const red = (set: LightSet, f: number) => Math.round(set.at(f).color[0] * 255);
 
 test("a light's color: held at its end, looping when its set loops, and on the set's clock", () => {
   const l = light({ offset: 10, aobj: aobj([ramp(9)]), position: null, interest: null });
-  // (255 x 0.4 = 102; 255 x 0.5 = 127.5, kept as 127; 255 x 0.43 = 109.65, kept as 109)
-  assert.equal(red(new LightSet([l]), 40), 102);
+  // (the ramp at 40 is FObjUpdateAnim's 0.01f x 40 + 0, one fused multiply-add: 0.39999998, and 255 x that is
+  // 101.99, kept as 101; 255 x 0.5 = 127.5, kept as 127; 255 x 0.43 = 109.65, kept as 109)
+  assert.equal(red(new LightSet([l]), 40), 101);
   assert.equal(red(new LightSet([l]), 150), 255);
   assert.equal(red(new LightSet([l], 1, new Set(), { loopAll: true }), 150), 127);
   assert.equal(red(new LightSet([l], 1, new Set([10])), 150), 127);
