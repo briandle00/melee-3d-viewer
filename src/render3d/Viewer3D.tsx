@@ -4442,7 +4442,10 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
   // Peach's turnip, in her hand where she holds items while she pulls it and when she has it again (its states 0
   // and 4: itemhold.ts): it_802BD4AC picks it up with Item_8026AB54 on her ftData x8 +0x10 part, its attach
   // joint tied to it in place and turn (it_80274F48: lb_8000C2F8) - the replay's place has no depth, the hand's has
-  0x63: { art: 1, held: { 0: "item", 4: "item" }, pickedUp: true },
+  // (made in her accessory callback - spawnVeg, Fighter_procCollPos, after the items' own procs - and picked up at
+  // once: itPeachTurnip_Logic56_PickedUp starts state 0, which lays its frame 0, and steps it once more with
+  // Item_802694CC: frame 1 the frame it is made)
+  0x63: { art: 1, held: { 0: "item", 4: "item" }, pickedUp: true, from: { 0: 1 } },
   // Peach's parasol: the game ties it to her joint 109 (ftpeachspecialhi.c
   // hands the joint list's 109th straight to Item_AttachToParent), so it
   // swings with her hand
@@ -4483,13 +4486,24 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
   0x79: { art: 7, held: heldAll({ joint: 0 }) },
   0x7a: { art: 8 },
   0x7c: { art: 9, held: heldAll({ joint: 0 }) },
+  // Young Link's milk (his article 5: ftclink.c), drawn where the replay has it: made in his animation callback
+  // (ftCl_AppealS_Anim: it_802C8B28, Fighter_procAnim at the GObj procs' priority 1) and picked up at once -
+  // it_2725_Logic80_PickedUp starts its state (frame 0) and steps it (Item_802694CC) - then the items' own
+  // priority 1 proc, after the fighters' in that pass, steps it again: frame 2 the frame it is made
+  0x7b: { art: 5, from: { 0: 2, 1: 2 } },
   // Ness's (his articles: ftness.c): PK Fire and its pillar, PK Flash and its
   // explosion, PK Thunder's ball and its four trails
   0x42: { art: 0, tilt: true },
   0x43: { art: 1 },
-  0x44: { art: 2 },
+  // (PK Flash and PK Thunder's ball are made in his animation callback - ftNs_SpecialNStart_Anim,
+  // ftNs_SpecialHiStart_Anim and their air ones; Kirby's PK Flash in his - Fighter_procAnim, the GObj procs'
+  // priority 1. Item_80268E5C lays the state's frame 0 as it is made, and the items' own priority 1 proc,
+  // Item_80269528, runs after the fighters' in that pass and steps it once more: frame 1 the frame it is made.
+  // The flash's animation does not loop: as it ends its callback starts state 0 again, which lays frame 0 that
+  // frame - itNesspkflash_UnkMotion0_Anim - so it shows frames 1 to 31, 0, 1 ...: its 32 frames as a loop)
+  0x44: { art: 2, from: { 0: 1 } },
   0x4e: { art: 8 },
-  0x45: { art: 3 },
+  0x45: { art: 3, from: { 0: 1 } },
   0x46: { art: 4 }, 0x47: { art: 5 }, 0x48: { art: 6 }, 0x49: { art: 7 },
   // the bat and the yo-yo, in his hand (his joint 42, by number:
   // ftnessattacks4.c, itnessyoyo.c)
@@ -4530,7 +4544,11 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
   // (Toad: in the stance shown from its animation's frame 7 to 53; struck,
   // its counter's animation begins 10 frames in - he is out already - and he
   // goes at 60: itpeachtoad.c)
-  0x68: { art: 3, held: heldAll({ joint: 109 }), from: { 1: 10 }, shownIn: { 0: [7, 53], 1: [0, 60] } },
+  // (made in her accessory callback - onAccessory4, Fighter_procCollPos, after the items' own procs - and picked up
+  // at once: itPeachToad_Logic91_PickedUp starts state 0, which lays its frame 0, and steps it once more with
+  // Item_802694CC: frame 1 the frame it is made. Its callback shows it as the frame stepped to is 7 and hides it
+  // from 53 on, itPeachtoad_UnkMotion0_Anim)
+  0x68: { art: 3, held: heldAll({ joint: 109 }), from: { 0: 1, 1: 10 }, shownIn: { 0: [7, 53], 1: [0, 60] } },
   0x6f: { art: 4 },
   0x50: { art: 1, held: heldAll({ joint: 23 }) },
   0x57: { art: 2 },
