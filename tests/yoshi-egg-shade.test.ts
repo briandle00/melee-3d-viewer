@@ -1,6 +1,7 @@
 // Yoshi's egg's colors follow his shield: his code holds the egg's materials' animation still (ftYs_Init_8012B6E8:
 // rate 0) and sets it to its length times the share of the shield lost (ftYs_Init_8012B8A4) on each frame of his
-// shield coming up and held and of his rolls in the egg, the egg darker as the shield goes; his egg roll sets it to
+// shield coming up and held and of his rolls in the egg (a roll's from the frame before's shield: bot-pichu_yoshi 1485
+// was a byte off with the frame's own), the egg darker as the shield goes; his egg roll sets it to
 // 0 (ftYs_Init_8012B918). The player drew the file's colors: in bot-pichu_yoshi 1394 and 1484 the egg 26 to 29 of
 // 255 off.
 //
@@ -22,10 +23,11 @@ test("the shield on the last frame his code set the egg's colors", () => {
     st(343, 58),       // GuardOff: kept
     undefined,
     st(14, 60),
-    st(233, 40),       // a roll in the egg
+    st(233, 40),       // a roll in the egg: the frame before's (its callback runs before the shield regains)
+    st(233, 40.07),
     st(357, 12),       // his egg roll: the full shield's
     st(14, 30, 2),     // (another fighter's frame)
-  ]), [null, 59.5, 59, 59, 59, 59, 40, 60, 60]);
+  ]), [null, 59.5, 59, 59, 59, 59, 60, 40, 60, 60]);
 });
 
 test("game files: the egg's diffuse at bot-pichu_yoshi 1394's shield", withGameFiles, async () => {
