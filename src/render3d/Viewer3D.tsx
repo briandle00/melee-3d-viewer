@@ -2374,6 +2374,16 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         // HSD_JObjMakePositionMtx in HSD_JObjDisp, so grIzumi_801CCEA0's camera turns them to itself; the main
         // camera's pass poses them again)
         setBillboardView(axesM.view);
+        // (the shield's bubble and the reflector are effect models too, efasync.c 0x417-0x41A and efalt.c
+        // 0x488-0x48A, drawn by the player's own code above the water: in the pond as well, with the rest)
+        const shapesM = shapesAt(viewerTrack(), fno);
+        for (const a of actors) {
+          if (hidden(a.st)) continue;
+          const key = actorKey(a.player, a.nana);
+          drawShield(r, ek, a, data, frameActors.find((x) => x.key === key), fno, shapesM?.shieldAt(key, fno - 123) ?? undefined, false);
+          const sh = shapesM ? shapesM.shineAt(key, fno - 123, heldOf(data, a.player, a.nana)) : shineAt(data, fno, a.player, a.nana);
+          if (sh) drawReflector(r, ek, a, sh);
+        }
         drawFxModels(r, fxw);
         setBillboardView(view, frameBB);
         const mine = fxw.particlesOf(false);
@@ -5319,7 +5329,7 @@ function shieldSize(st: PlayerState, inputs: PlayerInputs | undefined): number |
 // tenths digit: prop.ts effectOverAll), so it covers the fighter inside it
 // and anything else that crosses it.
 function drawShield(r: Renderer, ek: EffectKit | undefined, a: Actor, data: ReplayData, fa: ActorFrame | undefined,
-                    fno: number, said?: { m: number; age: number }) {
+                    fno: number, said?: { m: number; age: number }, log = true) {
   const st = a.st;
   let radius = shieldSize(st, a.inputs);
   if (radius === null) return;
@@ -5350,7 +5360,7 @@ function drawShield(r: Renderer, ek: EffectKit | undefined, a: Actor, data: Repl
   age += SHIELD_LEAD;
   // one that plays once is gone when its time is up (a shield in its stun
   // shows none after its strike's bubble)
-  if (!which.loop && age >= which.life) { drawnShields.push({ player: a.player, state: st.actionStateId, age, gone: true }); return; }
+  if (!which.loop && age >= which.life) { if (log) drawnShields.push({ player: a.player, state: st.actionStateId, age, gone: true }); return; }
   const pr = ek?.bank?.prop(which.m, 0, true);
   if (!pr || !fa) { r.drawSphere(c, radius, color, 0.45); return; }
   const f = fa.fighter, j = f.shieldJoint;
@@ -5387,7 +5397,7 @@ function drawShield(r: Renderer, ek: EffectKit | undefined, a: Actor, data: Repl
   }
   r.drawSkeleton(pr.skeleton, "xlu");
   r.endPass();
-  drawnShields.push({ player: a.player, state: st.actionStateId, age, model: which.m, at: c.map((v) => +v.toFixed(1)), radius: +radius.toFixed(2), drawn: +drawn.toFixed(2), alpha });
+  if (log) drawnShields.push({ player: a.player, state: st.actionStateId, age, model: which.m, at: c.map((v) => +v.toFixed(1)), radius: +radius.toFixed(2), drawn: +drawn.toFixed(2), alpha });
 }
 // the shields drawn on the last frame (the checks read them)
 let drawnShields: Record<string, unknown>[] = [];
