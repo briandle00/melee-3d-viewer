@@ -11,6 +11,7 @@ import { AObj, Archive, DObj, Image, JObj, MatAnim, loadAnimJoint, loadJoint, lo
 import { DEFAULT_LIGHTS, LightSet, applyOverrides } from "./lightset";
 import { type Fog, RENDER } from "./gx";
 import { Mat, ident } from "./math";
+import { nmsub } from "./gxmath";
 import { Skeleton, type Drawable, type MatState } from "./skeleton";
 import type { Lettering } from "./sistext";
 import { Prop } from "./prop";
@@ -200,23 +201,29 @@ export function stadiumForms(events: { frame: number; event: number; type: numbe
       next = null; at4 = at5 = -1;
     }
   }
-  const change = Math.max(1, t.change), half = Math.trunc(change / 2), least = f32(0.05 * scale);
+  // (grStadium_801D4548's steps in single precision, as its disassembly runs them: the constants 0.95f, 0.05f and
+  // -10.0f; the frame counts converted to floats; a step down one fused fnmsubs)
+  const K95 = f32(0.95), K05 = f32(0.05), s = f32(scale);
+  const change = Math.max(1, t.change), half = Math.trunc(change / 2), least = f32(K05 * s);
   if (next && at5 >= 0) {
     const n = frame - at5;
     // (the step after the rise's last frame is the one that says 6: past it without one, the rise is over)
     if (n > change) return [next];
-    const grown = n === 0 ? least : f32(f32(f32(0.95 * n) / change + 0.05) * scale);
-    const up = n === 0 ? -10 : n < half ? f32(-10 * scale * f32(1 - n / half)) : 0;
-    const down = n > half ? f32(-10 * scale * f32(1 - (change - n) / (change - half))) : 0;
-    return [{ ...cur, scaleY: f32(0.05), y: down }, { ...next, scaleY: grown, y: up }];
+    // (case 5: (0.95f * xD8 / x14 + 0.05f) * scale; up -10 * scale * (1 - xD8 / (x14 / 2)) in its first half, the old
+    // form down -10 * scale * (1 - (x14 - xD8) / (x14 - x14 / 2)) in the second)
+    const grown = n === 0 ? least : f32(f32(K05 + f32(f32(K95 * n) / change)) * s);
+    const ten = f32(-10 * s);
+    const up = n === 0 ? -10 : n < half ? f32(ten * f32(1 - f32(n / half))) : 0;
+    const down = n > half ? f32(ten * f32(1 - f32((change - n) / (change - half)))) : 0;
+    return [{ ...cur, scaleY: K05, y: down }, { ...next, scaleY: grown, y: up }];
   }
   if (at4 >= 0) {
-    // (each frame's step as the game takes it, in single precision)
-    let sy = f32(scale);
-    const step = f32(scale * f32(0.95 / change));
-    for (let k = frame - at4; k > 0 && sy !== f32(0.05); k--) {
-      const shrunk = f32(sy - step);
-      sy = shrunk > least ? shrunk : f32(0.05);
+    // (case 4, each frame: scaleY - scale * (0.95f / x14), one fnmsubs; at least 0.05f * scale, else 0.05f)
+    let sy = s;
+    const step = f32(K95 / change);
+    for (let k = frame - at4; k > 0 && sy !== K05; k--) {
+      const shrunk = nmsub(s, step, sy);
+      sy = shrunk > least ? shrunk : K05;
     }
     return [{ ...cur, scaleY: sy }];
   }
@@ -234,7 +241,7 @@ export function stadiumEventsFromScreens(screens: { frame: number; mode: number 
   const out: { frame: number; event: number; type: number }[] = [];
   // (the frames a form takes to go flat: the game's own steps, counted)
   let flat = 0;
-  for (let sy = f32(1), step = f32(f32(0.95 / Math.max(1, t.change))); flat < 100000; ) {
+  for (let sy = f32(1), step = f32(f32(0.95) / Math.max(1, t.change)); flat < 100000; ) {
     flat++;
     sy = f32(sy - step);
     if (!(sy > f32(0.05))) break;
