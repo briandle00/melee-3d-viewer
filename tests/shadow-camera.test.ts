@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assertNode from "node:assert/strict";
-import { shadowCamera } from "../src/render3d/shadow.ts";
+import { cameraBoxBone, keepsCameraBone, shadowCamera } from "../src/render3d/shadow.ts";
 import { C_MTXOrtho, mtxFromGL } from "../src/render3d/gxmath.ts";
 
 const assertEquals = (got: unknown, want: unknown) => assertNode.deepStrictEqual(got, want);
@@ -45,4 +45,19 @@ test("the shadow camera is the game's, bit for bit (view and projection)", () =>
 
 test("a light where its interest is makes no shadow camera", () => {
   assertEquals(shadowCamera([1, 2, 3], [1, 2, 3], [0, 0, 0], 10), null);
+});
+
+test("a state without a camera callback keeps the camera box's bone where the last one left it (ReboundStop)", () => {
+  // (frames 10-12 a Falcon Kick, 13-14 the clank's ReboundStop - cam_cb NULL - and 15 Rebound, which takes it again)
+  const states: Record<number, number> = { 10: 357, 11: 357, 12: 357, 13: 237, 14: 237, 15: 238 };
+  const at = (f: number) => states[f] ?? 357;
+  const kept = new Map<string, { frame: number; bone: number[] }>();
+  const bone = (f: number) => [f, 2 * f, 0];
+  const got: number[][] = [];
+  for (let f = 10; f <= 15; f++) got.push(cameraBoxBone(kept, "0:0", f, bone(f), at));
+  assertEquals(got, [bone(10), bone(11), bone(12), bone(12), bone(12), bone(15)]);
+  // (a seek into the run, the frame it was last taken on not drawn: the bone as posed)
+  assertEquals(cameraBoxBone(new Map(), "0:0", 14, bone(14), at), bone(14));
+  // (the dead states' Dead*_Cam and Sleep take none either; every other common state's callback does)
+  assertEquals([0, 3, 4, 11, 237, 238].map(keepsCameraBone), [true, true, false, true, true, false]);
 });
