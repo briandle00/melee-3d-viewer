@@ -102,6 +102,11 @@ export interface Drawable {
   bbKind?: number;
   bbPersp?: boolean;
   bbRotZ?: number;
+  /** a mesh on a joint drawn again through an instance joint (JOBJ_INSTANCE): what HSD_JObjDispAll hands the
+   *  instanced subtree as its vmtx is the view times `base` (the instance's matrix times the inverse of the subtree
+   *  root's), and each joint is drawn under that times its own matrix, `joint` - a float32 product in that order,
+   *  not the view times their product (null when it is no such mesh) */
+  copy?: { base: Float32Array; joint: Float32Array } | null;
 }
 
 let stamps = 0;
@@ -250,6 +255,10 @@ export class Skeleton {
   /** each joint drawn again through an instance joint (JOBJ_INSTANCE: hsd.ts loadJoint): its index, the instance's,
    *  the instanced subtree's root's and the joint it copies; null when none */
   private readonly copies: [number, number, number, number][] | null;
+  /** by joint: a copy's instance matrix times the inverse of its subtree root's (placeCopies), and the joint it
+   *  copies (-1 for a joint that is no copy) */
+  private copyBase: Float32Array | null = null;
+  private copySrc: Int32Array | null = null;
 
   constructor(public archive: Archive, public joints: JObj[], dobjs: DObj[], tag: string) {
     const n = (this.n = joints.length);
@@ -541,6 +550,8 @@ export class Skeleton {
   // about z the copied joint's (a billboard's), in float32
   private placeCopies() {
     const W = this.world, C = this.copies!, I = tmpP12, T = tmpL;
+    const B = (this.copyBase ??= new Float32Array(this.n * 16));
+    const S = (this.copySrc ??= new Int32Array(this.n).fill(-1));
     let at = -1, tmpl = -1;
     for (const [c, inst, root, src] of C) {
       if (inst !== at || root !== tmpl) {
@@ -550,6 +561,8 @@ export class Skeleton {
         mtxFromGL(W, I, inst * 16);
         PSMTXConcat(I, T, copyM);
       }
+      mtxToGL(copyM, B, c * 16);
+      S[c] = src;
       mtxFromGL(W, I, src * 16);
       PSMTXConcat(copyM, I, I);
       mtxToGL(I, W, c * 16);
@@ -650,11 +663,23 @@ export class Skeleton {
     if (d.pobj.kind !== "envelope") {
       const bb = this.flags[j] & 0xe00;
       const M = d.mats, o = j * 16;
+      // (a copy drawn through its instance joint: under the view times the instance's base, then its own joint's
+      // matrix - HSD_JObjDispAll's order)
+      const src = this.copySrc ? this.copySrc[j] : -1;
+      if (src >= 0) {
+        const cp = (d.copy ??= { base: new Float32Array(16), joint: new Float32Array(16) });
+        cp.base.set(this.copyBase!.subarray(o, o + 16));
+        cp.joint.set(W.subarray(src * 16, src * 16 + 16));
+      } else d.copy = null;
       if (bb && !bbIdentity) {
         // (in view space, as the game makes it: mkBillBoardMtx and kin on PSMTXConcat(vmtx, jobj->mtx), in
         // float32; the world matrix the rest takes - the lighting, the culling - is the view's inverse times it)
         mtxFromGL(bbView, bbV12, 0);
-        mtxFromGL(W, bbW12, o);
+        if (src >= 0) {
+          mtxFromGL(d.copy!.base, bbW12, 0);
+          PSMTXConcat(bbV12, bbW12, bbV12);
+          mtxFromGL(W, bbW12, src * 16);
+        } else mtxFromGL(W, bbW12, o);
         PSMTXConcat(bbV12, bbW12, bbW12);
         mkBillBoardMtx(bb, (this.flags[j] & 0x2000) !== 0, this.rot[j * 3 + 2], bbW12, bbP12);
         const mv = (d.bbMV ??= new Float32Array(16));
