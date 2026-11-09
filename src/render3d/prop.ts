@@ -76,6 +76,7 @@ export class Prop {
   /** the rest pose, with a picked-up item's joints under the root's first child shown (pickedUp) */
   private reset() {
     const sk = this.skeleton;
+    sk.constrained = null;
     sk.resetPose();
     if (this.pickedUp) {
       const child = sk.parent.indexOf(0);
@@ -264,12 +265,10 @@ export class Prop {
       sk.applyMatAnims(this.matAnim, (j) => this.joints[j]?.dobjs ?? NO_DOBJS, frame, loop);
     }
     gameSrt(this.place, 1, 1, 1, 0, 0, 0, at[0], at[1], at[2]);
+    // (kept until it is posed again: what its code sets after the pose - Shadow Ball's size - makes the matrices
+    // again under the constraints)
     sk.constrained = { joint: Math.max(0, Math.min(attach, sk.n - 1)), resolve };
-    try {
-      sk.update(this.place);
-    } finally {
-      sk.constrained = null;
-    }
+    sk.update(this.place);
   }
 
   /** at frame `frame`, held to another model's joint (its world matrix `parent`) by place and turn
@@ -300,6 +299,7 @@ export class Prop {
    *  effect the game makes a child of a fighter's joint) */
   poseChild(frame: number, parent: Float32Array, scale: number, loop = true) {
     const sk = this.skeleton;
+    sk.constrained = null;
     sk.resetPose();
     if (this.anim) sk.applyAObjs(this.anim, frame, loop);
     this.layTrackPose();
@@ -321,6 +321,7 @@ export class Prop {
    *  what hangs under it) */
   poseMatrix(m: Float32Array, frame?: number) {
     const sk = this.skeleton;
+    sk.constrained = null;
     sk.resetPose();
     sk.rot[0] = sk.rot[1] = sk.rot[2] = 0;
     sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
@@ -346,6 +347,7 @@ export class Prop {
    *  as its animation has them, under the root's matrix (the grapple beam's links: itsamusgrapple.c) */
   poseUnderMatrix(m: Float32Array, frame: number) {
     const sk = this.skeleton;
+    sk.constrained = null;
     sk.resetPose();
     if (this.anim) sk.applyAObjs(this.anim, frame, false);
     if (this.matAnim) {
