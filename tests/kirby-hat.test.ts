@@ -13,8 +13,9 @@ const assertEquals = (got: unknown, want: unknown) => assertNode.deepStrictEqual
 function fakeSkeleton(n: number): Skeleton {
   const sk = {
     n, rot: new Float32Array(n * 3), scale: new Float32Array(n * 3), trans: new Float32Array(n * 3),
-    shown: new Uint8Array(n).fill(1), updated: 0,
+    shown: new Uint8Array(n).fill(1), updated: 0, quat: new Float32Array(n * 4), quatOn: new Uint8Array(n),
     resetPose() { sk.rot.fill(0); sk.scale.fill(1); sk.trans.fill(0); },
+    clearQuats() { sk.quatOn.fill(0); },
     update() { sk.updated++; },
   };
   return sk as unknown as Skeleton;
@@ -41,12 +42,36 @@ test("the hat's extra joints take the track's swung parts, the rest Kirby's pose
   // (part 2's turn about z from "fp", part 3's x place from "fj" and its turn from "fp"; a NaN keeps the rest)
   const fj = new Map([[3, new Float32Array([N, N, N, N, N, N, 7, N, N])]]);
   const fp = new Map([[2, new Float32Array([N, N, 0.5, N, N, N, N, N, N])], [3, new Float32Array([0.25, N, N, N, N, N, N, N, N])]]);
-  poseSkin(hat, kirby, fj, fp);
+  poseSkin(hat, kirby, null, fj, fp);
   assertEquals(Array.from(skin.rot), [0, 0, 1, 0, 0, 2, 0, 0, 0.5, 0.25, 0, 0, 0, 0, 3, 0, 0, 4]);
   assertEquals(Array.from(skin.trans.subarray(9, 12)), [7, 0, 0]);
   assertEquals(Array.from(skin.scale.subarray(6, 12)), [1, 1, 1, 1, 1, 1]);
   // (no track: at rest)
-  poseSkin(hat, kirby);
+  poseSkin(hat, kirby, null);
   assertEquals(Array.from(skin.rot.subarray(6, 12)), [0, 0, 0, 0, 0, 0]);
+  setPartSkips({});
+});
+
+test("a part a quaternion turns takes the track's \"fq\", and his own joints his quaternions", () => {
+  setPartSkips({ 4: [2, 3, 5] });
+  const kirby = fakeSkeleton(4), skin = fakeSkeleton(6);
+  kirby.resetPose();
+  // (his joint 1 blended: a quaternion)
+  kirby.quatOn[1] = 1; kirby.quat.set([0, 0, 0.6, 0.8], 4);
+  const hat: KirbyHat = { prop: null, skin, mask: 0b011 };
+  const N = NaN;
+  // (part 2 swung in "fj" before, a quaternion now; part 3 still Euler)
+  const fj = new Map([[2, new Float32Array([0.5, N, N, N, N, N, N, N, N])], [3, new Float32Array([0.25, N, N, N, N, N, N, N, N])]]);
+  const fq = new Map([[2, new Float32Array([0.6, 0, 0, 0.8, 2, 2, 2, 1, N, N])], [3, new Float32Array([1, 0, 0, 0, N, N, N, N, N, N])]]);
+  poseSkin(hat, kirby, { joints: fq, turned: (p) => p === 2 }, fj);
+  assertEquals(Array.from(skin.quatOn), [0, 1, 1, 0, 0, 0]);
+  assertEquals(Array.from(skin.quat.subarray(4, 12)), [0, 0, 0.6, 0.8, 0.6, 0, 0, 0.8].map(Math.fround));
+  assertEquals(Array.from(skin.scale.subarray(6, 9)), [2, 2, 2]);
+  assertEquals(Array.from(skin.trans.subarray(6, 9)), [1, 0, 0]);
+  assertEquals(skin.rot[9], 0.25);
+  // (the next pose starts without them)
+  kirby.quatOn[1] = 0;
+  poseSkin(hat, kirby, null);
+  assertEquals(Array.from(skin.quatOn), [0, 0, 0, 0, 0, 0]);
   setPartSkips({});
 });

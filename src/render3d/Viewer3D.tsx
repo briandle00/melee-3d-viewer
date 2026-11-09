@@ -45,7 +45,7 @@ import { partSkips, partToModelJoint, worldByPart } from "./parts";
 import { Dynamics, animDriven, eulerToQuat, from44, mtxEuler, quatMtx, type DynPose } from "./dynamics";
 import { GuardFrame, guardTilt } from "./guard";
 import { ENTRY, ENTRY_END, ENTRY_START, entryPose, standScale } from "./entry";
-import { copiesFromReplay, HAT_JOINT, KIRBY, KIRBY_ITEMS, KirbyCopy, KirbyHat, poseSkin, yoshiHatAnim } from "./kirby";
+import { copiesFromReplay, HAT_JOINT, KIRBY, KIRBY_ITEMS, KirbyCopy, KirbyHat, poseSkin, type HatQuats, yoshiHatAnim } from "./kirby";
 import { onAngelPlatform, runNumber, shineAt, SHY_GUY } from "~/common/effects";
 import { ActorFrame, FxWorld, type FxSnapshot, type LearnedFx, type LearnedPiece, NO_WORLD, stepThrough } from "./fx/world";
 import { Checkpoints, jumpTo, type Kept } from "./fx/checkpoints";
@@ -1814,15 +1814,21 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const guarded = blend !== null && blend.anim < 0 && GUARD_POSED.has(a.st.actionStateId) &&
         fi.internalId !== YOSHI_ID;
       const leaned = blend !== null && blend.anim >= FALL_FIRST && blend.anim <= FALL_LAST;
-      const fresh = blend && ((blend.blendFrames > 0 && blend.blendAt < blend.blendFrames) || guarded || leaned)
-        ? trackAt!.poseSent("fj", owner, fno - 123) : null;
+      // (from track version 3 on the track says which line lays a part - of "fj" and "fq", its latest: quatTurned -
+      // so every part whose latest line is an Euler one is laid, sent this frame or not: a part the lean, the guard
+      // or the blend leaves as it was is the game's as it was. Jigglypuff's ear, falling, kept the viewer's own
+      // swing instead, 5 degrees off)
+      const v3 = !!posedBy && trackAt!.version >= 3;
+      const fresh = v3 ? eulerParts(trackAt!, owner, fno - 123)
+        : blend && ((blend.blendFrames > 0 && blend.blendAt < blend.blendFrames) || guarded || leaned)
+          ? trackAt!.poseSent("fj", owner, fno - 123) : null;
       let laid = posedBy ? layTrackSwing(fi, a.st.internalCharacterId, posedBy.joints, true, fresh) : false;
       // (and the ones the simulator runs - the chains a hurtbox sits on - as the game swung them, when the
       // track has them: "fp"; the same quaternion turns leave a chain's joints out of these lines too
       // (viewer_track.c skips them alike), so then only the ones this frame's line has: Zelda's dress kept its
       // roots where the move before left them through a 30-frame blend into her wait, Mewtwo's tail through a fall)
       const swungBy = trackAt?.pose("fp", owner, fno - 123);
-      const swungFresh = fresh ? trackAt!.poseSent("fp", owner, fno - 123) : null;
+      const swungFresh = v3 ? fresh : fresh ? trackAt!.poseSent("fp", owner, fno - 123) : null;
       if (swungBy && layTrackSwing(fi, a.st.internalCharacterId, swungBy.joints, true, swungFresh)) laid = true;
       // (and from track version 3 on, the parts a quaternion turns as the game turned them: "fq", each part whose
       // latest line is an "fq" one (quatTurned) - an animation's blend from TransN down, the guard, the fall's lean,
@@ -2055,7 +2061,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           // ftKb_UnkIntBoolFunc0 under ftDrawCommon_80081200's switch)
           if (kh?.skin && kh.lowHidden) {
             const owner = `${a.player}:${a.nana ? 1 : 0}:${a.st.internalCharacterId}`;
-            poseSkin(kh, fi.skeleton, trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
+            poseSkin(kh, fi.skeleton, hatQuats(trackAt, owner, fno - 123), trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
             kh.skin.posePass(kh.lowHidden);
             kh.skin.passHidden = kh.lowHidden;
             r.drawSkeleton(kh.skin, "opa");
@@ -2170,7 +2176,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         } else if (kh?.skin) {
           if (poseHats) {
             const owner = `${a.player}:${a.nana ? 1 : 0}:${a.st.internalCharacterId}`;
-            poseSkin(kh, fi.skeleton, trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
+            poseSkin(kh, fi.skeleton, hatQuats(trackAt, owner, fno - 123), trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
           }
           // (in a mirror, its low-detail look, as his own model's: ftDrawCommon_80080C28)
           const hatLow = mirror ? kh.lowHidden ?? null : null;
@@ -4842,8 +4848,17 @@ function layTrackQuats(tr: ViewerTrack, fi: Fighter, char: number, owner: string
   }
   return laid;
 }
+/** Kirby's quaternion-turned parts at game frame `g` for his hat (kirby.ts poseSkin): the track's "fq", from version 3 */
+function hatQuats(tr: ViewerTrack | null, owner: string, g: number): HatQuats | null {
+  const q = tr && tr.version >= 3 ? tr.pose("fq", owner, g) : null;
+  return q ? { joints: q.joints, turned: (part) => tr!.quatTurned(owner, part, g) } : null;
+}
+/** the parts whose latest "fj"/"fq" line at game frame `g` is an Euler one (track version 3): `has` as a set's */
+function eulerParts(tr: ViewerTrack, owner: string, g: number): { has(part: number): boolean } {
+  return { has: (part) => !tr.quatTurned(owner, part, g) };
+}
 function layTrackSwing(fi: Fighter, char: number, joints: Map<number, Float32Array>, all: boolean,
-                       only: ReadonlySet<number> | null = null): boolean {
+                       only: { has(part: number): boolean } | null = null): boolean {
   const sk = fi.skeleton;
   let laid = false;
   for (const [part, v] of joints) {
@@ -4855,6 +4870,8 @@ function layTrackSwing(fi: Fighter, char: number, joints: Map<number, Float32Arr
       if (all && !Number.isNaN(v[3 + k])) sk.scale[j * 3 + k] = v[3 + k];
       if (all && !Number.isNaN(v[6 + k])) sk.trans[j * 3 + k] = v[6 + k];
     }
+    // (an Euler turn as the game left it: not the quaternion the viewer's own blend may have given the joint)
+    sk.quatOn[j] = 0;
     laid = true;
   }
   return laid;

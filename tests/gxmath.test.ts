@@ -155,6 +155,21 @@ test("the billboards: mkBillBoardMtx, mkVBillBoardMtx, mkHBillBoardMtx, mkRBillB
   same("billboard", ins, (a) => Array.from(G.mkBillBoardMtx(a[12], !!a[13], a[14], M(a), new Float32Array(12))));
 });
 
+test("the runtime math's acosf, EulerToQuat and HSD_QuatLib_8037EF28 (a fighter's blend turns, lb_8000C490)", { skip }, () => {
+  same("acosf", Array.from({ length: N }, () => [f(-1, 1)]), ([x]) => [G.acosf(x)]);
+  same("eulerquat", Array.from({ length: N }, () => vec(3, -7, 7)), (e) => Array.from(G.EulerToQuat(e, [0, 0, 0, 0])));
+  // (unit quaternions, as EulerToQuat makes them: near each other, far apart, nearly opposite - all three branches)
+  const unit = () => { const q = vec(4, -1, 1), n = Math.hypot(...q); return q.map((v) => Math.fround(v / n)); };
+  const ins: number[][] = [];
+  for (let i = 0; i < N; i++) {
+    const p = unit(), kind = i % 4;
+    const q = kind === 0 ? unit() : kind === 1 ? p.map((v) => Math.fround(v + f(-1e-3, 1e-3)))
+      : kind === 2 ? [-p[0], -p[1], -p[2], -p[3]] : p.slice();
+    ins.push([...p, ...q, f(0, 1)]);
+  }
+  same("slerp", ins, (a) => Array.from(G.HSD_QuatLib_8037EF28(a.slice(0, 4), a.slice(4, 8), [0, 0, 0, 0], a[8])));
+});
+
 test("the matrices move to and from GL's column-major 4 x 4s unchanged", () => {
   const m = Float32Array.from(mtx());
   const gl = G.mtxToGL(m, new Float32Array(16));

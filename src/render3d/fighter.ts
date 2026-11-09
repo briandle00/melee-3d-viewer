@@ -20,7 +20,8 @@ import type { CameraBox } from "./camera";
 import { scriptQuakes, type ScriptQuake } from "./hitlag";
 import { kirbyTrackJoints, partToModelJoint } from "./parts";
 import type { WaitAnim } from "./waitanim";
-import { blendTurn, readDynamics, type DynData } from "./dynamics";
+import { blendTurn, mtxEuler, quatMtx, readDynamics, type DynData } from "./dynamics";
+import { EulerToQuat, HSD_QuatLib_8037EF28, f32, madd } from "./gxmath";
 import { itemVisEvents, type ItemVis } from "./itemhold";
 
 const NO_VIS: ItemVis[] = [];
@@ -539,6 +540,8 @@ export class Fighter {
           if (!arr) continue;
           const k = j * 3 + (tr.type >= 8 ? tr.type - 8 : tr.type >= 5 ? tr.type - 5 : tr.type - 1);
           arr[k] += (v - arr[k]) * p.weight;
+          // (a part animation's joints are left out of the body's blend, ftAnim_8006FE9C's flags_b5: Euler turns)
+          if (arr === sk.rot) sk.quatOn[j] = 0;
         }
       }
     }
@@ -962,6 +965,9 @@ export class Fighter {
   private applyAnim(tracks: Track[][], frame: number, flags: number, root2: number, shadow = false) {
     const sk = this.skeleton, tn = this.transN;
     sk.resetPose();
+    // (an animation laid on the joints whole leaves no quaternion: HSD_JObjClearFlagsAll(JOBJ_USE_QUATERNION) without
+    // a blend, lbCopyJObjSRT from the Euler shadow joints at its end - ftAnim_8006E9B4, ftAnim_8006FF74)
+    sk.clearQuats();
     // (the joint an item is held on: its size put to 1 over the model's as the joint tree is laid, before the
     // animation - ftAnim_8006FA58 and ftAnim_8006FB88: ftCommon_8007F6A4 - so an item tied to it is its own size)
     const hj = partToModelJoint(this.internalId, this.itemJoint);
@@ -990,25 +996,38 @@ export class Fighter {
   /** the joints from TransN down moved `t` of the way from where they are
    *  to an animation's frame: places and sizes straight, turns through
    *  quaternions (ftAnim_8006FE9C, lb_8000C490; all the way: ftAnim_8006FF74).
-   *  TransN and the second root are not blended: they are the animation's */
+   *  TransN and the second root are not blended: they are the animation's.
+   *
+   *  As the game: in float32, each place and size one fmadds over the old
+   *  value's rounded product, the turn left as the animation's when neither
+   *  joint holds a quaternion and each angle is within 1e-4 of the old one,
+   *  else the animation's turn (EulerToQuat) slerped `1 - t` back toward the
+   *  joint's - its quaternion when an earlier step of the blend left one, or
+   *  its Euler turn as one - by HSD_QuatLib_8037EF28, and the joint keeps the
+   *  quaternion (JOBJ_USE_QUATERNION: its matrix HSD_MtxSRTQuat's). Only the
+   *  parts the viewer track does not carry take this pose to the screen (its
+   *  "fj" and "fq" lay the others); a hand's fingers, a cape's hem: their
+   *  Euler stand-in for the quaternion turned them up to 0.8 units off while
+   *  a blend lasted */
   private blendToward(tracks: Track[][], frame: number, t: number, flags: number, root2: number, snap = -1) {
     const sk = this.skeleton;
     const rot = sk.rot.slice(), trans = sk.trans.slice(), scale = sk.scale.slice();
+    const quat = sk.quat.slice(), quatOn = sk.quatOn.slice();
     this.applyAnim(tracks, frame, flags, root2, true);
     if (t >= 1) return;
-    const u = 1 - t, tn = this.transN;
+    t = f32(t);
+    const u = f32(1 - t), tn = this.transN;
     // (not blended, the animation's own: TransN, the second root, and with a TransN that is not joint 1 the
     // joint before it for Mewtwo, whose own code marks it so - ftMt_Init_OnLoad; Mr. Game & Watch's is blended)
     for (let j = tn === 1 ? 2 : 1; j < sk.n; j++) {
       if (j === root2 || j === tn || (j < tn && this.internalId === MEWTWO_ID)) continue;
       // (`snap`: the part the move before turned the fighter by takes the new animation's place and turn whole)
-      if (j === snap) { for (let k = j * 3; k < j * 3 + 3; k++) sk.scale[k] = sk.scale[k] * t + scale[k] * u; continue; }
+      if (j === snap) { for (let k = j * 3; k < j * 3 + 3; k++) sk.scale[k] = madd(sk.scale[k], t, f32(scale[k] * u)); continue; }
       for (let k = j * 3; k < j * 3 + 3; k++) {
-        sk.trans[k] = sk.trans[k] * t + trans[k] * u;
-        sk.scale[k] = sk.scale[k] * t + scale[k] * u;
+        sk.trans[k] = madd(sk.trans[k], t, f32(trans[k] * u));
+        sk.scale[k] = madd(sk.scale[k], t, f32(scale[k] * u));
       }
-      const r = blendTurn(sk.rot.subarray(j * 3, j * 3 + 3), rot.subarray(j * 3, j * 3 + 3), t);
-      sk.rot[j * 3] = r[0]; sk.rot[j * 3 + 1] = r[1]; sk.rot[j * 3 + 2] = r[2];
+      lb_8000C490Turn(sk, j, rot, quatOn[j] ? quat : null, u);
     }
   }
 
@@ -1068,8 +1087,8 @@ export class Fighter {
       if (!this.gamePose(g, frame, depth + 1, state)) return null;
       const on = a.frame + a.rate, len = anim.frames;
       const f = len > 0 ? ((flags & 0x40000000) ? on % len : Math.min(on, len)) : on;
-      const left = a.blendFrames - (a.blendAt + a.rate);
-      if (blending && left > 0) this.blendToward(tracks, f, a.rate / (a.rate + left), flags, root2);
+      const at = f32(a.blendAt + a.rate);
+      if (blending && at < a.blendFrames) this.blendToward(tracks, f, blendStep(a.blendFrames, at, a.rate), flags, root2);
       else this.applyAnim(tracks, f, flags, root2, a.blendFrames > 0);
       return { anim };
     }
@@ -1077,9 +1096,19 @@ export class Fighter {
       // (a blend going on from the event before is one step further; a new one has had blendAt / rate)
       const b = g.at(a.since - 1);
       const goesOn = !!b && b.anim === a.anim && b.kind === a.kind && b.blendFrames === a.blendFrames && b.blendAt < a.blendAt;
-      const steps = a.rate > 0 ? Math.max(1, Math.min(3, Math.round((a.blendAt - (goesOn ? b!.blendAt : 0)) / a.rate))) : 1;
-      // (a new one: Fighter_ChangeMotionState's own steps are 1, or 2 when the move starts past its first frame)
-      const stepped = !goesOn && steps <= (a.frame - (steps - 1) * a.rate > 1e-3 ? 2 : 1);
+      // (the rate the frame's steps went at: a move's script sets its speed after the frame's animation step -
+      // ftAnim_8006EBA4 runs ftAnim_8006E9B4 before ftAction_80073240 - so a blend going on stepped at the speed
+      // the frame before ended with, and the track's rate is the one the next frame steps at. Marth's walk sets
+      // 1.33 a frame into its blend: stepped at it, the blend was 0.06 of the way further than the game's)
+      const rate = goesOn && f32(b!.blendAt + b!.rate) === a.blendAt ? b!.rate : a.rate;
+      const steps = rate > 0 ? Math.max(1, Math.min(3, Math.round((a.blendAt - (goesOn ? b!.blendAt : 0)) / rate))) : 1;
+      // (a new one: Fighter_ChangeMotionState's own steps - one from a start at 0, two from any other start: it
+      // sets the animation a step back, ftAnim_8006EBE8(start - speed), and steps it twice, the first step taking
+      // the frame it was set at (AOBJ_FIRST_PLAY) - so the frame after them is 0 for one and the start for two.
+      // The frame's own step came before them (Fighter_procAnim runs before every proc that changes the state),
+      // so the move before was one step further on, unless the track's count says there was one step more)
+      const own = Math.min(steps, a.frame > 1e-3 ? 2 : 1);
+      const stepped = !goesOn && steps <= own;
       if (earlier(a.since - 1, stepped)) {
         // (a new blend starts from the joints as the frame before left them: Fighter_ChangeMotionState copies
         // them as they are, and a swinging joint is where it had swung to. Mewtwo's tail's first joint going
@@ -1092,10 +1121,8 @@ export class Fighter {
         // and turn, the new animation's own, when the new animation's blend byte is not 0)
         const turned = !goesOn && b && b.anim >= 0 && b.kind === a.kind ? (this.flagsOf(b.anim) >> 6) & 7 : 0;
         const snap = turned && this.blendByte(a.anim) ? partToModelJoint(this.internalId, turned) : -1;
-        const own = Math.min(steps, a.frame - (steps - 1) * a.rate > 1e-3 ? 2 : 1);
         for (let i = steps - 1; i >= 0; i--) {
-          const left = a.blendFrames - (a.blendAt - i * a.rate);
-          this.blendToward(tracks, Math.max(0, a.frame - i * a.rate), left <= 0 ? 1 : a.rate / (a.rate + left), flags, root2,
+          this.blendToward(tracks, Math.max(0, a.frame - i * rate), blendStep(a.blendFrames, f32(a.blendAt - i * rate), rate), flags, root2,
                            steps - i === own ? snap : -1);
         }
         return { anim };
@@ -1581,4 +1608,40 @@ function startingPart(internalId: number, costume: number, part: number): number
   const list = internalId === PICHU ? PICHU_PARTS[costume] ?? PICHU_PARTS[0]
     : internalId === PEACH ? PEACH_PARTS[costume === 1 ? 1 : 0] : DEFAULT_PART[internalId];
   return list?.[part] ?? 0;
+}
+
+/** a blend's step as ftAnim_8006E9B4 takes it, `at` frames of `frames` in after it (x8A8): all the way once
+ *  there, else rate / (rate + frames left), in float32 */
+export function blendStep(frames: number, at: number, rate: number): number {
+  return frames <= at ? 1 : f32(rate / f32(rate + f32(frames - at)));
+}
+
+const lbQ1 = new Float32Array(4), lbQ2 = new Float32Array(4), lbQ = new Float32Array(4);
+const LB_SAME = f32(0.0001);
+/** lb_8000C490's turn for joint `j` of `sk`, whose turn now is the new animation's (Euler): `oldRot` the joint's
+ *  Euler turns before (by joint, 3 each), `oldQuat` its quaternions (4 each) when it held one; `u` how far back
+ *  toward the old turn (arg9). Leaves the animation's Euler turn when neither is a quaternion and each angle is
+ *  within 1e-4 of the old one, else sets the joint's quaternion (and its Euler turn, for what reads those) */
+export function lb_8000C490Turn(sk: Skeleton, j: number, oldRot: Float32Array, oldQuat: Float32Array | null, u: number) {
+  const o = j * 3, R = sk.rot;
+  if (!oldQuat) {
+    const dx = f32(R[o] - oldRot[o]), dy = f32(R[o + 1] - oldRot[o + 1]), dz = f32(R[o + 2] - oldRot[o + 2]);
+    if (Math.abs(dx) <= LB_SAME && Math.abs(dy) <= LB_SAME && Math.abs(dz) <= LB_SAME) { sk.quatOn[j] = 0; return; }
+  }
+  EulerToQuat(R.subarray(o, o + 3), lbQ1);
+  if (oldQuat) for (let k = 0; k < 4; k++) lbQ2[k] = oldQuat[j * 4 + k];
+  else EulerToQuat(oldRot.subarray(o, o + 3), lbQ2);
+  // (which way round: the old one turned over when that is nearer, the squares summed unfused)
+  let sum = 0, dif = 0;
+  for (let k = 0; k < 4; k++) {
+    const a = f32(lbQ1[k] + lbQ2[k]), b = f32(lbQ1[k] - lbQ2[k]);
+    sum = k ? f32(sum + f32(a * a)) : f32(a * a);
+    dif = k ? f32(dif + f32(b * b)) : f32(b * b);
+  }
+  if (dif > sum) for (let k = 0; k < 4; k++) lbQ2[k] = -lbQ2[k];
+  HSD_QuatLib_8037EF28(lbQ1, lbQ2, lbQ, u);
+  for (let k = 0; k < 4; k++) sk.quat[j * 4 + k] = lbQ[k];
+  sk.quatOn[j] = 1;
+  const e = mtxEuler(quatMtx([lbQ[0], lbQ[1], lbQ[2], lbQ[3]]));
+  R[o] = e[0]; R[o + 1] = e[1]; R[o + 2] = e[2];
 }
