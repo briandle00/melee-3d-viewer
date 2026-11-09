@@ -4525,7 +4525,9 @@ const heldAll = (by: HeldBy): Record<number, HeldBy> => Object.fromEntries(Array
 const HOOK_HELD = heldAll(RTHUMB);
 const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
                                  /** its tilt measured from the way it faces, not from straight ahead (a missile) */
-                                 tiltFromFacing?: boolean; charge?: boolean; joint?: number; from?: Record<number, number>;
+                                 tiltFromFacing?: boolean;
+                                 /** its turn as the track has it ("irot") when it does, its tilt else */
+                                 trackTurn?: boolean; charge?: boolean; joint?: number; from?: Record<number, number>;
                                  held?: Record<number, HeldBy>; ownerSize?: boolean; gone?: number[];
                                  trail?: { state: number; at: number[] };
                                  /** held still at a frame of its animation its owner's state says */
@@ -4634,14 +4636,17 @@ const ARTICLES: Record<number, { art: number; tilt?: boolean | "z" | "child";
   // replay's item timer is that life as the frame ends)
   0x7a: { art: 8, lifeBlink: [1] },
   0x7c: { art: 9, held: heldAll({ joint: 0 }) },
-  // Young Link's milk (his article 5: ftclink.c), drawn where the replay has it: made in his animation callback
+  // Young Link's milk (his article 5: ftclink.c): made in his animation callback
   // (ftCl_AppealS_Anim: it_802C8B28, Fighter_procAnim at the GObj procs' priority 1) and picked up at once -
   // it_2725_Logic80_PickedUp starts its state (frame 0) and steps it (Item_802694CC) - then the items' own
   // priority 1 proc, after the fighters' in that pass, steps it again: frame 2 the frame it is made
-  0x7b: { art: 5, from: { 0: 2, 1: 2 } },
+  // Held in his left thumb (it_802C8B28: Item_8026AB54 on FtPart_LThumbNb), tied by the constraints (cns.ts)
+  0x7b: { art: 5, held: heldAll(LTHUMB), from: { 0: 2, 1: 2 } },
   // Ness's (his articles: ftness.c): PK Fire and its pillar, PK Flash and its
   // explosion, PK Thunder's ball and its four trails
-  0x42: { art: 0, tilt: true },
+  // (PK Fire's turn is set once as it is made - HSD_JObjSetRotationZ by its launch angle times his facing,
+  // ftNs_SpecialS_ItemPKFireSpawn's PKFireRot - and the track has it whole: "irot")
+  0x42: { art: 0, tilt: true, trackTurn: true },
   0x43: { art: 1 },
   // (PK Flash and PK Thunder's ball are made in his animation callback - ftNs_SpecialNStart_Anim,
   // ftNs_SpecialHiStart_Anim and their air ones; Kirby's PK Flash in his - Fighter_procAnim, the GObj procs'
@@ -5217,7 +5222,7 @@ function drawArticle(r: Renderer | null, data: ReplayData, fs: Map<string, Fight
   const clock = bomb && art.special ? samusBombClocks(data, frame, it, art.special(4), art.special(8)) : null;
   // a thrown item's turn, as the game has it (the viewer track's: a
   // tumbling bomb), else the way it faces and flies
-  const turn = a.tilt ? null : turnOf?.(it.spawnId) ?? null;
+  const turn = a.tilt && !a.trackTurn ? null : turnOf?.(it.spawnId) ?? null;
   if (turn) {
     // (a root that rolls as it faces the camera - the fireballs' (JOBJ_RBILLBOARD) - takes its turn about z from its
     // own rotate z, mkRBillBoardMtx: on the joint, not in the matrix it is placed by)
