@@ -36,7 +36,7 @@ import { StageScene } from "./gr";
 import { Face, faceAt, TrackFaces } from "./face";
 import { HELD_MAKER, heldIn, holdOf, type Hold } from "./itemhold";
 import { EffectKit } from "./effects3d";
-import { Prop } from "./prop";
+import { gameSrt, Prop } from "./prop";
 import { fighterCnsModel, resolvePositionOrientation } from "./cns";
 import { blasterScale, sausageShown, trailShown } from "./itemrules";
 import { cobjViewingMtx, HSD_MtxGetScale, mtxFromGL, PSMTXMultVec, type Mtx } from "./gxmath";
@@ -659,9 +659,16 @@ const KB_HELD: { kind: number; states: [number, number]; slot: number; part: num
 const SAMUS = 13, THROW_F = 219, THROW_LW = 222;
 /** the frame Samus's throw beam's joints are at on frame `t` of her throw (animtime.ts steppedFrame): the speed
  *  the viewer track's animation for her has, else 1 */
-const throwBeamFrame = (tr: ViewerTrack | null, a: Actor, fno: number, t: number): number => {
+/** the grapple beam's item root, for its glow (drawChains) */
+const glowPlace = new Float32Array(16);
+const throwBeamFrame = (tr: ViewerTrack | null, a: Actor, fno: number, t: number): number =>
+  steppedFrame(t, throwBeamRate(tr, a, fno));
+/** the speed of her throw's animation at frame `fno` (the viewer track's, else 1): the beam's joints step at the
+ *  one the throw began with (ftCo_800DD398's anim_speed: ftSs_Init_80128770 sets it on every joint animation of the
+ *  beam that does not loop) */
+const throwBeamRate = (tr: ViewerTrack | null, a: Actor, fno: number): number => {
   const said = tr?.animAt(a.player, a.nana ? 1 : 0, fno - 123);
-  return steppedFrame(t, said ? Math.fround(said.rate) : 1);
+  return said ? Math.fround(said.rate) : 1;
 };
 const CATCHING_FIRST = 212, CATCHING_LAST = 222;
 const catching = (st: PlayerState) => st.actionStateId >= CATCHING_FIRST && st.actionStateId <= CATCHING_LAST;
@@ -2330,9 +2337,21 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const on = jointOf(a.player, THROWN_PART);
         const glow = f.articleAnimated(c.art, null, null), art = f.article(c.art, 0);
         if (on && glow) {
-          glow.poseUnder(0, on, art?.scale ?? 1, false, 0);
           const turn = itemPose(own.spawnId)?.get(1)?.[2];
-          if (turn !== undefined && !Number.isNaN(turn)) glow.setRootRotationZ(turn);
+          const rotZ = turn !== undefined && !Number.isNaN(turn) ? turn : null;
+          // (its matrix as the game makes it, in float32: under the item's root - at the item's place, turned as the
+          // track has it or to its facing, at its size - then lb_8000C2F8's constraints on Samus's ThrowN, cns.ts)
+          const resolve = heldConstraintNow?.(a.player, THROWN_PART) ?? null;
+          if (resolve) {
+            const size = Math.fround(art?.scale ?? 1), rot = turnOf(own.spawnId);
+            const facing = own.facingDirection < 0 ? -1 : 1;
+            gameSrt(glowPlace, size, size, size, rot?.[0] ?? 0, rot ? rot[1] : facing * Math.PI / 2, rot?.[2] ?? 0,
+                    own.xPosition, own.yPosition, 0);
+            glow.poseTiedChild(glowPlace, size, resolve, rotZ);
+          } else {
+            glow.poseUnder(0, on, art?.scale ?? 1, false, 0);
+            if (rotZ !== null) glow.setRootRotationZ(rotZ);
+          }
           const w = glow.skeleton.world;
           if (note) {
             drawnArticles.push({ type: own.typeId, state: item.state, x: w[12], y: w[13], z: w[14], scale: Math.hypot(w[0], w[1], w[2]),
@@ -2381,7 +2400,10 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const on = beam ? jointOf(a.player, THROWN_PART) : null;
         if (!beam || !on) continue;
         const t = stateAge(data, fno, a.player, a.nana);
-        beam.poseConstrained(t + 1, on, playerScaleOf[a.player] ?? 1, false, throwBeamFrame(trackAt, a, fno, t));
+        // (its root's matrix as lb_8000C2F8's constraints leave it, on her ThrowN: cns.ts, in float32)
+        const resolve = heldConstraintNow?.(a.player, THROWN_PART) ?? null;
+        if (resolve) beam.poseTied(t + 1, resolve, playerScaleOf[a.player] ?? 1, t + 1, throwBeamRate(trackAt, a, fno - t));
+        else beam.poseConstrained(t + 1, on, playerScaleOf[a.player] ?? 1, false, throwBeamFrame(trackAt, a, fno, t));
         out.push(beam);
       }
       return out;

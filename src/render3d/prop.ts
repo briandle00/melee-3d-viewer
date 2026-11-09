@@ -356,6 +356,43 @@ export class Prop {
     sk.update(this.place);
   }
 
+  /** tied to another model's joint by lb_8000C2F8 (a position and an orientation constraint: `resolve`, cns.ts
+   *  resolvePositionOrientation, lays them over the root's matrix as HSD_JObjMakeMatrix made it), the root at
+   *  `scale` each way (HSD_JObjSetScale) unless its animation sets its scale, its joints' animation asked for at
+   *  frame 0 and played `steps` frames at `rate` as the game plays it (fobj.ts), its materials at `frame`.
+   *  Samus's throw beam: ftSs_Init_CreateThrowGrappleBeam sets the root's scale, adds the animations and ties the
+   *  root to her ThrowN. The root has no parent: its matrix is its own pose's (HSD_MtxSRT) under the constraints */
+  poseTied(frame: number, resolve: (m: Mtx) => void, scale: number, steps: number, rate: number, loop = false) {
+    const sk = this.skeleton;
+    this.reset();
+    sk.scale[0] = sk.scale[1] = sk.scale[2] = scale;
+    if (this.anim) sk.applyAObjsPlayed(this.anim, steps, rate);
+    this.layTrackPose();
+    if (this.matAnim) {
+      sk.resetMaterials();
+      sk.applyMatAnims(this.matAnim, (j) => this.joints[j]?.dobjs ?? NO_DOBJS, frame, loop);
+    }
+    ident(this.place);
+    sk.constrained = { joint: 0, resolve };
+    sk.update(this.place);
+  }
+
+  /** at rest, the child of a parent whose matrix is `place` (a column-major 4 x 4) and whose scale is `parentScale`
+   *  each way, its root turned `rotZ` about z when given, and its root tied to another model's joint by
+   *  lb_8000C2F8 (`resolve`: cns.ts): an item's joint the game ties to a fighter's (it_80274F48 - the grapple
+   *  beam's glow, the item's bone 1 under its root, on Samus's ThrowN). HSD_JObjMakeMatrix makes the root's matrix
+   *  under the parent's (HSD_MtxSRT with the parent's scale), then the constraints lay theirs over it */
+  poseTiedChild(place: ArrayLike<number>, parentScale: number, resolve: (m: Mtx) => void, rotZ: number | null) {
+    const sk = this.skeleton;
+    this.reset();
+    if (rotZ !== null) sk.rot[2] = rotZ;
+    sk.rootScale = [parentScale, parentScale, parentScale];
+    this.place.set(place);
+    sk.constrained = { joint: 0, resolve };
+    sk.update(this.place);
+    sk.rootScale = null;
+  }
+
   /** at frame `frame`, a child of another model's joint (its world matrix
    *  `parent`, taken at size `scale`): its root's own animation under it (an
    *  effect the game makes a child of a fighter's joint) */

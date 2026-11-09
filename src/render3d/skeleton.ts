@@ -9,6 +9,7 @@ import {
   aobjFrame, decodePObj, sample, splineAt,
 } from "./hsd";
 import { Mat, ident, invert, mul } from "./math";
+import { playedValue } from "./fobj";
 import {
   HSD_MtxSRT, HSD_MtxSRTQuat, PSMTXConcat, PSMTXIdentity, PSMTXInverse, PSMTXMultVec, concatGL, madd, mkBillBoardMtx, mtxFromGL, mtxToGL,
   type Mtx,
@@ -429,6 +430,22 @@ export class Skeleton {
         // 700 to 1300 frames on in a set of 100)
         if (tr.keys.length && tr.keys[0].time > t) continue;
         const v = sample(tr.keys, t);
+        if (v === null) continue;
+        if (tr.type === 4) this.path(i, ao.obj, v);
+        else this.set(i, tr.type, tr.type >= 8 && tr.type <= 10 && Math.abs(v) < MIN_SCALE ? MIN_SCALE : v);
+      }
+    }
+  }
+
+  /** the same AObjs played as the game plays them (fobj.ts playedValue): asked for at frame 0 and stepped `steps`
+   *  times at `rate`, in float32, each stopping at its end (or going back to its start, a looping one) */
+  applyAObjsPlayed(aobjs: (AObj | null)[], steps: number, rate = 1) {
+    const n = Math.min(aobjs.length, this.n);
+    for (let i = 0; i < n; i++) {
+      const ao = aobjs[i];
+      if (!ao) continue;
+      for (const tr of ao.tracks) {
+        const v = playedValue(tr.keys, steps, rate, ao.end, ao.loop);
         if (v === null) continue;
         if (tr.type === 4) this.path(i, ao.obj, v);
         else this.set(i, tr.type, tr.type >= 8 && tr.type <= 10 && Math.abs(v) < MIN_SCALE ? MIN_SCALE : v);

@@ -924,11 +924,18 @@ export function sample(keys: Key[], t: number): number | null {
   const k = keys[lo];
   if (k.kind === 0) return k.p0;
   if (k.duration === 0) return k.p1;
-  const dt = f32(Math.min(Math.max(t - k.time, 0), k.duration));
-  // (in float32, as FObjUpdateAnim makes them in this -fp_contract on code: a line's slope (p1 - p0) / fterm once, then
-  // d0 * time + p0 fused; a curve by splGetHelmite)
-  if (k.kind === 1) return madd(f32(f32(k.p1 - k.p0) / f32(k.duration)), dt, k.p0);
-  return splGetHelmite(f32(1 / k.duration), dt, k.p0, k.p1, k.d0, k.d1);
+  return segmentValue(k, f32(Math.min(Math.max(t - k.time, 0), k.duration)));
+}
+
+/** FObjUpdateAnim's value of a segment (one of decodeKeys' keys: from its key to the next) `time` into it, in float32
+ *  as this -fp_contract on code makes it: a constant's p0 (p1 once the time is the wait), a line's slope (p1 - p0) /
+ *  fterm once, then d0 * time + p0 fused; a curve by splGetHelmite. sample() looks the time up from the frame; a clock
+ *  stepped the game's way (fobj.ts playedValue) hands its own */
+export function segmentValue(k: Key, time: number): number {
+  if (k.kind === 0) return time >= k.duration ? k.p1 : k.p0;
+  if (k.duration === 0) return k.p1;
+  if (k.kind === 1) return madd(f32(f32(k.p1 - k.p0) / f32(k.duration)), time, k.p0);
+  return splGetHelmite(f32(1 / k.duration), time, k.p0, k.p1, k.d0, k.d1);
 }
 
 /** splGetHelmite (spline.c): the Hermite curve with per-frame slopes, `fterm` 1 / the segment's frames (1.0 / fobj->fterm,

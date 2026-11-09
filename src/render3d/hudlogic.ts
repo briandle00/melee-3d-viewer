@@ -130,14 +130,17 @@ export function shakeOffset(frame: number, hit: number, damage: number, piece: n
  *  is given a speed - sideways 0.3041 to 0.912, left and right in turn, and
  *  up 1.2165 to 2.0275 - and from the next frame flies with it, falling by
  *  0.2028 a frame, until it is well off the screen (100 either way across,
- *  100 down): the speeds of piece `piece` (float32, fused as the game's: foo's 0.6083f * HSD_Randf() + 0.3041f, its
- *  sign by the turn; 0.811f * HSD_Randf() + 1.2165f). */
+ *  100 down): the speeds of piece `piece` (float32 as main.dol has them: foo's 0.6083f * HSD_Randf(), then + 0.3041f
+ *  (its sign by the turn, ifStatus_804D6D61); 0.811f * HSD_Randf() + 1.2165f, one fmadds). */
 export function scatterSpeed(piece: number, port: number, ko: number, draws: number[] | null = null): [number, number] {
   const sign = piece % 2 === 0 ? 1 : -1;
   // (the game's own draws when known - HSD_Randf, x then y for each piece in turn; else a stand-in of our own)
   const rx = Math.fround(draws ? draws[piece * 2] : rand(port, ko, piece, 3));
   const ry = Math.fround(draws ? draws[piece * 2 + 1] : rand(port, ko, piece, 4));
-  return [sign * madd(Math.fround(0.6083), rx, Math.fround(0.3041)), madd(Math.fround(0.811), ry, Math.fround(1.2165))];
+  // (main.dol 802F4974: fmuls then fadds - foo's a + b is not fused with the product; -a - b on the left turns;
+  // the up speed is one fmadds, 802F49A0)
+  const a = Math.fround(Math.fround(0.6083) * rx), b = Math.fround(0.3041);
+  return [sign > 0 ? Math.fround(a + b) : Math.fround(-a - b), madd(Math.fround(0.811), ry, Math.fround(1.2165))];
 }
 
 /** a piece's place `frames` after the KO, from where it stood (x, y: its joint's translation): each frame the
