@@ -76,7 +76,7 @@ import { shyGuyAnim, shyGuyClock } from "./shyguy";
 import { THUNDERS, thunderScaleY } from "./thunder";
 import { itemSource } from "./item-source";
 import { chargeShotScale, isShadowBall, shadowBallScale } from "./shadow-ball";
-import { shadowCamera } from "./shadow";
+import { cameraBoxBone, shadowCamera } from "./shadow";
 import { stageFrame, stageRevision } from "~/simulation-stage";
 import { mark, timed } from "./startup";
 
@@ -498,6 +498,7 @@ const offScreenSet = new Set<unknown>();
 
 /** a fighter's camera joint's world matrix as GX has it, for its shadow camera (scratch) */
 const shadowJoint = new Float32Array(12);
+
 
 /** a fighter's camera bone (the camera box's bone_pos): its place in the fighter's bone list (ftLib_800866DC; the
  *  model's joint past its part list's gaps, parts.ts) and the box's offset on it, world; without the joint, its
@@ -956,6 +957,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   const viewProj = mat(), view = mat(), proj = mat();
   // (the game camera's projection as GX is loaded with it: the draw log's)
   const gxProj = new Float32Array(16);
+  /** each fighter's camera box bone_pos as its last state with a camera callback left it (the shadow camera's) */
+  const cameraBones = new Map<string, { frame: number; bone: number[] }>();
   let gxProjOn = false;
   // (and its near and far planes: the stage's, when its code sets them)
   let camPlanes = cameraPlanes(null);
@@ -2033,7 +2036,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         // the offset is 0; the depth: ftCamera_80076018's xC.z times the fighter's scale.y, in single precision)
         const o = fi.cameraOffset;
         const M = mtxFromGL(fi.skeleton.world, shadowJoint, joint * 16);
-        const bone = o[0] || o[1] || o[2] ? PSMTXMultVec(M, o, [0, 0, 0]) as number[] : [M[3], M[7], M[11]];
+        const now = o[0] || o[1] || o[2] ? PSMTXMultVec(M, o, [0, 0, 0]) as number[] : [M[3], M[7], M[11]];
+        const at = (g: number) => { const q = data.frames[g]?.players[a.player]; return (a.nana ? q?.nanaState : q?.state)?.actionStateId ?? -1; };
+        const bone = cameraBoxBone(cameraBones, actorKey(a.player, a.nana), fno, now, at);
         return shadowCamera(sl.pos, sl.interest, bone, Math.fround(Math.fround(fi.cameraBox?.v[2] ?? 0) * Math.fround(scales[a.player] ?? 1)));
       };
       for (const a of actors) {

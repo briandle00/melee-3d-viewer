@@ -116,6 +116,29 @@ export function shadowCamera(pos: number[], interest: number[] | null, bone: num
   return { view, proj, viewProj, tex, gx };
 }
 
+/** the common states whose camera callback (MotionState cam_cb, run by Fighter_procCamera) does not take the camera
+ *  box's bone_pos - ftCamera_UpdateCameraBox, ftCamera_800762F4 and ftCamera_80076320 do, through ftLib_800866DC:
+ *  DeadDown, DeadLeft, DeadRight, DeadUp (their Dead*_Cam move the match camera only), Sleep and ReboundStop (none).
+ *  The fighters' own tables give every state of theirs a callback that takes it */
+export const keepsCameraBone = (state: number) => (state >= 0 && state <= 3) || state === 11 || state === 237;
+
+/** the camera box bone_pos a fighter's shadow is made from on `frame`: `now` (its camera joint through the offset,
+ *  as posed this frame) when its state's camera callback takes it, else the one the last state that took it left -
+ *  on a clank's first frame (ReboundStop) the bone is where it was the frame before, though the fighter has moved.
+ *  `kept` holds each fighter's last taken bone by `key`; `stateAt` a frame's action state. Without the frame it was
+ *  last taken on (a seek into such a run), `now` */
+export function cameraBoxBone(kept: Map<string, { frame: number; bone: number[] }>, key: string, frame: number, now: number[],
+                              stateAt: (frame: number) => number): number[] {
+  if (!keepsCameraBone(stateAt(frame))) {
+    kept.set(key, { frame, bone: now });
+    return now;
+  }
+  let f = frame - 1;
+  while (f > 0 && frame - f < 600 && keepsCameraBone(stateAt(f))) f--;
+  const k = kept.get(key);
+  return k && k.frame === f ? k.bone : now;
+}
+
 /** the shadow's gray as the copy keeps it: the copy takes the red channel's
  *  top four bits (GXSetTexCopyDst's 0x20, R4), read back as I4 */
 export function shadowGray(intensity: number): number {
