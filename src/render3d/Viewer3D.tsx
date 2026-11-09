@@ -37,6 +37,9 @@ import { Face, faceAt, TrackFaces } from "./face";
 import { HELD_MAKER, heldIn, holdOf, type Hold } from "./itemhold";
 import { EffectKit } from "./effects3d";
 import { Prop } from "./prop";
+import { fighterCnsModel, resolvePositionOrientation } from "./cns";
+import { blasterScale } from "./itemrules";
+import type { Mtx } from "./gxmath";
 import type { FigaTree } from "./hsd";
 import { partSkips, partToModelJoint, worldByPart } from "./parts";
 import { Dynamics, animDriven, eulerToQuat, from44, mtxEuler, quatMtx, type DynPose } from "./dynamics";
@@ -121,6 +124,9 @@ let itemPoseLog: PoseLog | null = null;
 /** the material animation an item's code laid once and left (the viewer track's "imat", it_80273670: Peach's
  *  turnip's face): [the state whose animations, the frame], for the frame drawn, by spawn id; or null */
 let itemMaterialNow: ((spawnId: number) => [number, number] | null) | null = null;
+/** for the frame drawn: how the constraints that tie an item to its holder's part leave the item's joint's
+ *  matrix (cns.ts: the fighter as posed this frame), by owner and part; null when it is not posed */
+let heldConstraintNow: ((owner: number, part: number) => ((m: Mtx) => void) | null) | null = null;
 /** an item's textures as its code left them, when the track says ("imat"): the material animation of the state
  *  it laid, at the frame it laid, over its pose's - while it is in that state, or in one with no material
  *  animation of its own. Peach's turnip: its face picked in the ground (state 0, frame 5 in bot-peach_puff 1764)
@@ -2190,6 +2196,13 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const jointOf = (owner: number, j: number): Float32Array | null => {
       const fa = frameActors.find((x) => x.key === actorKey(owner, false));
       return fa && j >= 0 && (j + 1) * 16 <= fa.world.length ? fa.world.subarray(j * 16, j * 16 + 16) : null;
+    };
+    heldConstraintNow = (owner: number, part: number) => {
+      const fa = frameActors.find((x) => x.key === actorKey(owner, false));
+      if (!fa || part < 0 || (part + 1) * 16 > fa.world.length) return null;
+      const sk = fa.fighter.skeleton;
+      const model = fighterCnsModel(fa.st.internalCharacterId, fa.world, sk.parent, sk.flags);
+      return (m: Mtx) => { resolvePositionOrientation(m, model, part); };
     };
     const heldShake = (owner: number) => shakes.get(actorKey(owner, false));
     drawnArticles = [];
@@ -4948,7 +4961,11 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
   }
   if (on) {
     const age = it.typeId === GW_TORCH && owner ? torchAge(data, owner, frame, it) : itemAnimAge(data, frame, it);
-    art.prop.poseUnder(still ?? age + (a.from?.[it.state] ?? 0), on, size, false, art.attach);
+    const t = still ?? age + (a.from?.[it.state] ?? 0);
+    // (its tied joint as the constraints leave it, on the holder's part: cns.ts)
+    const resolve = joint !== undefined ? heldConstraintNow?.(it.owner, joint) ?? null : null;
+    if (resolve) art.prop.poseHeld(t, resolve, heldItemScale(data, frame, it, owner, art.scale) ?? size, on.subarray(12, 15), false, art.attach);
+    else art.prop.poseUnder(t, on, size, false, art.attach);
     layItemMaterial(data, fs, it, frame, art);
     // (held: its place kept against Mewtwo's hand at his size)
     if (shadowScale !== null) art.prop.setGrandchildScale(shadowScale, shadowOwner?.modelScale);
@@ -5109,6 +5126,21 @@ function torchAge(data: ReplayData, owner: Fighter, frame: number, it: ReplayIte
 
 /** Samus's charge shot (Kirby's copy: 0x97) */
 const SAMUS_CHARGE = 0x5e;
+
+/** Fox's and Falco's blasters (Kirby's copies' are other kinds: their size is their attributes', as made) */
+const BLASTERS = new Set([0x4a, 0x4b]);
+
+/** the size (scl) the game gives a held item other than its attributes' (`attrScale`, +0x60), or null: Fox's and
+ *  Falco's blasters are made at 0.85 of it (it_8026BAE8 from ftFox_SpecialN_SpawnBlaster, ftfoxspecialn.c), and in
+ *  a throw (ftFx_Throw_Anim) at 0.85 of the fighter's size - its player's size (x34_scale.y: 1) times its model
+ *  scaling; in float32 */
+function heldItemScale(data: ReplayData, frame: number, it: ReplayItem, owner: Fighter | null, attrScale: number): number | null {
+  if (!BLASTERS.has(it.typeId)) return null;
+  let born = frame;
+  while (born > 0 && data.frames[born - 1]?.items?.some((q) => q.spawnId === it.spawnId)) born--;
+  const s = data.frames[born]?.players[it.owner]?.state.actionStateId ?? -1;
+  return blasterScale(s >= THROW_F && s <= THROW_LW && !!owner, owner?.modelScale ?? 1, attrScale);
+}
 
 /** Fox's and Falco's lasers, and Kirby's copies of them (itfoxlaser.c) */
 const RAYS = new Set([0x36, 0x37, 0x88, 0x89]);

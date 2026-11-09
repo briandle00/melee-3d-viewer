@@ -11,6 +11,7 @@ import {
 import { Mat, ident, invert, mul } from "./math";
 import {
   HSD_MtxSRT, HSD_MtxSRTQuat, PSMTXConcat, PSMTXIdentity, PSMTXInverse, PSMTXMultVec, concatGL, madd, mkBillBoardMtx, mtxFromGL, mtxToGL,
+  type Mtx,
 } from "./gxmath";
 
 /** what a texture animation can change, per TObj */
@@ -548,6 +549,7 @@ export class Skeleton {
     const o = i * 16;
     if (p >= 0) { mtxFromGL(W, P, p * 16); PSMTXConcat(P, L, L); }
     else if (parentWorld) { mtxFromGL(parentWorld, P, 0); PSMTXConcat(P, L, L); }
+    if (this.constrained && this.constrained.joint === i) this.constrained.resolve(L);
     mtxToGL(L, W, o);
     // (a joint held somewhere else, its children with it)
     if (this.shift && this.shift.joint === i) { W[o + 12] += this.shift.d[0]; W[o + 13] += this.shift.d[1]; W[o + 14] += this.shift.d[2]; }
@@ -575,12 +577,12 @@ export class Skeleton {
 
   /** the pose as of the last update that changed something, to know one that changes nothing */
   private last: { rot: Float32Array; scale: Float32Array; trans: Float32Array; shown: Uint8Array; quat: Float32Array; quatOn: Uint8Array; parent: Float32Array;
-                  hasParent: boolean; shifted: boolean; view: number } | null = null;
+                  hasParent: boolean; shifted: boolean; constrained: boolean; view: number } | null = null;
   /** whether any joint faces the camera (its matrices follow the view) */
   private billboards: boolean | null = null;
   private unchanged(parentWorld: Mat | null): boolean {
     const L = this.last;
-    if (!SKIP_SAME || !L || this.shift || L.shifted || !!parentWorld !== L.hasParent) return false;
+    if (!SKIP_SAME || !L || this.shift || L.shifted || this.constrained || L.constrained || !!parentWorld !== L.hasParent) return false;
     if ((this.billboards ??= this.flags.some((f) => (f & 0xe00) !== 0)) && L.view !== bbViewId) return false;
     if (parentWorld) for (let k = 0; k < 16; k++) if (parentWorld[k] !== L.parent[k]) return false;
     const n3 = this.n * 3, R = this.rot, S = this.scale, T = this.trans;
@@ -593,12 +595,13 @@ export class Skeleton {
   }
   private remember(parentWorld: Mat | null) {
     const L = (this.last ??= { rot: new Float32Array(this.n * 3), scale: new Float32Array(this.n * 3), trans: new Float32Array(this.n * 3),
-                                shown: new Uint8Array(this.n), quat: new Float32Array(this.n * 4), quatOn: new Uint8Array(this.n), parent: new Float32Array(16), hasParent: false, shifted: false, view: 0 });
+                                shown: new Uint8Array(this.n), quat: new Float32Array(this.n * 4), quatOn: new Uint8Array(this.n), parent: new Float32Array(16), hasParent: false, shifted: false, constrained: false, view: 0 });
     L.rot.set(this.rot); L.scale.set(this.scale); L.trans.set(this.trans); L.shown.set(this.shown);
     L.quat.set(this.quat); L.quatOn.set(this.quatOn);
     L.hasParent = !!parentWorld;
     if (parentWorld) L.parent.set(parentWorld.subarray(0, 16));
     L.shifted = !!this.shift;
+    L.constrained = !!this.constrained;
     L.view = bbViewId;
   }
   private matrices(d: Drawable) {
@@ -719,6 +722,10 @@ export class Skeleton {
   /** one joint moved by d in the world after it is posed, and its children
    *  with it (a fighter held: its XRotN where its holder's TransN2 is) */
   shift: { joint: number; d: [number, number, number] } | null = null;
+  /** a joint the game ties to another model's joint by constraints (an item held: lb_8000C2F8), and what they do
+   *  to its matrix once HSD_JObjMakeMatrix has made it (HSD_JObjSetupMatrixSub's HSD_RObjUpdateAll: cns.ts); the
+   *  joints under it are made on the matrix it leaves */
+  constrained: { joint: number; resolve: (m: Mtx) => void } | null = null;
 
   /** a joint's world position */
   position(j: number): [number, number, number] {

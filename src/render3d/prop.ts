@@ -6,7 +6,7 @@
 import { AObj, Archive, DObj, JObj, MatAnim, loadAnimJoint, loadJoint, loadMatAnimJoint } from "./hsd";
 import { RENDER } from "./gx";
 import { ident, invert, Mat, mul } from "./math";
-import { HSD_MtxSRT, mtxToGL } from "./gxmath";
+import { HSD_MtxSRT, type Mtx, mtxToGL } from "./gxmath";
 import { Skeleton } from "./skeleton";
 
 // the root's place as the game makes a joint's matrix: HSD_MtxSRT, in float32 with its own sinf and cosf
@@ -244,6 +244,32 @@ export class Prop {
     for (let c = 0; c < 3; c++) for (let r = 0; r < 3; r++) this.tied[c * 4 + r] *= ls;
     mul(this.place, this.tied, this.inv);
     sk.update(this.place);
+  }
+
+  /** at frame `frame`, held by a fighter (Item_8026AB54: it_802742F4 ties its joint `attach` to the fighter's by
+   *  lb_8000C2F8): its root at the item's size `scale` (Item_8026849C: the root's scale is the item's scl, the
+   *  file's rest left out), its joints as its animation has them, and the tied joint's matrix as the constraints
+   *  leave it once it is made (`resolve`: cns.ts resolvePositionOrientation); the joints under it go with it. `at`:
+   *  where the item's root stands (the joints above the tied one, which the constraints do not move) */
+  poseHeld(frame: number, resolve: (m: Mtx) => void, scale: number, at: ArrayLike<number>, loop = true, attach = 0) {
+    const sk = this.skeleton;
+    this.reset();
+    if (this.anim) sk.applyAObjs(this.anim, frame, loop);
+    this.layTrackPose();
+    if (this.rootAtOrigin) sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
+    this.itemRootScale();
+    if (this.itemRoot && !this.rootScaled) sk.scale[0] = sk.scale[1] = sk.scale[2] = scale;
+    if (this.matAnim) {
+      sk.resetMaterials();
+      sk.applyMatAnims(this.matAnim, (j) => this.joints[j]?.dobjs ?? NO_DOBJS, frame, loop);
+    }
+    gameSrt(this.place, 1, 1, 1, 0, 0, 0, at[0], at[1], at[2]);
+    sk.constrained = { joint: Math.max(0, Math.min(attach, sk.n - 1)), resolve };
+    try {
+      sk.update(this.place);
+    } finally {
+      sk.constrained = null;
+    }
   }
 
   /** at frame `frame`, held to another model's joint (its world matrix `parent`) by place and turn
