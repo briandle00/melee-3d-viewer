@@ -5202,7 +5202,9 @@ function rayScale(data: ReplayData, frame: number, it: ReplayItem, max: number):
 /** an article, posed: with its outline first when it has one (Mr. Game &
  *  Watch's props: itdraw.c - the prop's own joints hidden and the outline's
  *  shown, in the outline's color, writing no depth; then the prop without
- *  its outline) */
+ *  its outline; then the outline's joints again, in depth only: it_8026EECC's
+ *  third draw, whose pixel engine fn_80277D8C sets to compare and update depth
+ *  and write no color while xDCF_flag.b5 is set) */
 function drawProp(r: Renderer, art: NonNullable<ReturnType<Fighter["article"]>>) {
   const sk = art.prop.skeleton, o = art.outline;
   if (art.color) for (const s of sk.states) s.diffuse.set(art.color);
@@ -5221,6 +5223,16 @@ function drawProp(r: Renderer, art: NonNullable<ReturnType<Fighter["article"]>>)
   }
   r.drawSkeleton(sk, "opa");
   r.drawSkeleton(sk, "xlu");
+  if (o) {
+    const saved = sk.shown.slice();
+    for (const j of o.main) if (!(sk.parent[j] >= 0 && saved[sk.parent[j]] === 0)) sk.setBranchShown(j, false);
+    for (const j of o.shell) if (!(sk.parent[j] >= 0 && saved[sk.parent[j]] === 0)) sk.setBranchShown(j, true);
+    r.setDepthOnly(true);
+    r.drawSkeleton(sk, "opa");
+    r.drawSkeleton(sk, "xlu");
+    r.setDepthOnly(false);
+    sk.shown.set(saved);
+  }
   r.endPass();
 }
 
