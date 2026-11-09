@@ -24,10 +24,10 @@ import { HudKit, stageMagnifierColors } from "./hud";
 import { bgFlashTables } from "./fx/bgflash";
 import type { ColAnimTables } from "./fx/colanim";
 import { pageCache, sharedPromise, trim } from "../state/pageCache";
-import { decodeTrack } from "./trackcodec";
+import { prepareTrack, TrackAssembly, trackAnswerOf, type TrackPiece } from "./trackcodec";
 import { motionTableFromDol, textFontFromDol } from "./dol";
 import { plateFontFromText } from "./plates";
-import type { ViewerTrack } from "./track";
+import type { TrackData, ViewerTrack } from "./track";
 import type { GameFilesFrom } from "../sim/protocol";
 import { fileRead, mark, timed, timing } from "./startup";
 import { cacheGet, cachePut, sha256 } from "./gamecache";
@@ -209,17 +209,65 @@ export async function trackAnswer(replayUrl: string): Promise<unknown | null> {
   try {
     const r = await fetch(url, { cache: "no-store" });
     if (!r.ok) return null;
-    const buf = await r.arrayBuffer();
-    const u = new Uint8Array(buf);
     // (the compact form, trackcodec.ts, is gzipped; the simulator's export is JSON)
-    if (u[0] === 0x1f && u[1] === 0x8b) return { state: "ready", track: await decodeTrack(buf) };
-    const t = JSON.parse(new TextDecoder().decode(u));
-    // (its floats still words: the ViewerTrack made of it reads them, a pose line's straight into its lines)
-    if (t && Array.isArray(t.events)) return { state: "ready", track: t };
-    return t?.state ? t : { state: "none", reason: "not a viewer track" };
+    return await trackAnswerOf(await r.arrayBuffer());
   } catch {
     return null;
   }
+}
+
+/** makes the worker a track is read in (track.worker.ts); null: read on the page's thread */
+let trackWorker: (() => Worker) | null = () => new Worker(new URL("./track.worker.ts", import.meta.url), { type: "module" });
+/** another maker of the track's worker (a test's, a tool's), or null to read tracks on the page's thread */
+export function setTrackWorker(make: (() => Worker) | null) {
+  trackWorker = make;
+}
+
+/** trackAnswer, with the track prepared for the player (prepareTrack) in a worker: the longest game's takes 3 to
+ *  4 s to read, and the page stays responsive meanwhile - all that is left on its thread is taking the prepared
+ *  track in (its typed arrays transferred). On the page's thread when no worker can be made or it fails to run.
+ *  `stop` aborted (another replay): the worker is ended, and the answer is null */
+export async function preparedTrackAnswer(replayUrl: string, stop?: AbortSignal): Promise<unknown | null> {
+  const url = trackUrls.get(replayUrl);
+  if (!url) return { state: "none", reason: "no viewer track given" };
+  const here = async () => {
+    const a = (await trackAnswer(replayUrl)) as { state?: string; track?: TrackData } | null;
+    return a?.state === "ready" ? { state: "ready", track: prepareTrack(a.track!) } : a;
+  };
+  let w: Worker | null = null;
+  try { w = trackWorker && typeof Worker !== "undefined" ? trackWorker() : null; } catch { w = null; }
+  if (!w) return here();
+  const worker = w;
+  // (the worker fetches it itself: its URL whole, as the page resolves it)
+  const whole = typeof location !== "undefined" ? new URL(url, location.href).href : url;
+  return await new Promise<unknown | null>((ok) => {
+    let done = false;
+    const finish = (a: unknown | null | Promise<unknown | null>) => {
+      if (done) return;
+      done = true;
+      worker.terminate();
+      stop?.removeEventListener("abort", aborted);
+      void Promise.resolve(a).then(ok, () => ok(null));
+    };
+    const aborted = () => finish(null);
+    if (stop?.aborted) return finish(null);
+    stop?.addEventListener("abort", aborted);
+    // (the track comes in pieces, each its own short task here: TrackAssembly)
+    const assembly = new TrackAssembly();
+    worker.onmessage = (e: MessageEvent<TrackPiece>) => {
+      if (done) return;
+      if (e.data.kind === "answer") return finish(e.data.answer);
+      try {
+        const track = assembly.take(e.data);
+        if (track) finish({ state: "ready", track });
+      } catch {
+        finish(null);
+      }
+    };
+    // (the worker could not run - a page that allows none, a browser without module workers: on the page's thread)
+    worker.onerror = (e: ErrorEvent) => { e.preventDefault(); finish(stop?.aborted ? null : here()); };
+    worker.postMessage({ url: whole });
+  });
 }
 
 /** the effects table (effect-table.json beside the page, optional); null when it is not there */

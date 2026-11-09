@@ -45,7 +45,7 @@ const POSE: Record<string, [number, number, number]> = {
 };
 /** a type whose values are those of another's line of the same frame and head */
 const DERIVE: Record<string, string> = { fp: "fj" };
-/** the pose types the player keeps compact (track.ts POSES): read into PoseLines, not events */
+/** the pose types the player keeps compact (POSES): read into PoseLines, not events */
 const COMPACT = new Set(["fj", "fp", "fq", "fh", "jp", "lm", "lj", "sp"]);
 
 /** A pose type's lines, compact: line l's frame, its h head numbers (heads[l * h ...]) and its groups - each a
@@ -59,6 +59,166 @@ export interface PoseLines {
   start: Uint32Array;
   end: Uint32Array;
   flat: Float32Array;
+}
+
+/** how many values after the type name an event's thing is (its key): the
+ *  rest is its new state. Types not here are instants (an effect started). */
+export const KEYS: Record<string, number> = {
+  tint: 3, charge: 3, part: 3, pos: 2, shake: 2, hide: 2, cns: 2,
+  bg: 0, fd: 0, bgcolor: 0, cam: 0, ganim: 1, gcolor: 1, gjoint: 2,
+  hook: 2, irot: 1, fdrot: 0, stadscreen: 0, anim: 2, rng: 0, fod: 0, ij: 2,
+  // (version 3; "imat" and "lmat" are written as the item's code lays them: the last one holds)
+  mag: 1, imat: 1, lmat: 2,
+  // (Yoshi's egg's colors as his shield set them: "egg" by port and sub)
+  egg: 2,
+};
+
+/** how a pose line reads: values before its joints that name the owner, values of a joint, whether a joint
+ *  has "out" before its mask, whether the owner's header has a link count, and whether a joint is two numbers
+ *  (joint, link: kept as link * LINK_JOINTS + joint) */
+export const POSES: Record<string, { key: number; width: number; out: boolean; links: boolean; pair?: boolean }> = {
+  jp: { key: 1, width: 9, out: false, links: false },
+  fp: { key: 3, width: 9, out: false, links: false },
+  lm: { key: 1, width: 12, out: true, links: true },
+  sp: { key: 1, width: 9, out: false, links: false },
+  fj: { key: 3, width: 9, out: false, links: false },
+  fq: { key: 3, width: 10, out: false, links: false },
+  fh: { key: 3, width: 9, out: false, links: false },
+  lj: { key: 1, width: 9, out: false, links: false, pair: true },
+};
+
+/** a track made ready for the player (ViewerTrack): its events before `until` in frame order, the states by type and
+ *  key, the instants by type and in the track's order, the pose lines compact. Plain data - Maps, arrays, typed
+ *  arrays - so it can be made off the page's thread and handed over (track.worker.ts; the typed arrays transferred) */
+export interface PreparedTrack {
+  prepared: true;
+  seconds: number;
+  version: number;
+  until: number;
+  states: Map<string, Map<string, TrackEvent[]>>;
+  instants: Map<string, TrackEvent[]>;
+  allInstants: TrackEvent[];
+  poses: Map<string, PoseLines>;
+}
+
+/** what ViewerTrack keeps of a track (PreparedTrack) */
+export function prepareTrack(data: TrackData): PreparedTrack {
+  // (a track handed over with its floats still as words (a JSON track): read below, those of the events kept - a
+  // pose line's words go straight into its lines' floats, poseLinesOf, not made numbers in the events first)
+  const words = !data.decoded;
+  // (a track that says it is not exact without saying where holds for none of it)
+  const until = typeof data.diverged_at === "number" ? data.diverged_at : data.exact === false ? -Infinity : Infinity;
+  const p: PreparedTrack = {
+    prepared: true, seconds: data.seconds ?? 0, version: data.version ?? 0, until,
+    states: new Map(), instants: new Map(), allInstants: [], poses: new Map(),
+  };
+  // (only the events before it: the rest are of the simulator's other game)
+  const events = data.events.filter((e) => Array.isArray(e) && typeof e[0] === "number" && typeof e[1] === "string" &&
+                                            e[0] < until);
+  // (a stable sort: two changes on one frame keep the order they were made in)
+  events.sort((a, b) => a[0] - b[0]);
+  // (the pose lines kept compact: those read so (readTrack), and a JSON track's pose events, made so here)
+  const poseEvents = new Map<string, TrackEvent[]>();
+  for (const [type, lines] of Object.entries(data.poses ?? {})) p.poses.set(type, lines);
+  for (const e of events) {
+    const type = e[1], n = KEYS[type];
+    if (type in POSES) {
+      let list = poseEvents.get(type);
+      if (!list) poseEvents.set(type, (list = []));
+      list.push(e);
+      continue;
+    }
+    if (words) decodeEventFloats(e);
+    if (n === undefined) {
+      let list = p.instants.get(type);
+      if (!list) p.instants.set(type, (list = []));
+      list.push(e);
+      p.allInstants.push(e);
+      continue;
+    }
+    let byKey = p.states.get(type);
+    if (!byKey) p.states.set(type, (byKey = new Map()));
+    const key = e.slice(2, 2 + n).join(":");
+    let list = byKey.get(key);
+    if (!list) byKey.set(key, (list = []));
+    list.push(e);
+  }
+  for (const [type, list] of poseEvents) {
+    const how = POSES[type];
+    p.poses.set(type, poseLinesOf(list, how.key + (how.links ? 1 : 0)));
+  }
+  return p;
+}
+
+/** a prepared track handed over in pieces (track.worker.ts to files.ts): the pose lines with their typed arrays
+ *  transferred, then the states and the instants in runs of at most PIECE events, in their order. Each piece is
+ *  its own message, so taking one in is a short task on the page's thread - the longest game's 100K events in one
+ *  message took 50-65 ms to take in, the pieces a few ms each. `answer`: a host's answer that is not a track */
+export type TrackPiece =
+  | { kind: "answer"; answer: unknown }
+  | { kind: "head"; seconds: number; version: number; until: number; poses: Map<string, PoseLines> }
+  | { kind: "states"; type: string; key: string; events: TrackEvent[] }
+  | { kind: "instants"; events: TrackEvent[] }
+  | { kind: "end" };
+const PIECE = 4096;
+
+/** a prepared track's pieces, each with what to transfer with it */
+export function trackPieces(p: PreparedTrack): { piece: TrackPiece; transfer: ArrayBuffer[] }[] {
+  const buffers = new Set<ArrayBuffer>();
+  for (const l of p.poses.values()) {
+    for (const a of [l.frames, l.heads, l.start, l.end, l.flat]) buffers.add(a.buffer as ArrayBuffer);
+  }
+  const out: { piece: TrackPiece; transfer: ArrayBuffer[] }[] = [
+    { piece: { kind: "head", seconds: p.seconds, version: p.version, until: p.until, poses: p.poses }, transfer: [...buffers] },
+  ];
+  for (const [type, byKey] of p.states) {
+    for (const [key, list] of byKey) {
+      for (let i = 0; i < list.length; i += PIECE) {
+        out.push({ piece: { kind: "states", type, key, events: list.slice(i, i + PIECE) }, transfer: [] });
+      }
+    }
+  }
+  for (let i = 0; i < p.allInstants.length; i += PIECE) {
+    out.push({ piece: { kind: "instants", events: p.allInstants.slice(i, i + PIECE) }, transfer: [] });
+  }
+  out.push({ piece: { kind: "end" }, transfer: [] });
+  return out;
+}
+
+/** a prepared track put together again from its pieces, in order (trackPieces): `take` answers the track once
+ *  its last piece is in (the instants by type made from them in their order, as prepareTrack makes them) */
+export class TrackAssembly {
+  private p: PreparedTrack | null = null;
+  take(piece: TrackPiece): PreparedTrack | null {
+    if (piece.kind === "head") {
+      this.p = {
+        prepared: true, seconds: piece.seconds, version: piece.version, until: piece.until,
+        states: new Map(), instants: new Map(), allInstants: [], poses: piece.poses,
+      };
+      return null;
+    }
+    const p = this.p;
+    if (!p) throw new Error("a track's piece before its head");
+    if (piece.kind === "states") {
+      let byKey = p.states.get(piece.type);
+      if (!byKey) p.states.set(piece.type, (byKey = new Map()));
+      const list = byKey.get(piece.key);
+      if (list) for (const e of piece.events) list.push(e);
+      else byKey.set(piece.key, piece.events);
+      return null;
+    }
+    if (piece.kind === "instants") {
+      for (const e of piece.events) {
+        let list = p.instants.get(e[1]);
+        if (!list) p.instants.set(e[1], (list = []));
+        list.push(e);
+        p.allInstants.push(e);
+      }
+      return null;
+    }
+    if (piece.kind === "end") return p;
+    throw new Error(`not a track's piece: ${piece.kind}`);
+  }
 }
 
 /** a pose type's events made compact (a JSON track's; frame order as they come) */
@@ -591,6 +751,17 @@ export function readTrack(b: Uint8Array): TrackData {
   decodeTrackFloats(events);
   track.decoded = true;
   return track;
+}
+
+/** a host's answer for a replay's track from what it sent: ready with the track - the compact form (gzipped) or
+ *  the simulator's JSON (its floats still words: prepareTrack reads them, a pose line's straight into its lines) -
+ *  or the host's own answer ({state: "pending"}, {state: "none", reason}) */
+export async function trackAnswerOf(buf: ArrayBuffer): Promise<unknown> {
+  const u = new Uint8Array(buf);
+  if (u[0] === 0x1f && u[1] === 0x8b) return { state: "ready", track: await decodeTrack(buf) };
+  const t = JSON.parse(new TextDecoder().decode(u));
+  if (t && Array.isArray(t.events)) return { state: "ready", track: t };
+  return t?.state ? t : { state: "none", reason: "not a viewer track" };
 }
 
 /** a track's compact form as a host may send it (gzipped) */

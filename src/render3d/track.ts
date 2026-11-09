@@ -103,8 +103,8 @@
  * works those frames out from the replay, as it does with no track at all.
  */
 import { colorLightDir, type Tint } from "./fx/colanim";
-import { hasTrack, liveTrack, trackAnswer } from "./files";
-import { decodeEventFloats, type PoseLines, poseLinesOf } from "./trackcodec";
+import { hasTrack, liveTrack, preparedTrackAnswer } from "./files";
+import { KEYS, type PoseLines, POSES, type PreparedTrack, prepareTrack } from "./trackcodec";
 import { pageCache, trim } from "../state/pageCache";
 
 export type TrackEvent = [number, string, ...(number | string)[]];
@@ -135,19 +135,6 @@ interface PoseSnap {
  *  matrix's rows 0-2) - and for a chain whether each link is out and how many it has */
 export interface TrackPose { joints: Map<number, Float32Array>; out: Map<number, number> | null; links: number }
 
-/** how a pose line reads: values before its joints that name the owner, values of a joint, whether a joint
- *  has "out" before its mask, whether the owner's header has a link count, and whether a joint is two numbers
- *  (joint, link: kept as link * LINK_JOINTS + joint) */
-const POSES: Record<string, { key: number; width: number; out: boolean; links: boolean; pair?: boolean }> = {
-  jp: { key: 1, width: 9, out: false, links: false },
-  fp: { key: 3, width: 9, out: false, links: false },
-  lm: { key: 1, width: 12, out: true, links: true },
-  sp: { key: 1, width: 9, out: false, links: false },
-  fj: { key: 3, width: 9, out: false, links: false },
-  fq: { key: 3, width: 10, out: false, links: false },
-  fh: { key: 3, width: 9, out: false, links: false },
-  lj: { key: 1, width: 9, out: false, links: false, pair: true },
-};
 /** "lj": a link's joint is kept as link * LINK_JOINTS + joint */
 export const LINK_JOINTS = 4096;
 
@@ -238,17 +225,6 @@ class PoseStream {
   }
 }
 
-/** how many values after the type name an event's thing is (its key): the
- *  rest is its new state. Types not here are instants (an effect started). */
-const KEYS: Record<string, number> = {
-  tint: 3, charge: 3, part: 3, pos: 2, shake: 2, hide: 2, cns: 2,
-  bg: 0, fd: 0, bgcolor: 0, cam: 0, ganim: 1, gcolor: 1, gjoint: 2,
-  hook: 2, irot: 1, fdrot: 0, stadscreen: 0, anim: 2, rng: 0, fod: 0, ij: 2,
-  // (version 3; "imat" and "lmat" are written as the item's code lays them: the last one holds)
-  mag: 1, imat: 1, lmat: 2,
-  // (Yoshi's egg's colors as his shield set them: "egg" by port and sub)
-  egg: 2,
-};
 
 /** a fighter's animation as the game played it ("anim"), as of game frame `since` */
 export interface TrackAnim {
@@ -257,13 +233,13 @@ export interface TrackAnim {
 
 export class ViewerTrack {
   /** changes of state, by type and key, in frame order */
-  private states = new Map<string, Map<string, TrackEvent[]>>();
+  private states: Map<string, Map<string, TrackEvent[]>>;
   /** instants (effects started...), by type, in frame order */
-  private instants = new Map<string, TrackEvent[]>();
+  private instants: Map<string, TrackEvent[]>;
   /** every instant, in the order the track has them (within a frame too) */
-  private allInstants: TrackEvent[] = [];
+  private allInstants: TrackEvent[];
   /** the pose lines, compact, by type (TrackData.poses, or made here from a track's pose events) */
-  private poses = new Map<string, PoseLines>();
+  private poses: Map<string, PoseLines>;
   readonly seconds: number;
   /** the track's version (TrackData.version) */
   readonly version: number;
@@ -271,49 +247,16 @@ export class ViewerTrack {
    *  went another way there): Infinity when it holds for the whole replay */
   readonly until: number;
 
-  constructor(data: TrackData) {
-    // (a track handed over with its floats still as words (a JSON track): read below, those of the events kept - a
-    // pose line's words go straight into its lines' floats, poseLinesOf, not made numbers in the events first)
-    const words = !data.decoded;
-    this.seconds = data.seconds ?? 0;
-    this.version = data.version ?? 0;
-    // (a track that says it is not exact without saying where holds for none of it)
-    this.until = typeof data.diverged_at === "number" ? data.diverged_at : data.exact === false ? -Infinity : Infinity;
-    // (only the events before it: the rest are of the simulator's other game)
-    const events = data.events.filter((e) => Array.isArray(e) && typeof e[0] === "number" && typeof e[1] === "string" &&
-                                              e[0] < this.until);
-    // (a stable sort: two changes on one frame keep the order they were made in)
-    events.sort((a, b) => a[0] - b[0]);
-    // (the pose lines kept compact: those read so (readTrack), and a JSON track's pose events, made so here)
-    const poseEvents = new Map<string, TrackEvent[]>();
-    for (const [type, lines] of Object.entries(data.poses ?? {})) this.poses.set(type, lines);
-    for (const e of events) {
-      const type = e[1], n = KEYS[type];
-      if (type in POSES) {
-        let list = poseEvents.get(type);
-        if (!list) poseEvents.set(type, (list = []));
-        list.push(e);
-        continue;
-      }
-      if (words) decodeEventFloats(e);
-      if (n === undefined) {
-        let list = this.instants.get(type);
-        if (!list) this.instants.set(type, (list = []));
-        list.push(e);
-        this.allInstants.push(e);
-        continue;
-      }
-      let byKey = this.states.get(type);
-      if (!byKey) this.states.set(type, (byKey = new Map()));
-      const key = e.slice(2, 2 + n).join(":");
-      let list = byKey.get(key);
-      if (!list) byKey.set(key, (list = []));
-      list.push(e);
-    }
-    for (const [type, list] of poseEvents) {
-      const how = POSES[type];
-      this.poses.set(type, poseLinesOf(list, how.key + (how.links ? 1 : 0)));
-    }
+  /** `data`: a track, or one prepared already (prepareTrack: off the page's thread, files.ts preparedTrackAnswer) */
+  constructor(data: TrackData | PreparedTrack) {
+    const p = "prepared" in data ? data : prepareTrack(data);
+    this.seconds = p.seconds;
+    this.version = p.version;
+    this.until = p.until;
+    this.states = p.states;
+    this.instants = p.instants;
+    this.allInstants = p.allInstants;
+    this.poses = p.poses;
   }
 
   /** whether the track says anything of this type (else the replay's way is used) */
@@ -711,12 +654,15 @@ export function replayPath(url: string): string | null {
   return hasTrack(url) ? url : null;
 }
 
-export type TrackAnswer = { state: "ready"; track: TrackData } | { state: "pending" } | { state: "none"; reason?: string };
+export type TrackAnswer = { state: "ready"; track: TrackData | PreparedTrack } | { state: "pending" } |
+  { state: "none"; reason?: string };
 
 /** the track for a replay: reads it, again every few seconds while a host says it is being made,
  *  until it is ready (then `got`) or cannot be had; `stop` ends the asking */
 export function fetchTrack(path: string, got: (t: ViewerTrack) => void, why?: (reason: string) => void): () => void {
   let stopped = false, timer: ReturnType<typeof setTimeout> | undefined;
+  // (a read under way ends with the asking: its worker is stopped)
+  const reading = new AbortController();
   // (one made on the page as the replay plays: each longer one as it comes, src/sim/feed.ts)
   const live = liveTrack(path);
   if (live) return live.subscribe((t) => { if (!stopped) got(t); }, (r) => { if (!stopped) why?.(r); });
@@ -726,7 +672,8 @@ export function fetchTrack(path: string, got: (t: ViewerTrack) => void, why?: (r
   if (have) { queueMicrotask(() => { if (!stopped) got(have); }); return () => { stopped = true; }; }
   const ask = async (wait: number) => {
     if (stopped) return;
-    const a = (await trackAnswer(path)) as TrackAnswer | null;
+    // (read and prepared in a worker: the page's thread only takes it in)
+    const a = (await preparedTrackAnswer(path, reading.signal)) as TrackAnswer | null;
     if (stopped) return;
     if (!a) { why?.("the track could not be read"); return; }
     if (a.state === "ready") {
@@ -740,6 +687,6 @@ export function fetchTrack(path: string, got: (t: ViewerTrack) => void, why?: (r
     else why?.(a.reason ?? "");
   };
   void ask(500);
-  return () => { stopped = true; clearTimeout(timer); };
+  return () => { stopped = true; clearTimeout(timer); reading.abort(); };
 }
 
