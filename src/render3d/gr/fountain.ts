@@ -14,6 +14,7 @@
  */
 import type { Part, Run, Stage, StageFrame, StageLogic } from "../stage";
 import type { Emitter } from "./particles";
+import { madd } from "../gxmath";
 
 interface Column { part: Part; side: 0 | 1; tall: number }
 
@@ -56,8 +57,9 @@ export class Fountain implements StageLogic {
       const m = e.place;
       m[12] = at[0]; m[13] = at[1]; m[14] = at[2];
       e.skeleton.update(m);
-      // the column's own height: its joint 2 over its foot
-      const tall = e.joints.length > 2 ? (e.skeleton.position(2)[1] - at[1]) / (st.scale || 1) : 45;
+      // the column's own height: its joint 2 over its foot, at the stage's scale (grIzumi_801CCBDC's xD8:
+      // (vec.y - aa.y) / Ground_801C0498(), in float32)
+      const tall = e.joints.length > 2 ? Math.fround(Math.fround(e.skeleton.position(2)[1] - at[1]) / Math.fround(st.scale || 1)) : 45;
       st.extras.push(e);
       // (as a viewer track names them: the game makes the left one first, and its table keeps the second)
       st.named.set(side === 0 ? 1004 : 4, e);
@@ -108,13 +110,16 @@ export class Fountain implements StageLogic {
       // (the track's or the replay's for this frame; the frame handed in when neither says)
       const h = this.heightAt(frame, c.side) ?? (c.side === 0 ? sf?.fodLeftPlatformHeight : sf?.fodRightPlatformHeight) ??
         this.height(st, frame, c.side);
-      const f = Math.max(0.01, h / c.tall);
+      // (grIzumi_801CC358: xD0 / (double) xD8 rounded to a float, at least 0.01f; wide 0.5f * f + 0.5f in one
+      // fmadds)
+      let f = Math.fround(h / c.tall);
+      if (f < Math.fround(0.01)) f = Math.fround(0.01);
       const sk = c.part.skeleton;
       if (sk.n < 2) continue;
       // (the joint under the object's own root - HSD_JObjGetChild of it: the file's root joint, the part's
       // joint 0 here. The game puts a joint of its own above a stage object's file root, and its
       // Ground_801C3FA4 counts from the file's root: that function's 2 is this part's joint 2, the height)
-      sk.scale[0] = 0.5 * f + 0.5;
+      sk.scale[0] = madd(0.5, f, 0.5);
       sk.scale[1] = f;
     }
   }
