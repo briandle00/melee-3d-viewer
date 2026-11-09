@@ -364,6 +364,9 @@ export interface HudActor {
   drawn: boolean;
   /** the magnifier may show it (ftLib_80086ED0: hidden by its move but not invisible still counts); drawn if unset */
   magnify?: boolean;
+  /** whether the game's magnifier drew its picture this frame, when a viewer track says ("mag"): the game decides by
+   *  the fighter's screen point as the frame before left it (x2188), not this frame's; worked out here if unset */
+  shows?: boolean;
   /** where it is drawn, when not where the replay says (a star KO) */
   at?: [number, number, number];
   /** where the player's record has it when its tag is placed (fn_802FCC44, Player_LoadPlayerCoords): the frame
@@ -600,8 +603,12 @@ export class Hud {
       // (the fighters' lights in the pictures: set up once, through the magnifier's camera as the frame before left
       // it - its last picture's view - before it moves to each fighter: ifMagnify_802FBBDC's first
       // HSD_CObjSetCurrent and HSD_GObj_80390ED0(gobj, 7))
-      const lit = Float32Array.from(this.magView);
+      // (the same frame drawn again - paused, or a picture option changed - takes the view it began with)
+      let lit: Float32Array;
+      if (this.magBefore && this.magBefore.f === f) lit = this.magBefore.view;
+      else this.magBefore = { f, view: (lit = Float32Array.from(this.magView)) };
       r.setLightsView(lit);
+      this.magFrame = f;
       for (const p of this.players) {
         const a = actors.find((x) => x.player === p.slot);
         // (not for one KO'd, asleep or coming back on the angel platform: ftLib_80086ED0)
@@ -609,8 +616,11 @@ export class Hud {
         const [sx, sy, w] = toScreen(viewProj, a.bone, k);
         // (Camera_80030BBC: the point in whole pixels, cut toward zero, inside the scissor)
         const px = Math.trunc(sx), py = Math.trunc(sy);
-        if (w > 0 && px >= 320 - 320 * k && px < 320 + 320 * k && py >= 0 && py < 480) continue;
-        if (w <= 0) continue;
+        if (a.shows !== undefined) { if (!a.shows) continue; }
+        else {
+          if (w > 0 && px >= 320 - 320 * k && px < 320 + 320 * k && py >= 0 && py < 480) continue;
+          if (w <= 0) continue;
+        }
         if (!p.pic) {
           p.pic = r.target(PIC, PIC);
           // (ifMagnify_802FBBDC erases it with a quad, HSD_CObjEraseScreen(cobj, 1, 0, 1): the draw log says so)
@@ -906,6 +916,24 @@ export class Hud {
    *  camera bone, over the stage's colors for where it is (ifmagnify.c) */
   /** the magnifier camera's view as its last picture left it (GL; at first its CObjDesc's: eye (0, 0, 300), interest 0) */
   private magView = gameView(new Float32Array(16), [0, 0, 300], [0, 0, 0]);
+  /** the frame (the replay's index) whose magnifier pass magView follows: the last one this HUD ran, or the one
+   *  before a jump that seedMagView gave it; null before any */
+  magFrame: number | null = null;
+  /** the view the last frame drawn began its magnifier pass with */
+  private magBefore: { f: number; view: Float32Array } | null = null;
+  /** whether frame `f`'s magnifier pass does not follow from the frames this HUD drew (a jump, or the first frame
+   *  drawn): the player then seeds the camera's view from the frames before (seedMagView) */
+  magSeedWanted(f: number): boolean {
+    return f + FIRST_FRAME >= 0 && this.magFrame !== f - 1 && this.magBefore?.f !== f;
+  }
+  /** the magnifier camera's view as the frames before `f` left it, from the player after a jump (the view of the
+   *  last picture drawn before, or `null`: none drawn yet, its CObjDesc's) - the game's camera keeps it from frame to
+   *  frame, and the fighters' lights in the next pictures are set up through it */
+  seedMagView(view: Float32Array | null, f: number) {
+    if (view) this.magView.set(view);
+    else gameView(this.magView, [0, 0, 300], [0, 0, 0]);
+    this.magFrame = f - 1;
+  }
   private picture(r: Renderer, pic: RenderTarget, a: HudActor) {
     const [bx, by, bz] = a.bone!;
     // (ifMagnify_802FBBDC, in float32: the camera's ortho rect - ifMagnify_802FC618 made it 0.1f times the 64 by 64
