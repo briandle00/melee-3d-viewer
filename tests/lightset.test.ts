@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import type { AObj, Light, Spline } from "../src/render3d/hsd.ts";
 import { LOBJ } from "../src/render3d/gx.ts";
 import { LightSet } from "../src/render3d/lightset.ts";
-import { srt } from "../src/render3d/math.ts";
+import { HSD_MtxSRT, mtx as newMtx } from "../src/render3d/gxmath.ts";
 
 // a key from 0 to 1 over 100 frames
 const ramp = (type: number): AObj["tracks"][number] => ({ type, keys: [{ time: 0, duration: 100, kind: 1, p0: 0, p1: 1, d0: 0, d1: 0 }] });
@@ -35,10 +35,10 @@ test("a place along a spline is in the spline joint's space", () => {
   // a straight spline from the origin to (10, 0, 0), its joint turned a quarter round z and moved up 5
   const spline: Spline = { type: 0, n: 2, tension: 0, cv: new Float32Array([0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0]), total: 10,
                            seg: new Float32Array([0, 1]), poly: new Float32Array(5) };
-  const mtx = srt(new Float32Array(16), 1, 1, 1, 0, 0, Math.PI / 2, 0, 5, 0);
+  const mtx = HSD_MtxSRT(newMtx(), [1, 1, 1], [0, 0, Math.PI / 2], [0, 5, 0], null);
   const l = light({ offset: 10, aobj: null, position: { aobj: aobj([ramp(4)]), spline, mtx }, interest: null });
   const p = new LightSet([l]).at(50).pos;
-  assert.deepEqual(Array.from(p.slice(0, 4)).map((v) => Math.round(v * 1000) / 1000), [0, 10, 0, 1]);
+  assert.deepEqual(Array.from(p.slice(0, 4)).map((v) => Math.round(v * 1000) / 1000 + 0), [0, 10, 0, 1]);
   // (without a joint's matrix: the point as the curve has it)
   const bare = light({ offset: 10, aobj: null, position: { aobj: aobj([ramp(4)]), spline, mtx: null }, interest: null });
   assert.deepEqual(Array.from(new LightSet([bare]).at(50).pos.slice(0, 3)).map((v) => Math.round(v * 1000) / 1000), [5, 0, 0]);
