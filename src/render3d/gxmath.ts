@@ -446,6 +446,22 @@ export function C_MTXOrtho(m: Float32Array, t: number, b: number, l: number, r: 
   return m;
 }
 
+/** C_MTXLightOrtho (mtx.c, the SDK's C: no fused operations): an orthographic camera's view to texture (s, t),
+ *  scaled and moved (a 3 x 4, row major) */
+export function C_MTXLightOrtho(m: Mtx, t: number, b: number, l: number, r: number, scaleS: number, scaleT: number,
+                                transS: number, transT: number): Mtx {
+  [t, b, l, r, scaleS, scaleT, transS, transT] = [t, b, l, r, scaleS, scaleT, transS, transT].map(f32);
+  m.fill(0);
+  let tmp = f32(1 / f32(r - l));
+  m[0] = f32(f32(2 * tmp) * scaleS);
+  m[3] = f32(f32(f32(-f32(r + l) * tmp) * scaleS) + transS);
+  tmp = f32(1 / f32(t - b));
+  m[5] = f32(f32(2 * tmp) * scaleT);
+  m[7] = f32(f32(f32(-f32(t + b) * tmp) * scaleT) + transT);
+  m[11] = 1;
+  return m;
+}
+
 // ---------------------------------------------------------------- sysdolphin (baselib/mtx.c: built -fp_contract on)
 
 /** HSD_MtxSRT: scale, then turn (z y x), then move; `parentScale` (the

@@ -10,6 +10,11 @@
  * each such texture, at coordinates from the point's place through the
  * shadow camera (makeMatrix's MTXLightOrtho, TEX_COORD_SHADOW).
  */
+import { lbVectorNormalize } from "./camera";
+import {
+  C_MTXLightOrtho, C_MTXLookAt, C_MTXOrtho, f32, mtxToGL, nmsub, projectionToGL, PSMTXConcat, PSVECAdd,
+  PSVECCrossProduct, PSVECDotProduct, PSVECNormalize, PSVECScale, PSVECSubtract, sqrtf,
+} from "./gxmath";
 import type { Light } from "./hsd";
 import type { Mat } from "./math";
 
@@ -37,60 +42,78 @@ export interface ShadowCamera {
   /** world to the shadow texture's (s, t) (rows 0 and 1; column-major), for
    *  a picture drawn the GL way up */
   tex: Mat;
+  /** the projection as GX has it (row major, C_MTXOrtho's): what the draw log reads */
+  gx: Float32Array;
 }
 
-const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-const norm = (a: number[]) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
-
-/** the shadow camera of a fighter (lbShadow_8000F38C): the light's place and
- *  interest, the fighter's camera bone, and its camera box's depth (the box's
- *  target_ext.v.z); null when the light is where its interest is */
+/** the shadow camera of a fighter, in single precision op for op as the game makes it (lbShadow_8000F38C, then
+ *  HSD_ShadowStartRender's HSD_CObjSetCurrent and HSD_ShadowEndRender's makeMatrix): `pos` and `interest` the
+ *  shadow light's (HSD_LObjGetPosition / HSD_LObjGetInterest, world), `bone` the fighter's camera bone (its camera
+ *  box's bone_pos: ftLib_800866DC), `depth` its camera box's target_ext.v.z; null when the light is where its
+ *  interest is (the game then flags the fighter's shadow off: fp->x20A4.x0_b0) */
 export function shadowCamera(pos: number[], interest: number[] | null, bone: number[], depth: number): ShadowCamera | null {
-  // (the light's way: its place less its interest; what it looks at, 0)
-  let L = interest ? [pos[0] - interest[0], pos[1] - interest[1], pos[2] - interest[2]] : [pos[0], pos[1], pos[2]];
-  const len = Math.hypot(L[0], L[1], L[2]);
-  if (len < 0.001) return null;
+  // the light's way: its place less its interest (lbVector_Sub), the interest then 0
+  const lightPos = [f32(pos[0]), f32(pos[1]), f32(pos[2])];
+  const lightDir = [0, 0, 0];
+  if (interest) for (let i = 0; i < 3; i++) lightPos[i] = f32(lightPos[i] - f32(interest[i]));
+  const v = [f32(lightPos[0] - lightDir[0]), f32(lightPos[1] - lightDir[1]), f32(lightPos[2] - lightDir[2])];
+  // (dist only decides: z^2 + (x^2 + y^2), my_sqrtf)
+  const dist = sqrtf(f32(f32(v[2] * v[2]) + f32(f32(v[0] * v[0]) + f32(v[1] * v[1]))));
+  if (dist < f32(0.001)) return null;
   let up: number[];
-  if (L[0] * L[0] + L[2] * L[2] > 0.0000010000001) {
+  if (f32(f32(v[0] * v[0]) + f32(v[2] * v[2])) > f32(0.0000010000001)) {
     up = [0, 1, 0];
-    const n = norm([-L[0], -L[1], -L[2]]);
-    // (a light nearer than 100 is put 100 away, the same way)
-    if (len < 100) L = [-100 * n[0], -100 * n[1], -100 * n[2]];
-    const right = norm(cross(up, n));
-    up = norm(cross(n, right));
+    const n = [f32(lightDir[0] - lightPos[0]), f32(lightDir[1] - lightPos[1]), f32(lightDir[2] - lightPos[2])];
+    // (a light nearer than 100 is put 100 away the same way: -(100 n - dir), one fused fmsubs)
+    if (lbVectorNormalize(n) < 100) for (let i = 0; i < 3; i++) lightPos[i] = nmsub(100, n[i], lightDir[i]);
+    const right = PSVECCrossProduct(up, n, [0, 0, 0]) as number[];
+    lbVectorNormalize(right);
+    up = PSVECCrossProduct(n, right, [0, 0, 0]) as number[];
+    lbVectorNormalize(up);
   } else up = [0, 0, -1];
-  const eye = [bone[0] + L[0], bone[1] + L[1], bone[2] + L[2]];
-  // the view (MTXLookAt: eye, up, interest)
-  const z = norm([eye[0] - bone[0], eye[1] - bone[1], eye[2] - bone[2]]);
-  const x = norm(cross(up, z)), y = cross(z, x);
-  const view = new Float32Array(16);
-  view[0] = x[0]; view[4] = x[1]; view[8] = x[2]; view[12] = -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]);
-  view[1] = y[0]; view[5] = y[1]; view[9] = y[2]; view[13] = -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]);
-  view[2] = z[0]; view[6] = z[1]; view[10] = z[2]; view[14] = -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]);
-  view[15] = 1;
-  // the box (HSD_ViewingRectAddRect at the bone, on the camera's axis: HSD_ShadowSetViewingRect's ortho)
-  const h = 1.2 * depth, near = 0.001, far = 5000;
+  const eye = PSVECAdd(bone, lightPos, [0, 0, 0]);
+  const at = PSVECAdd(bone, lightDir, [0, 0, 0]);
+  // the camera's up: HSD_CObjSetUpVector (flag 1) keeps it normalized (vec_normalize_check)
+  const tiny = 1.1754943508222875e-38;
+  const camUp = Math.abs(up[0]) <= tiny && Math.abs(up[1]) <= tiny && Math.abs(up[2]) <= tiny
+    ? [0, 1, 0] : PSVECNormalize(up, [0, 0, 0]);
+  // the box: HSD_ViewingRectInit (orthographic), HSD_ViewingRectAddRect at the bone, 1.2 times the depth each way
+  const eyeV = PSVECSubtract(at, eye, [0, 0, 0]);
+  const eyeVn = PSVECNormalize(eyeV, [0, 0, 0]);
+  const upN = PSVECNormalize(up, [0, 0, 0]);
+  const rightV = PSVECCrossProduct(eyeVn, upN, [0, 0, 0]);
+  const upV = PSVECCrossProduct(rightV, eyeVn, [0, 0, 0]);
+  const top = f32(f32(1.2) * f32(depth)), bot = f32(f32(1.2) * f32(-depth));
+  const o2p = PSVECSubtract(bone, eye, [0, 0, 0]);
+  const dot = PSVECDotProduct(o2p, eyeVn);
+  const e2p = PSVECSubtract(o2p, PSVECScale(eyeVn, [0, 0, 0], dot), [0, 0, 0]);
+  const x = PSVECDotProduct(rightV, e2p), y = PSVECDotProduct(upV, e2p);
+  let rTop = f32(y + top), rBottom = f32(y + bot), rLeft = f32(x + bot), rRight = f32(x + top);
+  // (a box that is not one - no depth - is tried 20 times, then the game's fixed one: HSD_CObjSetOrtho(128, -128, -128, 128))
+  if (!(rTop > rBottom && rRight > rLeft)) { rTop = 128; rBottom = -128; rLeft = -128; rRight = 128; }
+  // the view (HSD_CObjSetupViewingMtx: C_MTXLookAt) and the projection (makeProjectionMtx: C_MTXOrtho, near 0.001,
+  // far 5000: lbShadow_8000ED54)
+  const V = C_MTXLookAt(new Float32Array(12), eye, camUp, at);
+  const gx = C_MTXOrtho(new Float32Array(16), rTop, rBottom, rLeft, rRight, 0.001, 5000);
+  const view = mtxToGL(V, new Float32Array(16));
+  const proj = projectionToGL(gx, new Float32Array(16));
   const viewProj = new Float32Array(16);
-  // (an ortho of top h, bottom -h, left -h, right h, times the view)
-  const P = [1 / h, 1 / h, -2 / (far - near), -(far + near) / (far - near)];
-  const proj = new Float32Array(16);
-  proj[0] = P[0]; proj[5] = P[1]; proj[10] = P[2]; proj[14] = P[3]; proj[15] = 1;
-  for (let c = 0; c < 4; c++) {
-    viewProj[c * 4] = P[0] * view[c * 4];
-    viewProj[c * 4 + 1] = P[1] * view[c * 4 + 1];
-    viewProj[c * 4 + 2] = P[2] * view[c * 4 + 2] + (c === 3 ? P[3] : 0);
-    viewProj[c * 4 + 3] = c === 3 ? 1 : 0;
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+    let sum = 0;
+    for (let k = 0; k < 4; k++) sum += proj[k * 4 + r] * view[c * 4 + k];
+    viewProj[c * 4 + r] = sum;
   }
-  // MTXLightOrtho(h, -h, -h, h, 0.45, -0.45, 0.5, 0.5) times the view: s = 0.45 x / h + 0.5, and t the same of y
-  // turned over (the game's picture has its top row first; this one is drawn bottom row first)
+  // the texture's: makeMatrix's C_MTXLightOrtho(top, bottom, left, right, 0.45, -0.45, 0.5, 0.5) times the view
+  // (PSMTXConcat), t turned over for a picture drawn bottom row first (GL's: 1 - t)
+  const L = C_MTXLightOrtho(new Float32Array(12), rTop, rBottom, rLeft, rRight, 0.45, -0.45, 0.5, 0.5);
+  const T = PSMTXConcat(L, V, new Float32Array(12));
   const tex = new Float32Array(16);
-  const k = 0.45 / h;
   for (let c = 0; c < 4; c++) {
-    tex[c * 4] = k * view[c * 4] + (c === 3 ? 0.5 : 0);
-    tex[c * 4 + 1] = k * view[c * 4 + 1] + (c === 3 ? 0.5 : 0);
+    tex[c * 4] = T[c];
+    tex[c * 4 + 1] = c === 3 ? 1 - T[4 + c] : -T[4 + c];
   }
   tex[15] = 1;
-  return { view, proj, viewProj, tex };
+  return { view, proj, viewProj, tex, gx };
 }
 
 /** the shadow's gray as the copy keeps it: the copy takes the red channel's
