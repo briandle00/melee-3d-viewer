@@ -74,14 +74,16 @@ test("HUD Slots: a change reaches every follower once, and the default reads it"
 test("the percent's shake and KO scatter take the game's draws when given", async () => {
   const { scatter, shakeOffset } = await import("../src/render3d/hudlogic.ts");
   const draws = [0, 1, 0.5, 0.25, 0.75, 0, 1, 0.5];
-  // x then y for each piece: 0 is the most to the left, 1 the most to the right (damage 10: 1.014 either way)
+  // x then y for each piece: 0 is the most to the left, 1 the most to the right (damage 10: 1.014 either way; in
+  // float32, as ifStatus_802F4B84 works them)
+  const f = Math.fround;
   const [x0, y0] = shakeOffset(5, 5, 10, 0, 0, draws);
-  assert.ok(Math.abs(x0 - (-1.014 - 0.2028)) < 1e-9, `${x0}`);
-  assert.ok(Math.abs(y0 - (1.014 + 0.2028)) < 1e-9, `${y0}`);
+  assert.equal(x0, f(f(f(f(0.1014) * 10) * -1) - f(0.2028)));
+  assert.equal(y0, f(f(f(0.1014) * 10) + f(0.2028)));
   // without draws, a stand-in: the same for the same frame and port
   assert.deepEqual(shakeOffset(5, 5, 10, 1, 0), shakeOffset(5, 5, 10, 1, 0));
   // the scatter's first step is its speed: sideways by the piece's x draw, up by its y draw
   const [sx, sy] = scatter(1, 0, 0, 100, draws);
-  assert.ok(Math.abs(sx - 0.3041) < 1e-9, `${sx}`);
+  assert.equal(sx, f(0.3041));
   assert.ok(sy > 0);
 });

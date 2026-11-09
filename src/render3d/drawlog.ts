@@ -284,12 +284,14 @@ interface Inner {
   live: WeakMap<Image, unknown>;
   /** the images drawn from a texture the page draws into (bindImage: the magnifier's picture) */
   imageTex: WeakMap<Image, unknown>;
+  /** what a live image's screen shows (screencopies.ts): the text page, a copy and its frame, or black */
+  liveShown(image: Image): { kind: string; copyFrame?: number } | null;
   staticsOf(s: Drawable["state"]): { p: MatProgram; I: Int32Array; F: Float32Array };
 }
 
 /** the renderer's fields and methods the log reads or wraps (a test checks they are still there) */
 export const RENDERER_NAMES = ["draws", "cs", "camView", "camVP", "camProj", "camGx", "mvBuf", "lightV", "fogRegs", "cullOn", "shiftView", "shiftVP",
-                               "shifted", "mirrored", "captureLive",
+                               "shifted", "mirrored", "captureLive", "liveShown",
                                "lighting",
                                "overlayVP", "viewProj", "shadowMaps", "shadowMask", "live", "imageTex", "staticsOf", "begin", "setFog",
                                "setTint", "setOutline", "beginShadow", "beginMirror", "endMirror", "endShadow", "drawOne",
@@ -668,6 +670,12 @@ export class DrawLog {
       lod_bias: o.lod ? this.num(o.lod.bias) : 0, texgen: TEXGEN[gen] ?? String(gen),
       mtx: gameRows ?? [m.slice(0, 4), m.slice(4, 8)].map((r) => uvRow(r, gen).map(this.num)), blending: rnd(t.blending),
     };
+    // (a frame copy's: the frame it was copied at - the text page is copied each frame before the screen is drawn,
+    // grStadium's fn_801D2ED0; a copy buffer holds the last copy made into it before the frame; null: no copy)
+    if (id === "efb:live" && this.inner.live.has(t.image)) {
+      const shown = this.inner.liveShown(t.image);
+      rec.copy_frame = shown?.kind === "copy" ? shown.copyFrame ?? null : shown?.kind === "text" ? this.label : null;
+    }
     if (t.tlut) {
       rec.tlut = tlutId(a, t.tlut, t.image.format);
       rec.tlut_bytes = tlutBytes(t.tlut, t.image.format);

@@ -39,7 +39,7 @@ import { EffectKit } from "./effects3d";
 import { Prop } from "./prop";
 import { fighterCnsModel, resolvePositionOrientation } from "./cns";
 import { blasterScale, sausageShown, trailShown } from "./itemrules";
-import { mtxFromGL, PSMTXMultVec, type Mtx } from "./gxmath";
+import { cobjViewingMtx, mtxFromGL, PSMTXMultVec, type Mtx } from "./gxmath";
 import type { FigaTree } from "./hsd";
 import { partSkips, partToModelJoint, worldByPart } from "./parts";
 import { Dynamics, animDriven, eulerToQuat, from44, mtxEuler, quatMtx, type DynPose } from "./dynamics";
@@ -63,7 +63,7 @@ import { SHIELD_FX, trackFilesOf, trackShapes, type TrackShapes } from "./fx/dra
 import { type EggRoll, eggRollAt, eggShields, YOSHI } from "./yoshiroll";
 import { kirbyStoneAt } from "./kirbystone";
 import { ROLLOUT_ATTRS, ROLLOUT_FIRST, rolloutAngle, rolloutAttrs } from "./rollout";
-import { fighterShown, Hud, HudActor, HudKit, toScreen } from "./hud";
+import { fighterShown, Hud, HudActor, HudKit, toScreen, type TagCamera } from "./hud";
 import { EDGE_W, edgePoint } from "./hudlogic";
 import { drawLogCommand, setLiveGame } from "./drawlog";
 import { PoseLog, poseLogCommand } from "./poselog";
@@ -1076,8 +1076,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const eye = [0, 1, 2].map((i) => at[i] + (track[t + i] - at[i]) / z);
     gameView(prevView, eye, at);
     gameProjection(prevProj, prevGx, track[t + 6], Math.abs(aspect - CAM_ASPECT) < 0.01 ? CAM_ASPECT : aspect, ...camPlanes);
+    // (the same camera as lbVector_WorldToScreen reads the cobj: its viewing matrix and projection, float32)
+    cobjViewingMtx(prevCam.view, eye, at);
+    prevCam.gx.set(prevGx);
     return mul(prevVP, prevProj, prevView);
   };
+  const prevCam: TagCamera = { view: new Float32Array(12), gx: new Float32Array(16) };
 
   // stats: when each frame was drawn, and how long it took
   const drawnAt: number[] = [];
@@ -2682,8 +2686,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // (with a track that has the HUD's own generators, the bursts are the effect world's)
       const bursts = fxw && fxw.trackHud && fno < fxw.trackUntil
         ? { particles: fxw.particlesOf(true), places: fxw.hudPlaces } : null;
-      hud.draw(r, fno, viewProj, hudActors, ek?.bank ?? null, w / Math.max(1, h), bursts,
-               viewProjAt(fno - 1, w / Math.max(1, h)) ?? viewProj);
+      const tagVP = viewProjAt(fno - 1, w / Math.max(1, h));
+      hud.draw(r, fno, viewProj, hudActors, ek?.bank ?? null, w / Math.max(1, h), bursts, tagVP ?? viewProj,
+               tagVP && replayStore.zoom === 1 ? prevCam : null);
       hudMs = performance.now() - h0;
     }
     const had = runTags();
