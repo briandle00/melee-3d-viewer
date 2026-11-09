@@ -2547,7 +2547,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // before the HUD goes over it, for the next frame)
     if (st?.screen && scene?.screen) {
       const sc = scene.screen, img = st.screen.image;
-      const rect = sc.captureRect((player) => {
+      const copy = sc.captureRect((player) => {
         // (the game's own reading when the viewer track has it: the fighter's x2188 as the frame before left it,
         // the pixel grStadium_801D32D0's lbVector_WorldToScreen of the camera box bone cuts to - "mag", every
         // close-up copy of the gate's captures)
@@ -2559,9 +2559,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const X = p.xPosition, Y = p.yPosition + middle(p.internalCharacterId), m = viewProj;
         const cw = m[3] * X + m[7] * Y + m[15];
         return [((m[0] * X + m[4] * Y + m[12]) / cw + 1) * 320, (1 - (m[1] * X + m[5] * Y + m[13]) / cw) * 240];
-      });
+      }, fno);
       // (as it is: the screen's material lays its green on it, setScreenConstant)
-      if (rect) r.captureLive(img, ...sc.copySize(), rect, [255, 255, 255], fno);
+      if (copy) r.captureLive(img, copy.w, copy.h, copy.rect, [255, 255, 255], fno);
     }
     prof.mark("ghosts");
     // the screen flash of a strong hit (fx/bgflash.ts): from the match's first on, fn_8001FEC4's quad under its own
