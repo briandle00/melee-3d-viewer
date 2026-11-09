@@ -6,7 +6,7 @@
 import { AObj, Archive, DObj, JObj, MatAnim, loadAnimJoint, loadJoint, loadMatAnimJoint } from "./hsd";
 import { RENDER } from "./gx";
 import { ident, invert, Mat, mul } from "./math";
-import { HSD_MtxColMag, HSD_MtxSRT, type Mtx, mtxFromGL, mtxToGL } from "./gxmath";
+import { HSD_MtxColMag, HSD_MtxSRT, type Mtx, mtxFromGL, mtxToGL, PSVECMag } from "./gxmath";
 import { Skeleton } from "./skeleton";
 
 // the root's place as the game makes a joint's matrix: HSD_MtxSRT, in float32 with its own sinf and cosf
@@ -31,7 +31,7 @@ export function effectOverAll(life: number): boolean {
 }
 
 // (poseConstrained's: the root's own matrix, GX's 3 x 4)
-const ownM = new Float32Array(12);
+const ownM = new Float32Array(12), cnsM = new Float32Array(12), cnsV = [0, 0, 0];
 
 export class Prop {
   skeleton: Skeleton;
@@ -306,11 +306,19 @@ export class Prop {
       sk.update(this.place);
       return;
     }
+    // (resolveCnsOrientation for a target joint with no CLASSICAL_SCALE: each of its columns made unit - VECMag,
+    // 1.0F / it over 1e-10F - and as long as the root's own, HSD_MtxColMag of its matrix; float32, the game's order)
+    mtxFromGL(sk.world, ownM, 0);
+    mtxFromGL(parent, cnsM, 0);
+    const f32 = Math.fround;
     for (let c = 0; c < 3; c++) {
+      const v = cnsV;
+      v[0] = cnsM[c]; v[1] = cnsM[4 + c]; v[2] = cnsM[8 + c];
+      let k = PSVECMag(v);
+      if (k > f32(1e-10)) k = f32(1 / k);
+      k = f32(k * HSD_MtxColMag(ownM, c));
       const j = c * 4;
-      const own = Math.hypot(sk.world[j], sk.world[j + 1], sk.world[j + 2]);
-      const len = Math.hypot(parent[j], parent[j + 1], parent[j + 2]) || 1;
-      for (let r = 0; r < 3; r++) this.place[j + r] = parent[j + r] * own / len;
+      for (let r = 0; r < 3; r++) this.place[j + r] = f32(v[r] * k);
       this.place[j + 3] = 0;
       sk.rot[c] = 0;
       sk.trans[c] = 0;

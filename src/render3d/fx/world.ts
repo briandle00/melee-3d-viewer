@@ -1587,13 +1587,15 @@ export class FxWorld {
       turn = (m) => { m.rotY = facing() * Math.PI / 2; };
     }
     else if (callback === "SetOffset_FromParams") {
-      // flung by its parameters, falling 0.1 a frame faster each frame (an egg's shell)
-      turn = (m) => { m.fall = (m.fall ?? p1) - 0.1; m.x += p0; m.y += m.fall; m.z += p2; };
+      // flung by its parameters, falling 0.1F a frame faster each frame (an egg's shell): efLib_Cb_SetOffset_FromParams,
+      // params.y -= 0.1F, then each translation plus its parameter, in float32
+      const f32 = Math.fround, step = f32(0.1);
+      turn = (m) => { m.fall = f32((m.fall ?? p1) - step); m.x = f32(m.x + p0); m.y = f32(m.y + m.fall); m.z = f32(m.z + p2); };
     } else if (callback === "SetOffsetY_FromParamY" && follow) {
       // where its joint is, raised by its parameter
       const on = follow;
       onJoint = null;
-      turn = (m) => { const w = on(); if (w) { m.x = w[12]; m.y = w[13] + p1; m.z = w[14]; } };
+      turn = (m) => { const w = on(); if (w) { m.x = w[12]; m.y = Math.fround(w[13] + p1); m.z = w[14]; } };
     } else if (callback === "SetScale_FromParamX") turn = (m) => { m.scale *= p0 || 1; };
     else if (callback === "ftMr_SpecialLw" || callback === "ftLg_SpecialLw") {
       // (efLib_Cb_ftMr_SpecialLw, efLib_Cb_ftLg_SpecialLw: the root's first child's next and all under it
