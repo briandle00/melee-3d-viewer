@@ -1138,8 +1138,8 @@ export class FxWorld {
   }
 
   /** what a fighter's color animations do to its picture, or null */
-  tintOf(key: string, facing: number): Tint | null {
-    return this.cols.get(key)?.tint(facing) ?? null;
+  tintOf(key: string, rotY: number): Tint | null {
+    return this.cols.get(key)?.tint(rotY) ?? null;
   }
 
   /** the blast a KO makes (ft_0D31.c, efasync 0x42B): common model 0x19 where

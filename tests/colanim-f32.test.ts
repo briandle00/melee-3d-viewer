@@ -2,7 +2,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ColAnimTables, Overlay } from "../src/render3d/fx/colanim.ts";
+import { ColAnimTables, Overlay, colorLightDir } from "../src/render3d/fx/colanim.ts";
+import { cosf, sinf } from "../src/render3d/fx/gamemath.ts";
 import type { Archive } from "../src/render3d/hsd.ts";
 
 /** a script of words at offset 0 in a made-up file, as the table's one entry (entry 1) */
@@ -30,4 +31,16 @@ test("a color blend: its step ((0.5 + target) - the byte) / frames and each fram
     assert.deepEqual([...o.color], want);
   }
   assert.deepEqual(o.color.map((c) => (c | 0) & 0xff), to);
+});
+
+test("the color animation light's way: ftCo_8009F5AC's steps in float32, its x angle times the fighter's turn over pi/2", () => {
+  const f32 = Math.fround;
+  // (its disassembly: 0.017453292f x the angles; the x one times the root joint's turn about y, over M_PI_2 in
+  // double, rounded; then -sinf(-yz), cosf(-yz), and x and z times sinf and cosf of the x angle)
+  for (const [rx, ryz, turn] of [[30, -45, f32(Math.PI / 2)], [12.5, 60, f32(-Math.PI / 2)], [-80, 5, f32(1.2)]]) {
+    const k = f32(0.01745329252), yz = f32(k * f32(ryz));
+    const ax = f32(f32(f32(k * f32(rx)) * turn) / (Math.PI / 2));
+    const z0 = cosf(-yz);
+    assert.deepEqual(colorLightDir(rx, ryz, turn), [f32(z0 * sinf(ax)), -sinf(-yz), f32(z0 * cosf(ax))]);
+  }
 });

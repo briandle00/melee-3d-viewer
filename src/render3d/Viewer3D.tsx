@@ -1990,8 +1990,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         // meshes posed too - else the first frame of a switch drew them
         // where they last stood: Kirby's Stone blinking out)
         fi.skeleton.update();
-        const fromTrack = tr?.tint(a.player, a.nana ? 1 : 0, fno - 123, a.st.facingDirection);
-        const tint = fromTrack !== undefined ? fromTrack : priming ? null : fxw?.tintOf(akey, a.st.facingDirection) ?? null;
+        const fromTrack = tr?.tint(a.player, a.nana ? 1 : 0, fno - 123, fi.skeleton.rot[1]);
+        const tint = fromTrack !== undefined ? fromTrack : priming ? null : fxw?.tintOf(akey, fi.skeleton.rot[1]) ?? null;
         // Kirby's copy's hat: the viewer track's copy (kb.kind, 4 for none),
         // else the replay's (kirby.ts). A hat in his colors covers his body:
         // its meshes instead of his body's lookup 0, unless his face is in
@@ -4089,7 +4089,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         if (ag?.valid(g - 123)) {
           for (const a of now) {
             const [pl, nn] = a.key.split(":").map(Number);
-            const facing = a.st.facingDirection;
+            const facing = Math.fround((Math.PI / 2) * a.st.facingDirection);
             const said = ag.tint(pl, nn, g - 123, facing);
             if (said !== undefined) {
               vs.tint.frames++;

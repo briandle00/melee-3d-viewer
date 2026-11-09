@@ -102,7 +102,7 @@
  * it from there on is what a track without it says - nothing - so the player
  * works those frames out from the replay, as it does with no track at all.
  */
-import type { Tint } from "./fx/colanim";
+import { colorLightDir, type Tint } from "./fx/colanim";
 import { hasTrack, liveTrack, trackAnswer } from "./files";
 import { decodeTrackFloats } from "./trackcodec";
 import { pageCache, trim } from "../state/pageCache";
@@ -447,14 +447,15 @@ export class ViewerTrack {
   }
 
   /** a fighter's color animation as the game drew it on this frame (the main one
-   *  while it runs, else the second), or undefined when the track has none for it */
-  tint(port: number, sub: number, frame: number, facing: number): Tint | null | undefined {
+   *  while it runs, else the second), or undefined when the track has none for it; `rotY` the fighter's root joint's
+   *  turn about y */
+  tint(port: number, sub: number, frame: number, rotY: number): Tint | null | undefined {
     const main = `${port}:${sub}:0`, second = `${port}:${sub}:1`;
     if ((!this.hasKey("tint", main) && !this.hasKey("tint", second)) || frame >= this.until) return undefined;
     let v = this.at("tint", main, frame);
     if (!v || !v[0]) v = this.at("tint", second, frame);
     if (!v || !v[0]) return null;
-    return tintOf(v.slice(1) as number[], facing);
+    return tintOf(v.slice(1) as number[], rotY);
   }
 
   /** the poses of one type ("jp", "fp", "lm"), by owner, made the first time they are asked for */
@@ -641,16 +642,14 @@ const byte = (v: number) => (v & 0xff) / 255;
 
 /** an overlay's drawn state (rgba, flags, light rgba, rot x, rot yz) as the renderer takes it:
  *  0x80 its color is on, 0x40 its light, 0x20 the light adds its color (ftmaterial.c) */
-export function tintOf([rgba, flags, light, rotX, rotYZ]: number[], facing: number): Tint | null {
+export function tintOf([rgba, flags, light, rotX, rotYZ]: number[], rotY: number): Tint | null {
   const colorOn = (flags & 0x80) !== 0, lightOn = (flags & 0x40) !== 0;
   if (!colorOn && !lightOn) return null;
   const c = (w: number) => [byte(w >>> 24), byte(w >>> 16), byte(w >>> 8), byte(w)] as [number, number, number, number];
   let l: Tint["light"] = null;
   if (lightOn) {
     const lc = c(light >>> 0);
-    const yz = ((rotYZ ?? 0) * Math.PI) / 180, x = (((rotX ?? 0) * Math.PI) / 180) * (facing < 0 ? -1 : 1);
-    const z = Math.cos(yz);
-    l = { rgb: [lc[0], lc[1], lc[2]], a: lc[3], adds: (flags & 0x20) !== 0, dir: [z * Math.sin(x), Math.sin(yz), z * Math.cos(x)] };
+    l = { rgb: [lc[0], lc[1], lc[2]], a: lc[3], adds: (flags & 0x20) !== 0, dir: colorLightDir(rotX ?? 0, rotYZ ?? 0, rotY) };
   }
   return { color: colorOn ? c(rgba >>> 0) : null, light: l };
 }
