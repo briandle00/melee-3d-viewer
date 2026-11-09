@@ -13,7 +13,7 @@
  * write, color writes) come from the material as HSD sets them. Textures
  * are filtered as the file says, with the file's own mip levels.
  */
-import { ScreenCopies, type Shown } from "./screencopies";
+import { type Prime, ScreenCopies, type Shown } from "./screencopies";
 import { Archive, Image, MObj, TObj, Tlut, decodeImage } from "./hsd";
 import { DrawGroup, Drawable, MatState, Skeleton, TexState, billboardViewOf } from "./skeleton";
 import { Mat, invert, lookAt, mul } from "./math";
@@ -1077,14 +1077,25 @@ export class Renderer {
 
   /** Before drawing frame `frame`: the screen shows the copy its mode's buffer (w x h) holds - made at the end of the
    *  frame before while the mode goes on, an older one after the screen comes back to a buffer it left - or its text
-   *  page (`shows` false). ScreenCopies keeps the buffers as the game does. -> true when the frame is to be drawn
-   *  again: a jump onto a buffer knows no copy, black for a first drawing, the copy that drawing made for the second. */
-  liveAdvance(image: Image, frame: number, shows: boolean, w: number, h: number): boolean {
+   *  page (`shows` false). ScreenCopies keeps the buffers as the game does. -> true when a seek left copies to make
+   *  again (`history` says which: livePrimes), the frame to be drawn again after them. */
+  liveAdvance(image: Image, frame: number, shows: boolean, w: number, h: number,
+              history: ((frame: number) => Prime[]) | null = null): boolean {
     const l = this.live.get(image);
     if (!l) return false;
-    const again = l.copies.advance(frame, shows, w, h);
+    const again = l.copies.advance(frame, shows, w, h, history);
     this.liveShow(l);
     return again;
+  }
+
+  /** the copies a seek left to make again (screencopies.ts primes), the one being made now, and one done */
+  livePrimes(image: Image): Prime[] { return this.live.get(image)?.copies.primes.slice() ?? []; }
+  livePriming(image: Image, p: Prime | null) { const l = this.live.get(image); if (l) l.copies.priming = p; }
+  livePrimed(image: Image, p: Prime) {
+    const l = this.live.get(image);
+    if (!l) return;
+    l.copies.primed(p);
+    this.liveShow(l);
   }
 
   /** A part of the picture drawn so far into a live image's texture (w x
@@ -1137,8 +1148,6 @@ export class Renderer {
     gl.enable(gl.DEPTH_TEST);
     gl.useProgram(this.prog);
     this.bound.fill(null);
-    // (the first drawing of a frame the screen was blacked for: its copy is what the second shows)
-    l.copies.copied(w, h, frame);
     this.liveShow(l);
     this.dirty();
   }

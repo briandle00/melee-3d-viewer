@@ -1566,18 +1566,32 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     schedule();
   });
 
-  // (Stadium's screen, when the frame has no copy of the frame before to show: drawn a second time, with its own copy on the screen)
+  // (Stadium's screen after a seek: the copies its buffers hold there are made again - each of those frames drawn
+  // and copied, screencopies.ts primes - and the frame drawn again with them on the screen)
   let screenAgain = false;
+  let primeFrame: number | null = null;
   let lastDrawAt = 0;
   const draw = () => {
     screenAgain = false;
     lastDrawAt = performance.now();
     drawPass();
-    if (screenAgain) { screenAgain = false; drawPass(); }
+    if (screenAgain) {
+      screenAgain = false;
+      const img = stage()?.screen?.image;
+      for (const p of img ? renderer?.livePrimes(img) ?? [] : []) {
+        renderer!.livePriming(img!, p);
+        primeFrame = p.frame;
+        try { drawPass(); } finally { primeFrame = null; renderer!.livePrimed(img!, p); }
+      }
+      drawPass();
+    }
   };
   const drawPass = () => {
     const data = rawData();
-    const fno = benchFrame ?? replayStore.frame;
+    // (a prime: a frame before a seek drawn for the copy the screen keeps of it - nothing else of it is kept: the
+    // effects' world is not stepped there, the HUD and the rest after the copy are not drawn)
+    const priming = primeFrame !== null;
+    const fno = primeFrame ?? benchFrame ?? replayStore.frame;
     const ghosts = rawGhosts();
     const r = renderer;
     // (not while warming up, but for the one frame its end draws, under the cover)
@@ -1668,7 +1682,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const ts = performance.now();
       // (with a track that names the stage's generators' joints they are the effect world's)
       if (stageInWorld(tr)) { if (scene.particles.ps.gens.length || scene.particles.ps.particles.length) scene.particles.ps.clear(); }
-      else scene.particles.step(fno);
+      else if (!priming) scene.particles.step(fno);
       stageMs = performance.now() - ts;
       // Fountain's platform heights are in replays from Slippi 3.18 on; before
       // that the parser's stand-ins are not the file's, so the stage keeps its own
@@ -1682,7 +1696,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const gm = scene.screen.mode;
         setLiveGame(st.screen.image, 4, gm === 7 ? 640 : gm === 8 ? 124 : 250, gm === 7 ? 406 : gm === 8 ? 80 : 160);
         // (the match's copy is the frame before's, whatever the number of draws of this frame)
-        if (r.liveAdvance(st.screen.image, fno, scene.screen.mode === 7 || scene.screen.mode === 8, ...scene.screen.copySize())) screenAgain = true;
+        const scr = scene.screen;
+        if (!priming && r.liveAdvance(st.screen.image, fno, scr.mode === 7 || scr.mode === 8, ...scr.copySize(),
+                                      (f) => scr.copiesBefore(f))) screenAgain = true;
         // (a copy of the match is shown in the screen's constant green, the rest in its vertex colors)
         const m = scene.screen.mode;
         for (const s of st.setScreenConstant(m === 7 || m === 8, scene.screen.tint)) r.forgetMaterial(s);
@@ -1906,7 +1922,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // the game's effects, stepped to this frame (their colors on the
     // fighters are this frame's; the effects themselves are drawn later)
     prof.mark("pose");
-    if (ek?.bank) {
+    if (ek?.bank && !priming) {
       const tr = viewerTrack();
       fxw = worldNow(ek, data, fs);
       // (a skip or a jump steps the frames between, posing the fighters
@@ -1970,7 +1986,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         // where they last stood: Kirby's Stone blinking out)
         fi.skeleton.update();
         const fromTrack = tr?.tint(a.player, a.nana ? 1 : 0, fno - 123, a.st.facingDirection);
-        const tint = fromTrack !== undefined ? fromTrack : fxw?.tintOf(akey, a.st.facingDirection) ?? null;
+        const tint = fromTrack !== undefined ? fromTrack : priming ? null : fxw?.tintOf(akey, a.st.facingDirection) ?? null;
         // Kirby's copy's hat: the viewer track's copy (kb.kind, 4 for none),
         // else the replay's (kirby.ts). A hat in his colors covers his body:
         // its meshes instead of his body's lookup 0, unless his face is in
@@ -2168,7 +2184,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         }
         // its sword's swing strip, drawn with its see-through parts
         // (ftafterimage.c; not in a mirror, whose draw leaves it out)
-        if (pass === "xlu" && fxw && !mirror && !layersOff.effects) {
+        if (pass === "xlu" && fxw && !mirror && !(layersOff.effects || priming)) {
           const strip = fxw.swords.strip(actorKey(a.player, a.nana), fxw.swordOf(fi));
           if (strip) {
             if (sh) r.shiftDraws(0, 0);
@@ -2398,7 +2414,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         const built = buildParticles(stagePsM, axesM);
         r.drawParticles(built.data, built.batches);
       }
-      if (ek?.bank && fxw && !layersOff.effects) {
+      if (ek?.bank && fxw && !(layersOff.effects || priming)) {
         // (posed facing the mirror's camera: a billboard's matrix is made under the camera that draws it,
         // HSD_JObjMakePositionMtx in HSD_JObjDisp, so grIzumi_801CCEA0's camera turns them to itself; the main
         // camera's pass poses them again)
@@ -2535,7 +2551,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // (the shield's bubble and the reflector: from the track's pieces while it
     // holds and has them, else from the replay's states)
     const shapes = shapesAt(viewerTrack(), fno);
-    for (const a of layersOff.effects ? [] : actors) {
+    for (const a of layersOff.effects || priming ? [] : actors) {
       if (hidden(a.st)) continue;
       const key = actorKey(a.player, a.nana);
       const fa = frameActors.find((x) => x.key === key);
@@ -2555,7 +2571,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const built = buildParticles(stagePs, axes);
       r.drawParticles(built.data, built.batches);
     }
-    if (ek?.bank && fxw && !layersOff.effects) {
+    if (ek?.bank && fxw && !(layersOff.effects || priming)) {
       models = drawFxModels(r, fxw);
       // (every list but the HUD's: that one is drawn in the HUD's pass, in its space)
       const mine = fxw.particlesOf(false);
@@ -2633,6 +2649,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       // (as it is: the screen's material lays its green on it, setScreenConstant)
       if (copy) r.captureLive(img, copy.w, copy.h, copy.rect, [255, 255, 255], fno);
     }
+    if (priming) return;
     prof.mark("ghosts");
     // the screen flash of a strong hit (fx/bgflash.ts): from the match's first on, fn_8001FEC4's quad under its own
     // camera (lbl_803BB028), three times - HSD_GObj_803910D8 runs its link in all three passes - before the HUD

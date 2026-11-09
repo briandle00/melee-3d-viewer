@@ -533,6 +533,21 @@ export function edgeWidth(k: number): number {
  *  frame the bubbles sit on (252.7 x 162.7 pixels from the middle) */
 export function edgePoint(x: number, y: number, W = EDGE_W): [number, number] {
   const H = EDGE_H;
+  // (the game's picture: ifMagnify_802FB73C itself, float32 - its ratio against 0.6438464f, out * x / y)
+  if (W === EDGE_W) {
+    const f = Math.fround, gw = f(EDGE_W), gh = f(EDGE_H);
+    x = f(x); y = f(y);
+    if (x === 0) return [0, y > 0 ? gh : -gh];
+    const ratio = f(y / x);
+    if (ratio > f(0.6438464) || ratio < -f(0.6438464)) {
+      const oy = y > 0 ? gh : -gh;
+      const xc = f(f(oy * x) / y);
+      return [xc < -gw ? -gw : xc > gw ? gw : xc, oy];
+    }
+    const ox = x > 0 ? gw : -gw;
+    const yc = f(f(ox * y) / x);
+    return [ox, yc < -gh ? -gh : yc > gh ? gh : yc];
+  }
   if (x === 0) return [0, y > 0 ? H : -H];
   const k = y / x, c = H / W;
   if (k > c || k < -c) {
