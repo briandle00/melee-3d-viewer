@@ -161,6 +161,13 @@ export class Prop {
     this.skeleton.update(this.place);
   }
 
+  /** after the pose, the root's own scale times `k` (each float32): an effect's callback setting the root's scale */
+  scaleRoot(k: number) {
+    const sk = this.skeleton;
+    for (let i = 0; i < 3; i++) sk.scale[i] = Math.fround(sk.scale[i] * k);
+    sk.update(this.place);
+  }
+
   /** after the pose, the root's turn about z set to `value`, the same way (HSD_JObjSetRotationZ) */
   setRootRotationZ(value: number) {
     this.skeleton.rot[2] = value;

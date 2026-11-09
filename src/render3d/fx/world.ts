@@ -262,6 +262,9 @@ export interface ModelFx {
   /** its root's turn about y (`rotY`) or z (`rotZ`) set after its animation, in place of the animated one
    *  (HSD_JObjSetRotationY and Z in its callback) rather than added to it */
   rootRotationY?: boolean;
+  /** its root's scale is its animation's times `scale`, set on the root itself each step (efLib_Cb_SetScaleRotY_FromFighter:
+   *  HSD_JObjSetScale of the fighter root's scale times the effect root's, float32), not a parent's */
+  rootScaleMul?: boolean;
   rootRotationZ?: boolean;
   /** held to the joint it is under by place and turn constraints (Prop.poseConstrained), not made its child */
   constrained?: boolean;
@@ -1496,6 +1499,7 @@ export class FxWorld {
     // named part), or the item
     let follow: (() => Float32Array | null) | null = null;
     const carrier = this.carrier;
+    let itemJoint: [number, number] | null = null;
     if (!isModel && carrier && a && carrier.key === a.key) {
       // (on the carrier's root: no turn, at the joint's place (lb_8000B1CC) plus the parameters, in float32)
       const m = new Float32Array(16), f32 = Math.fround;
@@ -1513,7 +1517,7 @@ export class FxWorld {
       // "ij"; a model made a child of it turns with it: efalt.c 0x498, Kirby's hammer's effect, efLib_Create_AttachChild
       // on it_80272C90's joint)
       const item = v[29], joint = v[30];
-      if (this.itemAt.has(item)) follow = () => this.itemJointWorld(item, joint);
+      if (this.itemAt.has(item)) { follow = () => this.itemJointWorld(item, joint); itemJoint = [item, joint]; }
     } else if (spawnId !== null && how !== "place" && how !== "srt") {
       const at = this.itemAt.get(spawnId);
       if (at) follow = () => this.itemAt.get(spawnId) ?? at;
@@ -1637,7 +1641,9 @@ export class FxWorld {
       // (a child is held to its joint by a place and an orientation constraint, efLib_Create_AttachChild:
       // lb_8000C1C0 and lb_8000C290 - not made a child in the joint tree)
       constrained: how === "child",
-      underOrient: how === "child" && a && part >= 0 && onJoint === follow ? () => this.jointOrient(a.key, part) : null,
+      underOrient: how !== "child" || onJoint !== follow ? null
+        : a && part >= 0 ? () => this.jointOrient(a.key, part)
+        : itemJoint ? ((at) => () => this.itemOrient(at[0], at[1]))(itemJoint) : null,
       rootSet: how !== "child" && !(how === "create" && t[0] === 0 && t[1] === 0 && t[2] === 0),
       scaleSet: sx !== 1 || v[17] !== 1 || v[18] !== 1,
     };
@@ -1646,7 +1652,13 @@ export class FxWorld {
     // (efLib_Cb_SetScaleRotY_FromFighter: after each animation step the root's scale times the fighter's root
     // joint's, its model scale (Fighter_UpdateModelScale) - the root's own being its animation's that step, the
     // product is the same each frame)
-    if (callback === "SetScaleRotY_FromFighter" && a) m.scale *= a.fighter.modelScale;
+    if (callback === "SetScaleRotY_FromFighter" && a) {
+      // (HSD_JObjSetRotationY of the side faced on the root, HSD_JObjSetScale of the product on the root: both the
+      // root's own, after its animation's step)
+      m.scale = Math.fround(m.scale * a.fighter.modelScale);
+      m.rootScaleMul = true;
+      m.rootRotationY = true;
+    }
     const endPart = LIFETIME_END_PART[Number(e[2])];
     if (callback === "LifetimeEndSpawn" && lifetime > 0 && a && key && endPart !== undefined && e.length >= 29) {
       // (the game counts the lifetime down once each frame the model runs, from the frame it is made)
@@ -2116,7 +2128,9 @@ export class FxWorld {
     }
     const [x, y, z] = this.modelPlace(m);
     pr.rootScaleSet = !!m.scaleSet;
-    pr.pose(age, x, y, z, m.scale, m.rootRotationY ? 0 : m.rotY, false, m.rootRotationZ ? 0 : m.rotZ, m.rotX ?? 0, m.rootSet);
+    pr.pose(age, x, y, z, m.rootScaleMul ? 1 : m.scale, m.rootRotationY ? 0 : m.rotY, false, m.rootRotationZ ? 0 : m.rotZ, m.rotX ?? 0,
+            m.rootSet);
+    if (m.rootScaleMul) pr.scaleRoot(m.scale);
     pr.rootScaleSet = false;
     // (what its update callback sets after the animation: the root's turn, a joint's place)
     if (m.rootRotationY) pr.setRootRotationY(m.rotY);
@@ -2185,8 +2199,59 @@ export class FxWorld {
     m[0] = n[3]; m[4] = n[4]; m[8] = n[5];
     m[1] = n[6]; m[5] = n[7]; m[9] = n[8];
     m[2] = n[9]; m[6] = n[10]; m[10] = n[11];
-    m[12] = at[12] + n[0]; m[13] = at[13] + n[1]; m[14] = at[14] + n[2];
+    m[12] = Math.fround(at[12] + n[0]); m[13] = Math.fround(at[13] + n[1]); m[14] = Math.fround(at[14] + n[2]);
     return m;
+  }
+
+  /** The axes resolveCnsOrientation gives a model held by an orientation constraint to an item's joint (the track's
+   *  "ij" lines, which a newer simulator writes for the joint and each joint above it with the joint's flags and its
+   *  parent): with no CLASSICAL_SCALE, or at the root, each column of the joint's matrix made unit and as long as the
+   *  held root's own (`own`); else the joint's matrix in its parent's (HSD_MtxInverseConcat) so treated, then turned
+   *  by each joint above it in its own parent's, its columns made unit (PSMTXConcat on the left, up to the root).
+   *  float32, the game's order. null for a track without the flags (the plain way, poseConstrained's own) */
+  itemOrient(item: number, joint: number): ((own: number[]) => Float32Array) | null {
+    const line = (j: number) => this.trackItemJoint?.(item, j, this.stepping) as number[] | null ?? null;
+    const t = line(joint);
+    if (!t || t.length < 14) return null;
+    const f32 = Math.fround;
+    const mtxOf = (j: number): Float32Array | null => {
+      const n = line(j);
+      if (!n || n.length < 12) return null;
+      const m = new Float32Array(12);
+      m[0] = n[3]; m[1] = n[4]; m[2] = n[5]; m[4] = n[6]; m[5] = n[7]; m[6] = n[8]; m[8] = n[9]; m[9] = n[10]; m[10] = n[11];
+      m[3] = n[0]; m[7] = n[1]; m[11] = n[2];
+      return m;
+    };
+    const parentOf = (j: number) => { const n = line(j); return n && n.length >= 14 ? Number(n[13]) : -1; };
+    const unit = (m: Float32Array, i: number, k?: number) => {
+      const v = [m[i], m[4 + i], m[8 + i]];
+      let s = PSVECMag(v);
+      if (s > f32(1e-10)) s = f32(1 / s);
+      if (k !== undefined) s = f32(s * k);
+      m[i] = f32(v[0] * s); m[4 + i] = f32(v[1] * s); m[8 + i] = f32(v[2] * s);
+    };
+    return (own) => {
+      const target = mtxOf(joint);
+      if (!target) return new Float32Array(12);
+      const par = parentOf(joint);
+      const pw = par >= 0 ? mtxOf(par) : null;
+      if (!(Number(t[12]) & JOBJ.CLASSICAL_SCALE) || !pw) {
+        for (let i = 0; i < 3; i++) unit(target, i, own[i]);
+        return target;
+      }
+      const m1 = HSD_MtxInverseConcat(pw, target, new Float32Array(12));
+      for (let i = 0; i < 3; i++) unit(m1, i, own[i]);
+      for (let k = par; k >= 0; k = parentOf(k)) {
+        const kw = mtxOf(k);
+        if (!kw) break;
+        const kp = parentOf(k);
+        const kpw = kp >= 0 ? mtxOf(kp) : null;
+        const m0 = kpw ? HSD_MtxInverseConcat(kpw, kw, new Float32Array(12)) : kw;
+        for (let i = 0; i < 3; i++) unit(m0, i);
+        PSMTXConcat(m0, m1, m1);
+      }
+      return m1;
+    };
   }
 
   /** the swords' swing strips (fx/swordtrail.ts) */
