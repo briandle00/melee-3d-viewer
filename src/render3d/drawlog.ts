@@ -50,6 +50,7 @@ import { SHADOW_SIZE } from "./shadow";
 import type { Lighting } from "./lightset";
 import type { Tint } from "./fx/colanim";
 import { invert, type Mat } from "./math";
+import { PSMTXConcat, PSMTXInverse, mtxFromGL } from "./gxmath";
 
 // ---------------------------------------------------------------- shared with the decoder
 
@@ -278,6 +279,8 @@ interface Inner {
   fogRegs: FogRegs;
   mirrored: boolean;
   lighting: Lighting | null;
+  /** the mirror's texture matrix as the game makes it (GX's Mtx, world to the picture), or null */
+  mirrorTexGX: Float32Array | null;
   overlayVP: Mat | null; viewProj: Mat;
   shadowMaps: { mtx: Mat }[];
   shadowMask: number;
@@ -292,7 +295,7 @@ interface Inner {
 /** the renderer's fields and methods the log reads or wraps (a test checks they are still there) */
 export const RENDERER_NAMES = ["draws", "cs", "camView", "camVP", "camProj", "camGx", "mvBuf", "lightV", "fogRegs", "cullOn", "shiftView", "shiftVP",
                                "shifted", "mirrored", "captureLive", "liveShown",
-                               "lighting",
+                               "lighting", "mirrorTexGX",
                                "overlayVP", "viewProj", "shadowMaps", "shadowMask", "live", "imageTex", "staticsOf", "begin", "setFog",
                                "setTint", "setOutline", "beginShadow", "beginMirror", "endMirror", "endShadow", "drawOne",
                                "drawGeometry", "drawParticles", "drawTrail", "drawSphere", "overlay", "endOverlay"] as const;
@@ -642,8 +645,16 @@ export class DrawLog {
     const at = 24 + n * 12;
     let gameRows: number[][] | null = null;
     // (the mirror's: its three rows as the game's post-matrix has them, grIzumi_801CCEA0's texture_matrix times
-    // the inverse of the view - it takes the point in view space - and t from the top)
-    if (gen === 4 && view && F && F.length >= at + 12) {
+    // the inverse of the view - it takes the point in view space - and t from the top. TObjSetupMtx's
+    // TEX_COORD_SHADOW: MTXConcat(tobj->mtx, HSD_CObjGetInvViewingMtxPtrDirect(cobj)), the inverse PSMTXInverse's,
+    // when the renderer has the game's texture matrix)
+    const T = this.inner.mirrorTexGX;
+    if (gen === 4 && view && T) {
+      const inv = new Float32Array(12);
+      PSMTXInverse(mtxFromGL(view, new Float32Array(12)), inv);
+      const G = PSMTXConcat(T, inv, new Float32Array(12));
+      gameRows = [0, 1, 2].map((r) => Array.from(G.subarray(r * 4, r * 4 + 4)).map(this.num));
+    } else if (gen === 4 && view && F && F.length >= at + 12) {
       const g = [F.subarray(at, at + 4), F.subarray(at + 4, at + 8).map((v, c) => F[at + 8 + c] - v), F.subarray(at + 8, at + 12)];
       const vi = invert(new Float32Array(16), view);
       const post = g.map((r) => [0, 1, 2, 3].map((c) => r[0] * vi[c * 4] + r[1] * vi[c * 4 + 1] + r[2] * vi[c * 4 + 2] + r[3] * vi[c * 4 + 3]));

@@ -427,6 +427,24 @@ export function C_MTXPerspective(m: Float32Array, fovY: number, aspect: number, 
   return m;
 }
 
+/** MTXLightPerspective (C_MTXLightPerspective): a perspective projection into a texture's s and t, scaled by
+ *  scaleS and scaleT and moved by transS and transT - as the game's code runs it (its disassembly: the angle
+ *  0.017453292 x (0.5 x fovY), cot = 1 / tanf, then cot / aspect x scaleS and cot x scaleT; the third row 0 0 -1 0) */
+export function MTXLightPerspective(m: Mtx, fovY: number, aspect: number, scaleS: number, scaleT: number, transS: number,
+                                    transT: number): Mtx {
+  fovY = f32(fovY); aspect = f32(aspect); scaleS = f32(scaleS); scaleT = f32(scaleT);
+  transS = f32(transS); transT = f32(transT);
+  const angle = f32(f32(0.017453293) * f32(0.5 * fovY));
+  const cot = f32(1 / tanf(angle));
+  m.fill(0);
+  m[0] = f32(scaleS * f32(cot / aspect));
+  m[2] = -transS;
+  m[5] = f32(cot * scaleT);
+  m[6] = -transT;
+  m[10] = -1;
+  return m;
+}
+
 /** C_MTXFrustum (MTXFrustum) */
 export function C_MTXFrustum(m: Float32Array, t: number, b: number, l: number, r: number, n: number, f: number): Float32Array {
   [t, b, l, r, n, f] = [t, b, l, r, n, f].map(f32);
