@@ -229,11 +229,16 @@ export function yoshiHatAnim(state: (k: number) => number | undefined): { slot: 
   return { slot: first === YS_AIR_START || first === 419 || first === 420 ? 3 : 1, frame: k };
 }
 
+/** the viewer track's "fq" for Kirby on a frame: each part's quaternion, scale and place, and whether a
+ *  quaternion turns the part then (its latest line is an "fq" one: ViewerTrack.quatTurned) */
+export interface HatQuats { joints: Map<number, Float32Array>; turned(part: number): boolean }
+
 /** a skinned hat posed as Kirby is: his joints' pose copied, then its matrices. `swung`: his joints as the
- *  viewer track has them, by part (its "fj" and "fp" lines: rot, scale, translate, NaN for a value not sent),
+ *  viewer track has them, by part (its "fj" and "fp" lines: rot, scale, translate, NaN for a value not sent;
+ *  `quats` its "fq", which lays a part a quaternion turns instead),
  *  laid on the hat's own joints - the copy's extra joints are his parts while he wears it, and the copy's
  *  swinging chain (Mewtwo's tail: ftCo_8009DB50) moves them */
-export function poseSkin(hat: KirbyHat, kirby: Skeleton, ...swung: (Map<number, Float32Array> | null | undefined)[]) {
+export function poseSkin(hat: KirbyHat, kirby: Skeleton, quats: HatQuats | null, ...swung: (Map<number, Float32Array> | null | undefined)[]) {
   const sk = hat.skin!;
   // (once PlCo.dat's table is in; until then joint for joint)
   if (!hat.map && partSkips(KIRBY).length) {
@@ -246,6 +251,18 @@ export function poseSkin(hat: KirbyHat, kirby: Skeleton, ...swung: (Map<number, 
   map.forEach((j, h) => {
     if (j < 0) {
       const p = hat.parts?.[h];
+      // (a part a quaternion turns at the frame's end - his blend, his guard - as the track's "fq" has it: the
+      // quaternion, its scale and place; "fj" holds only its values from before)
+      const q = p === undefined || !quats?.turned(p) ? undefined : quats.joints.get(p);
+      if (q && [0, 1, 2, 3].every((k) => !Number.isNaN(q[k]))) {
+        for (let k = 0; k < 4; k++) sk.quat[h * 4 + k] = q[k];
+        sk.quatOn[h] = 1;
+        for (let k = 0; k < 3; k++) {
+          if (!Number.isNaN(q[4 + k])) sk.scale[h * 3 + k] = q[4 + k];
+          if (!Number.isNaN(q[7 + k])) sk.trans[h * 3 + k] = q[7 + k];
+        }
+        return;
+      }
       for (const by of swung) {
         const v = p === undefined ? undefined : by?.get(p);
         if (!v) continue;

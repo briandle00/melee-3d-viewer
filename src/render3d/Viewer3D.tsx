@@ -45,7 +45,7 @@ import { partSkips, partToModelJoint, worldByPart } from "./parts";
 import { Dynamics, animDriven, eulerToQuat, from44, mtxEuler, quatMtx, type DynPose } from "./dynamics";
 import { GuardFrame, guardTilt } from "./guard";
 import { ENTRY, ENTRY_END, ENTRY_START, entryPose, standScale } from "./entry";
-import { copiesFromReplay, HAT_JOINT, KIRBY, KIRBY_ITEMS, KirbyCopy, KirbyHat, poseSkin, yoshiHatAnim } from "./kirby";
+import { copiesFromReplay, HAT_JOINT, KIRBY, KIRBY_ITEMS, KirbyCopy, KirbyHat, poseSkin, type HatQuats, yoshiHatAnim } from "./kirby";
 import { onAngelPlatform, runNumber, shineAt, SHY_GUY } from "~/common/effects";
 import { ActorFrame, FxWorld, type FxSnapshot, type LearnedFx, type LearnedPiece, NO_WORLD, stepThrough } from "./fx/world";
 import { Checkpoints, jumpTo, type Kept } from "./fx/checkpoints";
@@ -2051,7 +2051,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           // ftKb_UnkIntBoolFunc0 under ftDrawCommon_80081200's switch)
           if (kh?.skin && kh.lowHidden) {
             const owner = `${a.player}:${a.nana ? 1 : 0}:${a.st.internalCharacterId}`;
-            poseSkin(kh, fi.skeleton, trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
+            poseSkin(kh, fi.skeleton, hatQuats(trackAt, owner, fno - 123), trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
             kh.skin.posePass(kh.lowHidden);
             kh.skin.passHidden = kh.lowHidden;
             r.drawSkeleton(kh.skin, "opa");
@@ -2166,7 +2166,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         } else if (kh?.skin) {
           if (poseHats) {
             const owner = `${a.player}:${a.nana ? 1 : 0}:${a.st.internalCharacterId}`;
-            poseSkin(kh, fi.skeleton, trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
+            poseSkin(kh, fi.skeleton, hatQuats(trackAt, owner, fno - 123), trackAt?.pose("fj", owner, fno - 123)?.joints, trackAt?.pose("fp", owner, fno - 123)?.joints);
           }
           // (in a mirror, its low-detail look, as his own model's: ftDrawCommon_80080C28)
           const hatLow = mirror ? kh.lowHidden ?? null : null;
@@ -4836,6 +4836,11 @@ function layTrackQuats(tr: ViewerTrack, fi: Fighter, char: number, owner: string
     laid = true;
   }
   return laid;
+}
+/** Kirby's quaternion-turned parts at game frame `g` for his hat (kirby.ts poseSkin): the track's "fq", from version 3 */
+function hatQuats(tr: ViewerTrack | null, owner: string, g: number): HatQuats | null {
+  const q = tr && tr.version >= 3 ? tr.pose("fq", owner, g) : null;
+  return q ? { joints: q.joints, turned: (part) => tr!.quatTurned(owner, part, g) } : null;
 }
 function layTrackSwing(fi: Fighter, char: number, joints: Map<number, Float32Array>, all: boolean,
                        only: ReadonlySet<number> | null = null): boolean {
