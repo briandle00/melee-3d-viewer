@@ -503,6 +503,7 @@ export class Stage {
     this.tints.clear();
     this.background = null;
     this.fodHeights = null;
+    this.fodHeightsBefore = null;
     this.up.clear();
     for (const p of this.parts) if (!this.info.later?.includes(p.index)) this.up.add(p.index);
     if (this.forms.size) this.setForms(stadiumForms(undefined, 0, STADIUM_TIMES, this.scale));
@@ -892,10 +893,13 @@ export class Stage {
     }
     // the mirror's copies of the side platforms (part 2's joints 2 and 3)
     // stand where the platforms are, shown while they are out of the water
-    // (grIzumi_801CC0D4)
+    // (grIzumi_801CC0D4). The main part's proc copies them before the
+    // columns' procs (made after it) move the platforms (grIzumi_801CC358's
+    // HSD_JObjSetTranslateY), so the copies stand where the platforms stood
+    // the frame before
     if (this.fod && p === this.fod.mirror && sk.n > 3) {
       const m = this.fod.main.skeleton;
-      const h = [this.fodHeight(0, st), this.fodHeight(1, st)];
+      const h = [0, 1].map((side) => this.fodHeightsBefore?.[side] ?? this.fodHeight(side as 0 | 1, st));
       for (let side = 0; side < 2; side++) {
         const from = (side + 1) * 3, to = (side + 2) * 3;
         sk.trans[to] = m.trans[from]; sk.trans[to + 1] = h[side]; sk.trans[to + 2] = m.trans[from + 2];
@@ -948,6 +952,8 @@ export class Stage {
    *  has them (a viewer track's "fod" whatever the replay's version, else the
    *  replay's from Slippi 3.18 on), left by its apply; null before */
   fodHeights: [number | undefined, number | undefined] | null = null;
+  /** and the frame before's (the mirror's copies of the platforms stand there: grIzumi_801CC0D4) */
+  fodHeightsBefore: [number | undefined, number | undefined] | null = null;
 
   /** Fountain of Dreams: a side platform's height (0 left, 1 right): the
    *  logic's, else the frame's, else where the file starts it */

@@ -33,3 +33,14 @@ test("a column that comes back up starts its animation again, its frame 0 the ne
   assert.equal(from(8, left), 0);
   assert.equal(from(30, right), 0);
 });
+
+test("the mirror's copies of the platforms stand where the platforms stood the frame before", () => {
+  // (grIzumi_801CC0D4, the main part's proc, copies the platforms' places into the mirror's part before the
+  // columns' procs - made after it - move them that frame: grIzumi_801CC358)
+  const h = (frame: number, side: 0 | 1) => side === 0 ? 10 + 0.15 * frame : 20;
+  const st = { scale: 1, partOf: () => null, extraRuns: new Map(), fountainStart: [20, 28] } as unknown as Stage;
+  const f = new Fountain(st, h);
+  f.apply(st, 40);
+  assert.deepEqual(st.fodHeights, [h(40, 0), 20]);
+  assert.deepEqual(st.fodHeightsBefore, [h(39, 0), 20]);
+});

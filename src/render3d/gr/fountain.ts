@@ -96,6 +96,7 @@ export class Fountain implements StageLogic {
 
   apply(st: Stage, frame: number) {
     st.fodHeights = [this.heightAt(frame, 0), this.heightAt(frame, 1)];
+    st.fodHeightsBefore = [this.heightAt(frame - 1, 0), this.heightAt(frame - 1, 1)];
     for (const c of this.cols) {
       if (this.under(st, frame, c.side)) continue;
       const run = this.runs[c.side], back = this.cameBack(st, frame, c.side);
