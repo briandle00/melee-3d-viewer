@@ -423,8 +423,11 @@ export class Skeleton {
       for (const tr of ao.tracks) {
         // (a track whose own clock has not come to 0 yet - its FObj's start frame below 0 - writes nothing, and
         // its joint stays as it was: HSD_FObjInterpretAnim. Effect models' joints hidden at rest wait so for
-        // their branch key: Donkey Kong's Giant Punch's, EfDkData model 2)
-        if (tr.keys.length && tr.keys[0].time > frame) continue;
+        // their branch key: Donkey Kong's Giant Punch's, EfDkData model 2). Its clock is the AObj's: one that stops
+        // at its end (AOBJ_NO_ANIM) or rewinds there (HSD_FObjReqAnimAll at the frame it rewinds to) before the
+        // track's start never lets it write - Final Destination's phase sets' branch tracks on the five's joint 1,
+        // 700 to 1300 frames on in a set of 100)
+        if (tr.keys.length && tr.keys[0].time > t) continue;
         const v = sample(tr.keys, t);
         if (v === null) continue;
         if (tr.type === 4) this.path(i, ao.obj, v);
