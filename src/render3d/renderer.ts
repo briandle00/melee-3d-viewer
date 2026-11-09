@@ -13,6 +13,7 @@
  * write, color writes) come from the material as HSD sets them. Textures
  * are filtered as the file says, with the file's own mip levels.
  */
+import { ScreenCopies, type Shown } from "./screencopies";
 import { Archive, Image, MObj, TObj, Tlut, decodeImage } from "./hsd";
 import { DrawGroup, Drawable, MatState, Skeleton, TexState, billboardViewOf } from "./skeleton";
 import { Mat, invert, lookAt, mul } from "./math";
@@ -980,53 +981,72 @@ export class Renderer {
    *  screen): drawn from a picture the caller makes, uploaded when its
    *  version changes */
   private live = new WeakMap<Image, {
+    /** the texture the screen shows now: the text page, a copy buffer's, or black (liveAdvance) */
     tex: WebGLTexture | null; version: number; source: TexImageSource | null;
+    /** the text page (the canvas the caller draws, and the letters drawn into it: liveTarget) */
+    text: WebGLTexture | null;
     /** the targets drawn into, by texture */
     targets?: Map<WebGLTexture, RenderTarget>;
-    /** the copy made at the end of a frame (captureLive), and the frame it was made at: it is shown from the next */
-    pend?: WebGLTexture; pendFrame?: number;
-    /** the frame the shown picture was settled for (liveAdvance) */
-    shownFor?: number;
-    /** the frame the screen was blacked for (liveAdvance), whether its first drawing is under way, and whether its second */
-    jumpedAt?: number; first?: boolean; second?: boolean;
+    /** the copies of the picture, a buffer each as the game keeps them (screencopies.ts) */
+    copies: ScreenCopies<WebGLTexture>;
   }>();
-
-  /** each live texture's size as last allocated */
-  private liveSize = new WeakMap<WebGLTexture, [number, number]>();
-  /** a live texture made w x h if it is not (what it held is gone: it is about to be drawn whole) */
-  private sizeLive(tex: WebGLTexture, w: number, h: number) {
-    const had = this.liveSize.get(tex);
-    if (had && had[0] === w && had[1] === h) return;
-    const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, tex);
+  /** what a screen with no copy shows */
+  private blackTex: WebGLTexture | null = null;
+  private liveTexture(w: number, h: number): WebGLTexture {
+    const gl = this.gl, t = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    this.liveSize.set(tex, [w, h]);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     this.bound.fill(null);
+    return t;
+  }
+  /** the screen's texture after its copies say what it shows */
+  private liveShow(l: { tex: WebGLTexture | null; text: WebGLTexture | null; copies: ScreenCopies<WebGLTexture> }) {
+    const s = l.copies.shown;
+    let t: WebGLTexture | null;
+    if (s.kind === "text") t = l.text;
+    else if (s.kind === "copy") t = s.tex;
+    else {
+      if (!this.blackTex) {
+        const gl = this.gl;
+        this.blackTex = this.liveTexture(1, 1);
+        gl.bindTexture(gl.TEXTURE_2D, this.blackTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+      }
+      t = this.blackTex;
+    }
+    if (t === l.tex) return;
+    l.tex = t;
+    this.bound.fill(null);
+    this.imageEpoch++;
+    this.dirty();
+  }
+  /** what the screen showing `image` shows now (for the draw log): the text page, a copy (its frame), or black */
+  liveShown(image: Image): Shown<WebGLTexture> | null {
+    return this.live.get(image)?.copies.shown ?? null;
   }
 
   /** show this picture where the file has the image (a render target), from now on */
   liveImage(image: Image, source: TexImageSource, version: number) {
     let l = this.live.get(image);
-    if (!l) this.live.set(image, (l = { tex: null, version: -1, source: null }));
+    if (!l) {
+      this.live.set(image, (l = { tex: null, text: null, version: -1, source: null,
+                                  copies: new ScreenCopies((w, h) => this.liveTexture(w, h)) }));
+    }
     l.source = source;
-    if (l.version === version && l.tex) return;
+    if (l.version === version && l.text) return;
     const gl = this.gl;
-    // (a new texture for the image: the texture caches look again; a new
-    // picture in the same one needs no looking up)
-    if (!l.tex) this.imageEpoch++;
-    if (!l.tex) {
-      l.tex = gl.createTexture()!;
-      gl.bindTexture(gl.TEXTURE_2D, l.tex);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    } else gl.bindTexture(gl.TEXTURE_2D, l.tex);
+    if (!l.text) l.text = this.liveTexture(1, 1);
+    gl.bindTexture(gl.TEXTURE_2D, l.text);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-    const sz = source as { width?: number; height?: number };
-    if (sz.width !== undefined && sz.height !== undefined) this.liveSize.set(l.tex, [sz.width, sz.height]);
     l.version = version;
     this.bound.fill(null);
+    // (a new page: what samples the screen looks again)
+    if (l.tex === l.text) this.imageEpoch++;
+    this.liveShow(l);
   }
 
   /** A live image's texture as a target to draw into (w x h, as its picture is): Pokemon Stadium's screen,
@@ -1034,8 +1054,8 @@ export class Renderer {
    *  (liveImage); its first row is the top, so draw through a camera that turns the picture over. */
   liveTarget(image: Image, w: number, h: number): RenderTarget | null {
     const l = this.live.get(image);
-    if (!l?.tex) return null;
-    return this.targetOf(l, l.tex, w, h);
+    if (!l?.text) return null;
+    return this.targetOf(l, l.text, w, h);
   }
   private targetOf(l: { targets?: Map<WebGLTexture, RenderTarget> }, tex: WebGLTexture, w: number, h: number): RenderTarget {
     const had = l.targets?.get(tex);
@@ -1055,44 +1075,16 @@ export class Renderer {
     return t;
   }
 
-  /** While the screen shows the match, it shows on a frame the copy made at the end of the frame before it - the
-   *  game copies the picture after the screen is drawn - and never the copy of this frame, however many times this
-   *  frame is drawn. Call this before drawing frame `frame` with `shows` for whether the screen shows the match.
-   *  The copy of the frame before is promoted; a redraw leaves what is shown as it is. A frame that does not follow
-   *  one (the first, a jump) has no copy of the frame before: the screen is black for a first drawing, and true is
-   *  returned - the frame is to be drawn again, with the copy that drawing made (at its end) on the screen - and
-   *  every drawing of that frame is those two, so the picture is the same whatever the number of draws. */
+  /** Before drawing frame `frame`: the screen shows the copy its mode's buffer (w x h) holds - made at the end of the
+   *  frame before while the mode goes on, an older one after the screen comes back to a buffer it left - or its text
+   *  page (`shows` false). ScreenCopies keeps the buffers as the game does. -> true when the frame is to be drawn
+   *  again: a jump onto a buffer knows no copy, black for a first drawing, the copy that drawing made for the second. */
   liveAdvance(image: Image, frame: number, shows: boolean, w: number, h: number): boolean {
     const l = this.live.get(image);
-    if (!l?.tex || !shows) return false;
-    if (l.second) { l.second = false; return false; }
-    if (l.jumpedAt !== frame) {
-      if (l.shownFor === frame) return false;
-      if (l.pend && l.pendFrame === frame - 1) {
-        [l.tex, l.pend] = [l.pend, l.tex];
-        l.shownFor = frame;
-        this.bound.fill(null);
-        this.imageEpoch++;
-        this.dirty();
-        return false;
-      }
-    }
-    // a frame with no copy of the one before: black, drawn twice
-    this.sizeLive(l.tex, w, h);
-    const gl = this.gl, t = this.targetOf(l, l.tex, w, h);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fbo);
-    gl.viewport(0, 0, w, h);
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this.bindPicture();
-    l.jumpedAt = frame;
-    l.shownFor = frame;
-    l.first = true;
-    this.bound.fill(null);
-    this.imageEpoch++;
-    this.dirty();
-    return true;
+    if (!l) return false;
+    const again = l.copies.advance(frame, shows, w, h);
+    this.liveShow(l);
+    return again;
   }
 
   /** A part of the picture drawn so far into a live image's texture (w x
@@ -1102,27 +1094,13 @@ export class Renderer {
    *  copied out, then drawn into the texture. `rect`: fractions of the
    *  picture from its top left (x, y, w, h). The texture's first row is the
    *  top, as a canvas's upload has it. */
-  captureLive(image: Image, w: number, h: number, rect: [number, number, number, number], tint: [number, number, number], frame?: number) {
+  captureLive(image: Image, w: number, h: number, rect: [number, number, number, number], tint: [number, number, number], frame: number) {
     const gl = this.gl;
     const l = this.live.get(image);
-    if (!l?.tex) return;
-    // (with a frame, the copy waits to be shown from the next: in a texture of its own)
-    let dst = l.tex;
-    if (frame !== undefined) {
-      if (!l.pend) {
-        l.pend = gl.createTexture()!;
-        gl.bindTexture(gl.TEXTURE_2D, l.pend);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      }
-      dst = l.pend;
-      l.pendFrame = frame;
-    }
-    // (the copy's own picture, pixel for pixel: GXCopyTex writes the source's size - 640 x 406, 124 x 80)
-    this.sizeLive(dst, w, h);
+    if (!l) return;
+    // (into its buffer, shown from the next frame: the copy's own picture, pixel for pixel - GXCopyTex writes the
+    // source's size, 640 x 406 or 124 x 80)
+    const dst = l.copies.copyInto(w, h, frame);
     const [PW, PH] = this.look ? [LOOK_W, LOOK_H] : this.pic ? [this.pic.w, this.pic.h] : this.size;
     const sx = rect[0] * PW, sy = rect[1] * PH, sw = rect[2] * PW, sh = rect[3] * PH;
     // the picture's pixels under the part, bottom-up as GL counts its rows
@@ -1160,12 +1138,8 @@ export class Renderer {
     gl.useProgram(this.prog);
     this.bound.fill(null);
     // (the first drawing of a frame the screen was blacked for: its copy is what the second shows)
-    if (frame !== undefined && l.first && l.jumpedAt === frame && l.pend) {
-      [l.tex, l.pend] = [l.pend, l.tex];
-      l.first = false;
-      l.second = true;
-      this.imageEpoch++;
-    }
+    l.copies.copied(w, h, frame);
+    this.liveShow(l);
     this.dirty();
   }
   private cap: { prog: WebGLProgram; fbo: WebGLFramebuffer; tex: WebGLTexture; w: number; h: number;
