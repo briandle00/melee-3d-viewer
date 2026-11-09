@@ -3360,7 +3360,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   onCleanup(() => clearInterval(idleFill));
   /** checkpoints ahead of the ones playing has made, in `ms` of a frame's spare time: the world as it stands is
    *  kept, the furthest checkpoint loaded and stepped on (the dynamics left alone), and the world put back */
-  const fillChecks = (w: FxWorld, data: ReplayData, fs: Map<string, Fighter>, ms: number): boolean => {
+  const fillChecks = (w: FxWorld, data: ReplayData, fs: Map<string, Fighter>, ms: number, most = Infinity): boolean => {
     const c = checks(w);
     const end = data.frames.length - 1;
     // (where the stepping ahead stopped last time: carried on from, until it reaches the end)
@@ -3371,7 +3371,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     loadCheck(w, from.snap);
     const { pose, one } = fxStepper(w, data, fs, Number.NaN, null, false);
     const t0 = performance.now();
-    for (let g = Math.max(from.frame + 1, 0); g <= end && performance.now() - t0 < ms; g++) {
+    const first = Math.max(from.frame + 1, 0);
+    for (let g = first; g <= end && performance.now() - t0 < ms && g - first < most; g++) {
       pose(g); one(g); c.store.keep(g, () => saveCheck(w));
     }
     c.ahead = saveCheck(w);
@@ -3813,7 +3814,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     /** where the drawing time went since the last ask: milliseconds a frame, by section */
     sections: () => prof.read(),
     /** checkpoints made ahead to a frame now, at once (the checks', before a jump they measure) */
-    fxFill: (to: number) => {
+    fxFill: (to: number, chunk?: number) => {
       // (only once every file the world's steps read is in - every fighter, the effect files, the track's, the learned
       // effects' table: one that
       // comes later makes the world again, and the checkpoints made before with it, and the jump that was to be
@@ -3825,7 +3826,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const w = worldNow(ek, data, fs);
       const c = checks(w);
       for (let i = 0; i < 100000 && (c.ahead?.frame ?? c.store.last.frame) < Math.min(to, data.frames.length - 1); i++) {
-        if (!fillChecks(w, data, fs, 50)) break;
+        // (`chunk`: at most so many frames a turn - a check that the world made again from its checkpoints at any
+        // frame steps on as it would have)
+        if (!fillChecks(w, data, fs, chunk ? Infinity : 50, chunk ?? Infinity)) break;
       }
       draw();
       return true;

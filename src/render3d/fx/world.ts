@@ -265,8 +265,9 @@ export interface ModelFx {
   /** its root's scale is its animation's times `scale`, set on the root itself each step (efLib_Cb_SetScaleRotY_FromFighter:
    *  HSD_JObjSetScale of the fighter root's scale times the effect root's, float32), not a parent's */
   rootScaleMul?: boolean;
-  /** a constrained root's turn as its last frame's constraint left it (JObjUpdateFunc 0x37), for the next */
-  held?: { turn: Float32Array | null };
+  /** a constrained root's turn as each frame's constraint left it (JObjUpdateFunc 0x37), by the age it was posed at:
+   *  made once a frame with the world's step (FxWorld.step), so that how often a frame is drawn changes nothing */
+  held?: Map<number, Float32Array | null>;
   rootRotationZ?: boolean;
   /** held to the joint it is under by place and turn constraints (Prop.poseConstrained), not made its child */
   constrained?: boolean;
@@ -685,6 +686,12 @@ export class FxWorld {
     if (this.tracked && this.trackHud) for (const e of this.trackHud(frame)) this.hudGen(e);
     for (const m of this.models) if (runs(m)) m.age++;
     this.models = this.models.filter((m) => m.age < m.life);
+    // (a constrained model's turn as this frame's constraint leaves it, once: the next frame's own lengths come from it)
+    for (const m of this.models) {
+      if (!m.constrained || !runs(m)) continue;
+      const pr = m.bank.prop(m.index, 0, true);
+      if (pr) this.poseModel(m, pr, m.age, true);
+    }
     this.frame = frame;
     this.keepRng(frame);
   }
@@ -2115,14 +2122,21 @@ export class FxWorld {
 
   /** an effect model posed at a frame of its animation where it is now: a child of a fighter's joint turned
    *  as the joint is, else at its place with the turn and size the dispatch gave its root */
-  poseModel(m: ModelFx, pr: Prop, age: number) {
+  poseModel(m: ModelFx, pr: Prop, age: number, keep = false) {
     if (m.cutter) age = cutterAnimationFrame(age, m.cutter.releasedAt);
     // (under a joint: held by constraints, or its child)
     const parent = m.under?.() ?? null;
     if (parent) {
       if (m.constrained) {
         pr.rootScaleSet = !!m.scaleSet;
-        pr.poseConstrained(age, parent, m.scale, false, age, m.underOrient?.() ?? null, m.held ??= { turn: null });
+        // (from the turn the frame before left it; the world's step keeps this frame's, `keep`)
+        const h = { turn: m.held?.get(age - 1) ?? null };
+        pr.poseConstrained(age, parent, m.scale, false, age, m.underOrient?.() ?? null, h);
+        if (keep) {
+          const held = (m.held ??= new Map());
+          held.set(age, h.turn);
+          for (const k of held.keys()) if (k < age - 2) held.delete(k);
+        }
         pr.rootScaleSet = false;
       } else pr.poseChild(age, parent, m.scale, false);
       if (m.secondChildOff) pr.hideSecondChild();
