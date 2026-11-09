@@ -35,7 +35,7 @@ import { buildParticles } from "./fx/draw";
 import {
   FIRST_FRAME, GO_FRAME, HUNDREDS, markFrame, ONES, PlayerHud, portColor, portColorIndex, SIGN, TAG_IDLE, TAG_LAUNCH, TAG_LAUNCH_SPEED,
   TENS, timerAt, edgePoint, edgeWidth, tagFrame, nametagFrame, chevronFrame, type ArrowTable, arrowTable, copyArrowTable,
-  arrowsAssign, arrowsPlace, digitRest, scatterFrom,
+  arrowsAssign, arrowsPlace, digitRest, scatterFrom, type PercentView,
 } from "./hudlogic";
 import { PLATE_FONT, quad, tagText, texQuad, textPicture } from "./hudtext";
 import { glyphAtlas, PLATE_FULL, plateTexts, rawBytes, type PlateFont, type PlateText } from "./plates";
@@ -209,6 +209,40 @@ export class HudModel {
   image(joint: number, dobj: number) {
     const d = this.joints[joint]?.dobjs[dobj];
     return d ? this.sk.states[d.index].tex[0]?.image ?? null : null;
+  }
+}
+
+/** what posePercent's pose depends on (HudModel.same; its entry animations are done by frame 31) */
+export function percentKey(m: HudModel, v: PercentView): string {
+  const rest = digitRest(v.animFrame, v.hitAnimFrame, m.animLength(v.anim));
+  return `${v.percent}|${v.layout.frame.join()}|${v.color}|${v.layout.dx}|${v.layout.shown}|${v.anim}|${Math.min(v.animFrame, 31)}|` +
+    `${v.spaced}|${v.offset.join()}|${rest}|${v.scatter}`;
+}
+
+/** The percent (DmgNum) posed as ifStatus_802F4EDC leaves it, its root not yet placed (HudModel.finish): its
+ *  animation at its frame (float32, as FObjUpdateAnim makes it: hsd.ts sample), each digit at its place - or its stored place (digitRest) - plus the narrow-1 spacing or a shake's step, in
+ *  float32, and a KO's scatter flown from there */
+export function posePercent(m: HudModel, v: PercentView) {
+  const end = m.animLength(v.anim);
+  const rest = digitRest(v.animFrame, v.hitAnimFrame, end);
+  m.begin();
+  // (the digits at their stored places: the animation's last running frame's - see digitRest)
+  if (rest) m.anim(v.anim, end - 1);
+  const stored = rest ? [HUNDREDS, TENS, ONES, SIGN].map((k) => m.trans(k + 1)) : null;
+  m.anim(v.anim, v.animFrame);
+  for (const k of [HUNDREDS, TENS, ONES, SIGN]) {
+    const j = k + 1;
+    if (k === SIGN) m.mat(j, 0, 0);
+    else m.mat(j, 0, v.layout.frame[k], 1);
+    m.color(j, v.color);
+    const [x, y] = stored ? stored[[HUNDREDS, TENS, ONES, SIGN].indexOf(k)] : m.trans(j);
+    // (float32, as the joint holds it: its place, the narrow-1 spacing, a shake's step added to it)
+    const f = Math.fround;
+    let tx = f(f(x + (v.spaced ? v.layout.dx[k] : 0)) + v.offset[k][0]), ty = f(y + v.offset[k][1]);
+    // (a KO's scatter flies the joint from there: ifStatus_PercentOnDeathAnimationThink adds to its translation)
+    if (v.scatter !== null && v.scatterSpeeds) [tx, ty] = scatterFrom(tx, ty, v.scatter, v.scatterSpeeds[k]);
+    m.setTrans(j, tx, ty);
+    if (!v.layout.shown[k]) m.hide(j);
   }
 }
 
@@ -728,29 +762,8 @@ export class Hud {
       out.percents.push({ player: p.slot, percent: v.percent, hidden: v.scatter !== null });
       if (p.num && !hidden) {
         const m = p.num;
-        // (its entry animations are done by frame 31)
-        const end = m.animLength(v.anim);
-        const rest = digitRest(v.animFrame, v.hitAnimFrame, end);
-        if (!m.same(`${v.percent}|${v.layout.frame.join()}|${v.color}|${v.layout.dx}|${v.layout.shown}|${v.anim}|${Math.min(v.animFrame, 31)}|${v.spaced}|${v.offset.join()}|${rest}|${v.scatter}`)) {
-          m.begin();
-          // (the digits at their stored places: the animation's last running frame's - see digitRest)
-          if (rest) m.anim(v.anim, end - 1);
-          const stored = rest ? [HUNDREDS, TENS, ONES, SIGN].map((k) => m.trans(k + 1)) : null;
-          m.anim(v.anim, v.animFrame);
-          for (const k of [HUNDREDS, TENS, ONES, SIGN]) {
-            const j = k + 1;
-            if (k === SIGN) m.mat(j, 0, 0);
-            else m.mat(j, 0, v.layout.frame[k], 1);
-            m.color(j, v.color);
-            const [x, y] = stored ? stored[[HUNDREDS, TENS, ONES, SIGN].indexOf(k)] : m.trans(j);
-            // (float32, as the joint holds it: its place, the narrow-1 spacing, a shake's step added to it)
-            const f = Math.fround;
-            let tx = f(f(x + (v.spaced ? v.layout.dx[k] : 0)) + v.offset[k][0]), ty = f(y + v.offset[k][1]);
-            // (a KO's scatter flies the joint from there: ifStatus_PercentOnDeathAnimationThink adds to its translation)
-            if (v.scatter !== null && v.scatterSpeeds) [tx, ty] = scatterFrom(tx, ty, v.scatter, v.scatterSpeeds[k]);
-            m.setTrans(j, tx, ty);
-            if (!v.layout.shown[k]) m.hide(j);
-          }
+        if (!m.same(percentKey(m, v))) {
+          posePercent(m, v);
           m.finish(px, py);
         }
         r.drawSkeleton(m.sk, "opa");
