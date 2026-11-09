@@ -565,22 +565,31 @@ export class StadiumScreen implements StageLogic {
   readonly size: [number, number] = [W, H];
   readonly tint: [number, number, number] = [150, 180, 160];
 
+  /** the size of the picture the game copies the match into in this mode (lb_800121FC's RGB565 buffers in
+   *  grpstadium.c: 640 x 406 for the match, 124 x 80 for a close-up), else the text page's */
+  copySize(): [number, number] {
+    return this.mode === 7 ? [640, 406] : this.mode === 8 ? [124, 80] : [W, H];
+  }
+
   /** the part of the frame just drawn the screen shows (modes 7 and 8: the
-   *  match's own picture), as fractions of the picture from its top left
-   *  (x, y, w, h); null in the other modes. The renderer copies it
-   *  (Renderer.captureLive), scaled to the screen; the screen's material
-   *  lays its green on it (Stage.setScreenConstant). */
+   *  match's own picture), as fractions of the game's 640 x 480 picture from
+   *  its top left (x, y, w, h); null in the other modes. The renderer copies
+   *  it (Renderer.captureLive) into a picture of copySize(), pixel for pixel
+   *  as GXCopyTex does; the screen's material lays its green on it
+   *  (Stage.setScreenConstant). `where`: the whole pixel of a player's camera
+   *  box bone (its x2188) on the frame before, as grStadium_801D32D0 finds it */
   captureRect(where: ((player: number) => [number, number] | null)): [number, number, number, number] | null {
     const m = this.mode;
     if (m !== 7 && m !== 8) return null;
     // (the text page is drawn again when it comes back)
     this.drawn = "";
-    // (the game copies 640 by 406 from 36 down)
+    // (grStadium_801D2FD0: 640 by 406 from 36 down)
     if (m === 7) return [0, 36 / 480, 1, 406 / 480];
+    // (grStadium_801D32D0: 124 by 80 with the bone 62 in and 40 down, held inside the camera's viewport - 0 to 640
+    // by 0 to 480 - and its corner at an even pixel: ((int) x >> 1) * 2; grStadium_801D3084 copies it)
     const at = this.player >= 0 ? where(this.player) : null;
-    const cw = 124 / 640, ch = 80 / 480;
-    const x = Math.max(0, Math.min(1 - cw, (at?.[0] ?? 0.5) - cw / 2));
-    const y = Math.max(0, Math.min(1 - ch, (at?.[1] ?? 0.5) - ch / 2));
-    return [x, y, cw, ch];
+    const x = Math.max(0, Math.min(640 - 124, (at?.[0] ?? 320) - 62));
+    const y = Math.max(0, Math.min(480 - 80, (at?.[1] ?? 240) - 40));
+    return [(Math.trunc(x) >> 1) * 2 / 640, (Math.trunc(y) >> 1) * 2 / 480, 124 / 640, 80 / 480];
   }
 }
