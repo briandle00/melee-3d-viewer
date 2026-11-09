@@ -17,6 +17,10 @@ function fakeSkeleton(n: number): Skeleton {
     resetPose() { sk.rot.fill(0); sk.scale.fill(1); sk.trans.fill(0); },
     clearQuats() { sk.quatOn.fill(0); },
     update() { sk.updated++; },
+    // (each joint's envelope matrix: a made-up one, its index in it)
+    binds: Array.from({ length: n }, (_, j) => new Float32Array([j])),
+    invBindOf(j: number) { return sk.binds[j]; },
+    useInvBind(j: number, m: Float32Array) { sk.binds[j] = m; },
   };
   return sk as unknown as Skeleton;
 }
@@ -73,5 +77,18 @@ test("a part a quaternion turns takes the track's \"fq\", and his own joints his
   kirby.quatOn[1] = 0;
   poseSkin(hat, kirby, null);
   assertEquals(Array.from(skin.quatOn), [0, 0, 0, 0, 0, 0]);
+  setPartSkips({});
+});
+
+test("the hat's joints that are his take his envelope matrices; its extra joints keep their own", () => {
+  // (a colored hat's meshes hang on his own JObjs while he wears it: SetupEnvelopeModelMtx's MTXConcat(jp->mtx,
+  // jp->envelopemtx) is his joint's matrix times his envelope matrix - Mewtwo's hat file keeps other ones)
+  setPartSkips({ 4: [2, 3, 5] });
+  const kirby = fakeSkeleton(4), skin = fakeSkeleton(6);
+  (kirby as unknown as { binds: Float32Array[] }).binds = [0, 1, 2, 3].map((j) => new Float32Array([100 + j]));
+  const hat: KirbyHat = { prop: null, skin, mask: 0b011 };
+  poseSkin(hat, kirby, null);
+  const binds = (skin as unknown as { binds: Float32Array[] }).binds.map((b) => b[0]);
+  assertEquals(binds, [100, 101, 2, 3, 102, 103]);
   setPartSkips({});
 });
