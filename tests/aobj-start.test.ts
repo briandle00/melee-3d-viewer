@@ -22,3 +22,17 @@ test("a branch track whose first key is at 19 leaves its joint hidden before the
   const at = (t: number) => { sk.shown.fill(0); sk.applyAObjs([null, branch], t, false); return sk.shown[1]; };
   assert.deepEqual([0, 18, 19, 39, 40].map(at), [0, 0, 1, 1, 0]);
 });
+
+test("a branch track that starts after its animation's end never writes, played once or looping", () => {
+  const sk = Object.create(Skeleton.prototype);
+  Object.assign(sk, { n: 2, joints: [{ index: 0, offset: 0 }, { index: 1, offset: 1 }], rot: new Float32Array(6),
+                      scale: new Float32Array(6).fill(1), trans: new Float32Array(6), shown: new Uint8Array(2),
+                      subEnd: new Int32Array([2, 2]) });
+  // (Final Destination's phase set 4 on joint 1: an FObj starting at -700 in an animation of 100)
+  const late = (loop: boolean): AObj => ({ tracks: [{ type: 12, keys: [{ time: 700, duration: 0, kind: 0, p0: 1, p1: 1, d0: 0, d1: 0 }] }],
+                                           end: 100, loop, obj: null });
+  for (const loop of [false, true]) {
+    const at = (t: number) => { sk.shown.fill(0); sk.applyAObjs([null, late(loop)], t, false); return sk.shown[1]; };
+    assert.deepEqual([0, 99, 100, 700, 1204].map(at), [0, 0, 0, 0, 0]);
+  }
+});

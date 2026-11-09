@@ -9,9 +9,9 @@
  * Every number here is read from your game files at runtime.
  */
 import { animTime } from "./animtime";
-import { Archive, FigaTree, JObj, loadFigaTree, loadJoint, parseArchive, ptr, sample, str, type Track } from "./hsd";
+import { Archive, FigaTree, JObj, loadFigaTree, loadJoint, loadMatAnimJoint, type MatAnim, parseArchive, ptr, sample, str, type Track } from "./hsd";
 import { Face, FaceTextures, PartAnims, PartPose, faceTextures, partAnims } from "./face";
-import { Skeleton } from "./skeleton";
+import { applyMatAnim, Skeleton } from "./skeleton";
 import { Prop } from "./prop";
 import { itemHitElement, ScriptEvent, runScript } from "./fx/script";
 // (how far on a move that loops by itself has its script run: fx/script.ts ScriptClock)
@@ -274,6 +274,27 @@ export interface GameAnim {
 }
 
 const MEWTWO_ID = 16;
+/** a full shield (ftCommonData x260_startShieldHealth) */
+const START_SHIELD = 60;
+
+/** a parts description's (FtPartsDesc: model count, then a table of four lookups by costume) meshes, each lookup's
+ *  every variant together: the costume's lookup, else costume 0's (ftParts_8007487C) */
+function hatLookups(a: Archive, desc: number, costume: number): Set<number>[] {
+  const d = a.data, n = d.getUint32(desc), vis = ptr(a, desc + 4), out: Set<number>[] = [];
+  if (vis === null || n > 11) return out;
+  for (let k = 0; k < 4; k++) {
+    const lk = ptr(a, vis + costume * 16 + k * 4) ?? ptr(a, vis + k * 4), set = new Set<number>();
+    for (let m = 0; lk !== null && m < n; m++) {
+      const count = d.getUint32(lk + m * 8), list = ptr(a, lk + m * 8 + 4);
+      for (let v = 0; v < count && v < 64 && list !== null; v++) {
+        const c = d.getUint32(list + v * 8), ids = ptr(a, list + v * 8 + 4);
+        for (let i = 0; i < c && i < 256 && ids !== null; i++) set.add(d.getUint8(ids + i));
+      }
+    }
+    out.push(set);
+  }
+  return out;
+}
 
 export class Fighter {
   skeleton: Skeleton;
@@ -312,7 +333,7 @@ export class Fighter {
   private articleElements = new Map<string, number | null>();
   /** a costume's hat, a model of its own in the costume's file (Jigglypuff's
    *  bow, bonnet, headband and crown: ftpurin.c), and the joint it sits on */
-  hat: { prop: Prop; joint: number } | null = null;
+  hat: { prop: Prop; joint: number; hidden: Set<number>; lowHidden: Set<number> } | null = null;
 
   constructor(
     public internalId: number,
@@ -403,7 +424,24 @@ export class Fighter {
     // (the game copies its joint 6's matrix onto the hat each frame it draws it)
     const hat = [...md.publics].find(([k]) => k.endsWith("Hat_TopN_joint"));
     if (hat) {
-      try { this.hat = { prop: new Prop(md, hat[1], null, null, `${tag}:hat`), joint: 6 }; } catch { this.hat = null; }
+      try {
+        const prop = new Prop(md, hat[1], null, null, `${tag}:hat`);
+        // (its own parts' visibility: ftPr_Init_8013C360 lays her articles list's second entry's lookups on it -
+        // ftParts_8007487C, every lookup's meshes hidden - and her draw shows all of one lookup's meshes, no
+        // variant picked (ftPr_Init_UnkIntBoolFunc0: ftParts_80074CA0): lookup 0 as her body shows its own
+        // (ftDrawCommon_80080E18), lookup 1 in her low-detail draw (ftDrawCommon_80080C28: a stage's mirror and
+        // the magnifier))
+        const list = ptr(pl, ftData + 0x48), it1 = list === null ? null : ptr(pl, list + 4);
+        const looks = it1 === null ? [] : hatLookups(pl, it1 + 4, costume);
+        const hiddenBut = (k: number) => {
+          const h = new Set<number>();
+          looks.forEach((l, i) => { if (i !== k) l.forEach((x) => h.add(x)); });
+          looks[k]?.forEach((x) => h.delete(x));
+          return h;
+        };
+        this.hat = { prop, joint: 6, hidden: hiddenBut(0), lowHidden: hiddenBut(1) };
+        this.hat.hidden.forEach((i) => prop.skeleton.hidden.add(i));
+      } catch { this.hat = null; }
     }
 
     // which model parts show: the game's parts visibility tables (ftData+8)
@@ -437,6 +475,17 @@ export class Fighter {
         this.partVariants = variants(lookups[0]);
         this.lowVariants = variants(lookups[1]);
         this.metalVariants = variants(lookups[3]);
+        // Yoshi's egg (part 0's variant 1, and its low-detail one): its materials' animation, held still
+        // (ftYs_Init_8012B6E8: rate 0) at the frame his shield says (ftYs_Init_8012B8A4)
+        if (internalId === YOSHI) {
+          const mat = [...md.publics].find(([k]) => k.endsWith("matanim_joint"));
+          const anims = mat ? loadMatAnimJoint(md, mat[1]) : [];
+          const byDobj = new Map<number, MatAnim>();
+          all.forEach((j, k) => j.dobjs.forEach((dobj, n) => { const ma = anims[k]?.[n]; if (ma) byDobj.set(dobj.index, ma); }));
+          const egg = [...(this.partVariants[0]?.[1] ?? []), ...(this.lowVariants[0]?.[1] ?? [])];
+          this.eggMats = egg.filter((i) => byDobj.has(i)).map((i) => ({ dobj: i, ma: byDobj.get(i)! }));
+          this.eggEnd = this.eggMats.reduce((e, m) => (e === 0 ? m.ma.aobj?.end ?? 0 : e), 0);
+        }
         this.partVariants.forEach((m, part) => {
           const sel = startingPart(this.internalId, costume, part);
           this.partShown[part] = sel;
@@ -543,6 +592,24 @@ export class Fighter {
   /** each model part's variants (their meshes), and the variant shown now (-1: none) */
   private partVariants: number[][][] = [];
   private partShown: number[] = [];
+
+  /** Yoshi's egg's meshes and their materials' animations, and its length (ftYoshiAttributes xC: the
+   *  animation's end frame, ftYs_Init_8012B6E8) */
+  private eggMats: { dobj: number; ma: MatAnim }[] = [];
+  private eggEnd = 0;
+
+  /** Yoshi's egg's colors as his shield left them: its materials' animation at its length times the share of
+   *  the shield lost (ftYs_Init_8012B8A4: xC * (1 - shield_health / x260_startShieldHealth), HSD_MObjReqAnim at
+   *  that frame), the egg darker as the shield goes; 0 his egg roll's (ftYs_Init_8012B918). null: the file's,
+   *  before his code first set it */
+  eggShade(shield: number | null) {
+    const sk = this.skeleton, f32 = Math.fround;
+    for (const { dobj, ma } of this.eggMats) {
+      if (shield === null) { sk.resetMaterial(dobj); continue; }
+      const st = sk.states[dobj];
+      if (st) applyMatAnim(st, ma, f32(this.eggEnd * f32(1 - f32(shield / START_SHIELD))), false);
+    }
+  }
 
   /** the variant a part shows now (-1: none) */
   partNow(part: number): number { return this.partShown[part] ?? -1; }
@@ -1038,6 +1105,57 @@ export class Fighter {
     return { anim };
   }
 
+  private visJointsOf = new Map<FigaTree, number[]>();
+  /** the joints an animation shows and hides (its NODE and BRANCH tracks: HSD_A_J_NODE, HSD_A_J_BRANCH) */
+  private visJoints(tracks: Track[][], anim: FigaTree): number[] {
+    let out = this.visJointsOf.get(anim);
+    if (!out) {
+      out = [];
+      tracks.forEach((list, j) => { if (list.some((t) => t.type === 11 || t.type === 12)) out!.push(j); });
+      this.visJointsOf.set(anim, out);
+    }
+    return out;
+  }
+
+  /** A joint's shown or hidden is its JObj's flag, which only a NODE or BRANCH track (or the code) sets: a move
+   *  whose animation has no such track for it leaves it as the last one that had left it - the joint is not laid
+   *  back to the file's flags when an animation changes (Fighter_ChangeMotionState, HSD_JObjAddAnimAll). Donkey
+   *  Kong's joint 48: his wait and most of his moves hide it with a branch track, his headbutt shows it, and his
+   *  hand slap and the throws he is thrown in, which have none, keep it hidden. The pose laid the file's flags
+   *  (resetPose) where the animation has no track: each joint some earlier animation of its own sets is set as the
+   *  latest such animation left it, at its frame on the last frame it played (the viewer track's records) */
+  private carryShown(g: GameAnim, frame: number) {
+    const sk = this.skeleton, own = (a: TrackAnim) => a.kind === this.internalId || (this.internalId === NANA && a.kind === POPO);
+    const now = g.at(frame);
+    if (!now) return;
+    const nowAnim = now.anim >= 0 && own(now) ? this.anim(now.anim) : null;
+    const set = new Set(nowAnim ? this.visJoints(this.ownTracks(nowAnim), nowAnim) : []);
+    let f = now.since - 1;
+    for (let steps = 0; steps < 64; steps++) {
+      const a = g.at(f);
+      if (!a || a.since > f) return;
+      const anim = a.anim >= 0 && own(a) ? this.anim(a.anim) : null;
+      if (anim) {
+        const tracks = this.ownTracks(anim), joints = this.visJoints(tracks, anim);
+        if (joints.length) {
+          for (const j of joints) {
+            if (set.has(j) || j >= sk.n) continue;
+            for (const tr of tracks[j]) {
+              if (tr.type !== 11 && tr.type !== 12) continue;
+              if (tr.keys.length && tr.keys[0].time > a.frame) continue;
+              const v = sample(tr.keys, a.frame);
+              if (v === null) continue;
+              if (tr.type === 11) sk.shown[j] = v > 0.5 ? 1 : 0;
+              else sk.setBranchShown(j, v > 0.5);
+            }
+          }
+          return;
+        }
+      }
+      f = a.since - 1;
+    }
+  }
+
   animFor(actionStateId: number): FigaTree | null {
     const sm = this.subactionOf(actionStateId);
     return sm === null ? null : this.anim(sm);
@@ -1361,6 +1479,7 @@ export class Fighter {
     sk.clearQuats();
     this.posedBy = "animation";
     this.body(state, 0);
+    if (state.game) this.carryShown(state.game, state.game.frame);
     if (face?.parts.length) this.applyParts(face.parts);
     if (xRot && xRot.joint > 1 && xRot.joint < sk.n) sk.rot[xRot.joint * 3] = xRot.angle;
     // (TransN: an animation's root motion goes to the physics, not the model

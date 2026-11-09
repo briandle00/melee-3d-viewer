@@ -60,7 +60,7 @@ import { fetchTrack, LINK_JOINTS, replayPath, TrackData, ViewerTrack, type Track
 import { SHIELD_MODEL } from "./fx/dispatch";
 import { pageCache } from "../state/pageCache";
 import { SHIELD_FX, trackFilesOf, trackShapes, type TrackShapes } from "./fx/drawn";
-import { type EggRoll, eggRollAt, YOSHI } from "./yoshiroll";
+import { type EggRoll, eggRollAt, eggShields, YOSHI } from "./yoshiroll";
 import { kirbyStoneAt } from "./kirbystone";
 import { ROLLOUT_ATTRS, ROLLOUT_FIRST, rolloutAngle, rolloutAttrs } from "./rollout";
 import { fighterShown, Hud, HudActor, HudKit, toScreen } from "./hud";
@@ -151,6 +151,16 @@ const INVISIBLE: Record<number, Set<number>> = {
   16: new Set([354, 357]),   // Mewtwo
 };
 const gone = (st: PlayerState) => st.isDead || st.actionStateId <= 11;
+
+// Yoshi's egg's colors as his shield last set them (yoshiroll.ts eggShields), per replay and player
+const replayEggs = new WeakMap<ReplayData, Map<number, (number | null)[]>>();
+function eggShieldsOf(data: ReplayData, player: number): (number | null)[] {
+  let byPlayer = replayEggs.get(data);
+  if (!byPlayer) replayEggs.set(data, (byPlayer = new Map()));
+  let out = byPlayer.get(player);
+  if (!out) byPlayer.set(player, (out = eggShields(data.frames.map((f) => f.players[player]?.state))));
+  return out;
+}
 
 // Kirby's copy on each frame from the replay alone (kirby.ts), per player,
 // worked out once per replay
@@ -1909,7 +1919,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     const tr = viewerTrack();
     // (what each fighter looks like this frame - its parts, its color, a
     // copy's hat - found once, for all its passes)
-    const looks = new Map<string, { parts: number[]; tint: ColTint | null; kh: KirbyHat | null }>();
+    const looks = new Map<string, { parts: number[]; tint: ColTint | null; kh: KirbyHat | null; egg: number | null }>();
     // (a fighter drawn for two actors - a ditto in one costume - is posed for each)
     const shared = new Set(skins.filter((s, i) => skins.indexOf(s) !== i));
     // a fighter hit shakes in place, one charging a smash attack trembles:
@@ -1959,11 +1969,14 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           }
           drawnKirbyHats.push({ player: a.player, kind, loaded: !!kh });
         }
-        look = { parts, tint, kh };
+        const egg = a.st.internalCharacterId === YOSHI_ID && !a.nana ? eggShieldsOf(data, a.player)[fno] ?? null : null;
+        fi.eggShade(egg);
+        look = { parts, tint, kh, egg };
         looks.set(akey, look);
         lastTints.push({ key: akey, tint, anims: fxw?.colAnimsOf(akey) ?? null });
       } else {
         for (let part = 0; part < look.parts.length; part++) fi.setPart(part, look.parts[part]);
+        fi.eggShade(look.egg);
       }
       return look;
     };
@@ -2177,11 +2190,14 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
             kh.skin.passHidden = null;
           }
         }
-        // a costume's hat, on its joint as posed now, in the fighter's tint
+        // a costume's hat, on its joint as posed now, in the fighter's tint (in a mirror its low-detail
+        // meshes, as her body's: ftDrawCommon_80080C28 -> ftPr_Init_UnkIntBoolFunc0)
         const hat = fi.hat, hj = hat?.joint ?? -1;
         if (hat && (hj + 1) * 16 <= fi.skeleton.world.length) {
           if (poseHats) hat.prop.poseMatrix(fi.skeleton.world.subarray(hj * 16, hj * 16 + 16));
+          if (low) { hat.prop.skeleton.posePass(hat.lowHidden); hat.prop.skeleton.passHidden = hat.lowHidden; }
           r.drawSkeleton(hat.prop.skeleton, pass);
+          hat.prop.skeleton.passHidden = null;
         }
         if (sh) r.shiftDraws(0, 0);
       }
@@ -2632,6 +2648,15 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
             r.drawSkeleton(fi.skeleton, "opa");
             r.drawSkeleton(fi.skeleton, "xlu");
             fi.skeleton.passHidden = null;
+            // (a costume's hat too, its low-detail meshes: ftDrawCommon_80080C28's ftData_UnkMtxFunc0, ftPr_Init_UnkMtxFunc0)
+            const hat = fi.hat, hj = hat?.joint ?? -1;
+            if (hat && (hj + 1) * 16 <= fi.skeleton.world.length) {
+              hat.prop.poseMatrix(fi.skeleton.world.subarray(hj * 16, hj * 16 + 16));
+              if (low) { hat.prop.skeleton.posePass(hat.lowHidden); hat.prop.skeleton.passHidden = hat.lowHidden; }
+              r.drawSkeleton(hat.prop.skeleton, "opa");
+              r.drawSkeleton(hat.prop.skeleton, "xlu");
+              hat.prop.skeleton.passHidden = null;
+            }
             r.setTint(null);
           },
         });

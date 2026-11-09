@@ -895,6 +895,10 @@ export function decodeKeys(bytes: Uint8Array, fracValue: number, fracSlope: numb
       prevOp = op;
     }
   }
+  // (the last constant value, once its key's frame comes: HSD_FObjInterpretAnim reaches the end of the data
+  // (state 6) and FObjUpdateAnim gives a constant's p1, a key's launched p1, from there on. Battlefield's
+  // wireframe hides itself so at frame 400 of its animation, its branch track's last key)
+  if (prevOp === 1 || prevOp === 6) keys.push({ time, duration: 0, kind: 0, p0: p1, p1, d0: 0, d1: 0 });
   return keys;
 }
 
