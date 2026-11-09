@@ -255,6 +255,9 @@ export class Skeleton {
   /** each joint drawn again through an instance joint (JOBJ_INSTANCE: hsd.ts loadJoint): its index, the instance's,
    *  the instanced subtree's root's and the joint it copies; null when none */
   private readonly copies: [number, number, number, number][] | null;
+  /** a billboard joint's turn about z as drawn when it is not the one its matrix was made from (a tied joint's:
+   *  Prop.poseTiedChild), by joint; null for none */
+  drawnRotZ: Map<number, number> | null = null;
   /** by joint: a copy's instance matrix times the inverse of its subtree root's (placeCopies), and the joint it
    *  copies (-1 for a joint that is no copy) */
   private copyBase: Float32Array | null = null;
@@ -681,16 +684,16 @@ export class Skeleton {
           mtxFromGL(W, bbW12, src * 16);
         } else mtxFromGL(W, bbW12, o);
         PSMTXConcat(bbV12, bbW12, bbW12);
-        mkBillBoardMtx(bb, (this.flags[j] & 0x2000) !== 0, this.rot[j * 3 + 2], bbW12, bbP12);
+        mkBillBoardMtx(bb, (this.flags[j] & 0x2000) !== 0, this.drawnRotZ?.get(j) ?? this.rot[j * 3 + 2], bbW12, bbP12);
         const mv = (d.bbMV ??= new Float32Array(16));
         mtxToGL(bbP12, mv);
         d.bbMVView = bbViewId;
         (d.bbW ??= new Float32Array(16)).set(W.subarray(o, o + 16));
         d.bbKind = bb;
         d.bbPersp = (this.flags[j] & 0x2000) !== 0;
-        d.bbRotZ = this.rot[j * 3 + 2];
+        d.bbRotZ = this.drawnRotZ?.get(j) ?? this.rot[j * 3 + 2];
         mul(M, bbInv, mv);
-      } else if (bb) { billboard(M, W.subarray(o, o + 16), bb, this.rot[j * 3 + 2]); d.bbMV = null; }
+      } else if (bb) { billboard(M, W.subarray(o, o + 16), bb, this.drawnRotZ?.get(j) ?? this.rot[j * 3 + 2]); d.bbMV = null; }
       else for (let q = 0; q < 16; q++) M[q] = W[o + q];
       if (d.second >= 0) for (let q = 0, s = d.second * 16; q < 16; q++) M[16 + q] = W[s + q];
       for (let m = d.filled; m < d.nMats; m++) d.mats.copyWithin(m * 16, 0, 16);

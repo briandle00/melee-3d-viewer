@@ -404,15 +404,22 @@ export class Prop {
    *  lb_8000C2F8 (`resolve`: cns.ts): an item's joint the game ties to a fighter's (it_80274F48 - the grapple
    *  beam's glow, the item's bone 1 under its root, on Samus's ThrowN). HSD_JObjMakeMatrix makes the root's matrix
    *  under the parent's (HSD_MtxSRT with the parent's scale), then the constraints lay theirs over it */
-  poseTiedChild(place: ArrayLike<number>, parentScale: number, resolve: (m: Mtx) => void, rotZ: number | null) {
+  poseTiedChild(place: ArrayLike<number>, parentScale: number, resolve: (m: Mtx) => void, rotZ: number | null,
+                turn: ArrayLike<number> | null = null) {
     const sk = this.skeleton;
     this.reset();
-    if (rotZ !== null) sk.rot[2] = rotZ;
+    // (the root's matrix is made from the turn the constraint left in it the frame before - lb_8000C2F8's
+    // orientation constraint writes it back each frame, JObjUpdateFunc's HSD_MtxGetRotation - which sets the length
+    // of each of its axes (resolveCnsOrientation keeps them); it is drawn turned by the one it has now, rotZ)
+    if (turn) { sk.rot[0] = turn[0]; sk.rot[1] = turn[1]; sk.rot[2] = turn[2]; }
+    else if (rotZ !== null) sk.rot[2] = rotZ;
+    sk.drawnRotZ = turn && rotZ !== null ? new Map([[0, rotZ]]) : null;
     sk.rootScale = [parentScale, parentScale, parentScale];
     this.place.set(place);
     sk.constrained = { joint: 0, resolve };
     sk.update(this.place);
     sk.rootScale = null;
+    sk.drawnRotZ = null;
   }
 
   /** at frame `frame`, a child of another model's joint (its world matrix
