@@ -60,7 +60,7 @@ import { fetchTrack, LINK_JOINTS, replayPath, TrackData, ViewerTrack, type Track
 import { SHIELD_MODEL } from "./fx/dispatch";
 import { pageCache } from "../state/pageCache";
 import { SHIELD_FX, trackFilesOf, trackShapes, type TrackShapes } from "./fx/drawn";
-import { type EggRoll, eggRollAt, eggShields, YOSHI } from "./yoshiroll";
+import { type EggRoll, eggRollAt, eggShield, eggShields, YOSHI } from "./yoshiroll";
 import { kirbyStoneAt } from "./kirbystone";
 import { ROLLOUT_ATTRS, ROLLOUT_FIRST, rolloutAngle, rolloutAttrs } from "./rollout";
 import { fighterShown, Hud, HudActor, HudKit, toScreen, type TagCamera } from "./hud";
@@ -1765,6 +1765,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // (ftDrawCommon_80080C28) for any of the three)
     const trackAt = viewerTrack();
     const hideBits = (a: Actor) => Number(trackAt?.at("hide", `${a.player}:${a.nana ? 1 : 0}`, fno - 123)?.[0] ?? 0);
+    // (a costume hat's joints below its root as the game posed them: "fh")
+    const hatJoints = (a: Actor) => trackAt?.pose("fh", `${a.player}:${a.nana ? 1 : 0}:${a.st.internalCharacterId}`, fno - 123)?.joints ?? null;
     const trackHidden = (a: Actor) => (hideBits(a) & 3) !== 0;
     const borrowOf = (a: Actor) => {
       if (!a.captor || !ek || !THROWN.has(a.st.actionStateId)) return null;
@@ -1986,7 +1988,12 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           }
           drawnKirbyHats.push({ player: a.player, kind, loaded: !!kh });
         }
-        const egg = a.st.internalCharacterId === YOSHI_ID && !a.nana ? eggShieldsOf(data, a.player)[fno] ?? null : null;
+        // (Yoshi's egg's colors: the shield his code set them from - the track's "egg", the shield the callback
+        // read, a hit taken later that frame not in it - else worked out from the replay's shields)
+        const eggSaid = a.st.internalCharacterId === YOSHI_ID && !a.nana && tr?.hasAt("egg", fno - 123)
+          ? tr.at("egg", `${a.player}:0`, fno - 123) : undefined;
+        const egg = a.st.internalCharacterId !== YOSHI_ID || a.nana ? null
+          : eggShield(eggSaid, eggShieldsOf(data, a.player)[fno] ?? null);
         fi.eggShade(egg);
         look = { parts, tint, kh, egg };
         looks.set(akey, look);
@@ -2213,10 +2220,11 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           }
         }
         // a costume's hat, on its joint as posed now, in the fighter's tint (in a mirror its low-detail
-        // meshes, as her body's: ftDrawCommon_80080C28 -> ftPr_Init_UnkIntBoolFunc0)
+        // meshes, as her body's: ftDrawCommon_80080C28 -> ftPr_Init_UnkIntBoolFunc0); its joints below the
+        // root as the game swung them when the track has them ("fh": the ribbons on ftCo_8009DC54's chains)
         const hat = fi.hat, hj = hat?.joint ?? -1;
         if (hat && (hj + 1) * 16 <= fi.skeleton.world.length) {
-          if (poseHats) hat.prop.poseMatrix(fi.skeleton.world.subarray(hj * 16, hj * 16 + 16));
+          if (poseHats) hat.prop.poseMatrix(fi.skeleton.world.subarray(hj * 16, hj * 16 + 16), undefined, hatJoints(a));
           if (low) { hat.prop.skeleton.posePass(hat.lowHidden); hat.prop.skeleton.passHidden = hat.lowHidden; }
           r.drawSkeleton(hat.prop.skeleton, pass);
           hat.prop.skeleton.passHidden = null;
@@ -2684,7 +2692,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
             // (a costume's hat too, its low-detail meshes: ftDrawCommon_80080C28's ftData_UnkMtxFunc0, ftPr_Init_UnkMtxFunc0)
             const hat = fi.hat, hj = hat?.joint ?? -1;
             if (hat && (hj + 1) * 16 <= fi.skeleton.world.length) {
-              hat.prop.poseMatrix(fi.skeleton.world.subarray(hj * 16, hj * 16 + 16));
+              hat.prop.poseMatrix(fi.skeleton.world.subarray(hj * 16, hj * 16 + 16), undefined, hatJoints(a));
               if (low) { hat.prop.skeleton.posePass(hat.lowHidden); hat.prop.skeleton.passHidden = hat.lowHidden; }
               r.drawSkeleton(hat.prop.skeleton, "opa");
               r.drawSkeleton(hat.prop.skeleton, "xlu");

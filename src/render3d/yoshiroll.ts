@@ -136,6 +136,15 @@ export function eggRollAt(h: RollHistory, f: number): EggRoll | null {
  *  frame's own shield; in a roll the frame before's. Per frame, the shield that last set them (null: none yet, the
  *  file's colors) */
 export const EGG_GUARD = new Set([341, 342, 345]), EGG_ROLL = new Set([233, 234, 235]);
+
+/** The shield Yoshi's egg's colors were last set from on a frame: the viewer track's "egg" when it has the type -
+ *  the shield his code read as it set them, so a hit his shield takes later in that frame (Fighter_procCollResolve:
+ *  his state turns to GuardDamage, whose callback sets nothing) is not in it - its values as of the frame, or null
+ *  before its first; else `fromReplay` (eggShields: the replay's shields, which on such a frame are after the hit) */
+export function eggShield(said: (number | string)[] | null | undefined, fromReplay: number | null): number | null {
+  if (said === undefined) return fromReplay;
+  return said ? Number(said[0]) : null;
+}
 export function eggShields(frames: ({ internalCharacterId: number; actionStateId: number; shieldSize: number } | undefined)[]):
     (number | null)[] {
   let now: number | null = null;
