@@ -89,6 +89,9 @@ export interface JObj {
   dobjs: DObj[];
   /** a spline joint's curve (another joint's PATH track moves along it) */
   spline?: Spline;
+  /** a copy of a joint drawn again through an instance joint (JOBJ_INSTANCE: loadJoint): the instance's index, the
+   *  index of the joint its child is (the instanced subtree's root) and of the joint this one copies */
+  instance?: { joint: number; template: number; source: number };
 }
 
 /** An HSD spline: its kind (0 straight segments, 1 Bezier, 2 B-spline,
@@ -298,6 +301,21 @@ export function loadJoint(a: Archive, off: number): { root: JObj; all: JObj[]; d
   const all: JObj[] = [];
   const dobjs: DObj[] = [];
   const seen = new Set<number>();
+  // an instance joint (JOBJ_INSTANCE) whose child is a joint of the tree itself: HSD_JObjLoadJoint loads no child
+  // under it, and HSD_JObjResolveRefs makes that other joint its child by reference; HSD_JObjDispAll draws that
+  // joint's subtree again through it (Samus's throw beam: 25 links, three link models). Such a child is not
+  // walked here; its subtree is copied under the instance after the walk (`instance` on each copy). An instance
+  // whose child is nowhere else in the tree is walked as before.
+  const inTree = new Set<number>();
+  const scan = (off: number) => {
+    for (let o: number | null = off; o !== null && !inTree.has(o); o = ptr(a, o + 0x0c)) {
+      inTree.add(o);
+      const child = ptr(a, o + 0x08);
+      if (child !== null && !(a.data.getUint32(o + 0x04) & JOBJ.INSTANCE)) scan(child);
+    }
+  };
+  scan(off);
+  const instances: { joint: JObj; child: number }[] = [];
   const walk = (off: number, parent: number): JObj[] => {
     const out: JObj[] = [];
     for (let o: number | null = off; o !== null; o = ptr(a, o + 0x0c)) {
@@ -343,12 +361,26 @@ export function loadJoint(a: Archive, off: number): { root: JObj; all: JObj[]; d
         }
       }
       const child = ptr(a, o + 0x08);
-      if (child !== null) j.children = walk(child, j.index);
+      if (child !== null && flags & JOBJ.INSTANCE && inTree.has(child)) instances.push({ joint: j, child });
+      else if (child !== null) j.children = walk(child, j.index);
       out.push(j);
     }
     return out;
   };
   const roots = walk(off, -1);
+  // (the copies after every joint of the file, so an animation's joints keep their preorder numbers)
+  const byOffset = new Map(all.map((j) => [j.offset, j.index]));
+  for (const { joint, child } of instances) {
+    const template = byOffset.get(child);
+    if (template === undefined) continue;
+    const copyOf = (src: JObj, parent: number) => {
+      const c: JObj = { ...src, index: all.length, parent, children: [], instance: { joint: joint.index, template, source: src.index } };
+      all.push(c);
+      for (const k of src.children) c.children.push(copyOf(k, c.index));
+      return c;
+    };
+    joint.children = [copyOf(all[template], joint.index)];
+  }
   return { root: roots[0], all, dobjs };
 }
 

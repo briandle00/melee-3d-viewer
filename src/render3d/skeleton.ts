@@ -108,6 +108,7 @@ let stamps = 0;
 const MIN_SCALE = Math.fround(1e-3);
 const tmpB = new Float32Array(16), tmpC = new Float32Array(16);
 const tmpL = new Float32Array(12), tmpP12 = new Float32Array(12), tmpRS = new Float32Array(3);
+const copyM = new Float32Array(12);
 const tmpS3 = new Float32Array(3), tmpR3 = new Float32Array(3), tmpT3 = new Float32Array(3);
 const tmpQ4 = new Float32Array(4);
 const tmpP = [0, 0, 0];
@@ -244,6 +245,9 @@ export class Skeleton {
   readonly states: MatState[]; // by DObj index
   /** DObj indices never drawn (a costume's unused parts) */
   readonly hidden = new Set<number>();
+  /** each joint drawn again through an instance joint (JOBJ_INSTANCE: hsd.ts loadJoint): its index, the instance's,
+   *  the instanced subtree's root's and the joint it copies; null when none */
+  private readonly copies: [number, number, number, number][] | null;
 
   constructor(public archive: Archive, public joints: JObj[], dobjs: DObj[], tag: string) {
     const n = (this.n = joints.length);
@@ -276,11 +280,18 @@ export class Skeleton {
 
     this.states = dobjs.map((d) => newState(d.mobj));
     const byOffset = new Map<number, number>();
-    for (const j of joints) byOffset.set(j.offset, j.index);
+    for (const j of joints) if (!j.instance) byOffset.set(j.offset, j.index);
+    // (the joints drawn again through an instance joint: hsd.ts loadJoint)
+    const copies = joints.filter((j) => j.instance);
+    this.copies = copies.length ? copies.map((j) => [j.index, j.instance!.joint, j.instance!.template, j.instance!.source]) : null;
     const used = new Set<number>();
     // (its meshes one model: the renderer puts them in one set of buffers)
     const group: DrawGroup = { tag, drawables: this.drawables };
-    for (const j of joints)
+    // (in the order the game draws them: a copy where its instance joint is, HSD_JObjDispAll)
+    const order = copies.length
+      ? [...joints].sort((p, q) => (p.instance?.joint ?? p.index) - (q.instance?.joint ?? q.index) || p.index - q.index)
+      : joints;
+    for (const j of order)
       for (const d of j.dobjs)
         d.pobjs.forEach((p, i) => {
           if (p.kind === "shape") return;
@@ -470,6 +481,7 @@ export class Skeleton {
     // one, then PSMTXConcat(parent->mtx, jobj->mtx); in float32, as the game does
     for (let i = 0; i < this.n; i++) this.makeMatrix(i, parentWorld);
     if (this.pathOf) this.placeOnPaths(parentWorld);
+    if (this.copies) this.placeCopies();
     // the joints the envelopes use: world * inverse bind
     const S = this.skin;
     for (let k = 0; k < this.skinUsed.length; k++) {
@@ -481,6 +493,28 @@ export class Skeleton {
     }
     for (const d of this.drawables) {
       if (this.isVisible(d) || this.alsoPosed.has(d.dobj.index)) this.matrices(d);
+    }
+  }
+
+  // HSD_JObjDispAll on an instance joint: its child's subtree drawn again under PSMTXConcat(jobj->mtx,
+  // PSMTXInverse(child->mtx)) - the instanced subtree moved from where its root is to where the instance is. Each
+  // copy's matrix is that times the joint it copies (the view taken on afterwards, as for every joint), its turn
+  // about z the copied joint's (a billboard's), in float32
+  private placeCopies() {
+    const W = this.world, C = this.copies!, I = tmpP12, T = tmpL;
+    let at = -1, tmpl = -1;
+    for (const [c, inst, root, src] of C) {
+      if (inst !== at || root !== tmpl) {
+        at = inst; tmpl = root;
+        mtxFromGL(W, T, root * 16);
+        PSMTXInverse(T, T);
+        mtxFromGL(W, I, inst * 16);
+        PSMTXConcat(I, T, copyM);
+      }
+      mtxFromGL(W, I, src * 16);
+      PSMTXConcat(copyM, I, I);
+      mtxToGL(I, W, c * 16);
+      this.rot[c * 3 + 2] = this.rot[src * 3 + 2];
     }
   }
 
@@ -632,7 +666,10 @@ export class Skeleton {
   }
 
   isVisible(d: Drawable): boolean {
-    return this.shown[d.jobj.index] === 1 && !(this.passHidden ?? this.hidden).has(d.dobj.index);
+    // (a copy drawn through an instance joint: shown as the joint it copies is, and only while the instance is)
+    const c = d.jobj.instance;
+    const shown = c ? this.shown[c.source] === 1 && this.shown[c.joint] === 1 : this.shown[d.jobj.index] === 1;
+    return shown && !(this.passHidden ?? this.hidden).has(d.dobj.index);
   }
 
   /** a joint and every joint under it shown or hidden (HSD_JObjSet/ClearFlagsAll) */
