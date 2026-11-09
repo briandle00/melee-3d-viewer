@@ -1575,6 +1575,7 @@ void main() {
   setTint(t: ColTint | null) {
     const gl = this.gl, l = this.loc;
     if (!t) {
+      if (this.tintLit) { this.tintLit = false; this.overVer++; }
       if (!this.tinted) return;
       this.tinted = false;
       gl.uniform4f(l.uOverColor, 0, 0, 0, 0);
@@ -1582,6 +1583,7 @@ void main() {
       return;
     }
     this.tinted = true;
+    if (this.tintLit !== !!t.light) { this.tintLit = !!t.light; this.overVer++; }
     const c = t.color;
     gl.uniform4f(l.uOverColor, c?.[0] ?? 0, c?.[1] ?? 0, c?.[2] ?? 0, c?.[3] ?? 0);
     const li = t.light;
@@ -2043,13 +2045,26 @@ void main() {
   private specDirs = new Float32Array(32);
   private specKey = [NaN, NaN, NaN, -1];
   private specPos = [0, 0, 0];
+  /** the view the lights were set up through (GL, column major), when not the camera drawn through now; null: the
+   *  camera's own. The magnifier's: ifMagnify_802FBBDC sets the fighters' lights up once a frame, before it moves its
+   *  camera to each fighter (its HSD_GObj_80390ED0(gobj, 7) runs link 4, ftCo_8009F54C's HSD_LObjSetupInit) */
+  private lightsView: Float32Array | null = null;
+  /** whether the tint drawn with has a light of its own (ftCo_8009F5AC sets the lights up again for each draw) */
+  private tintLit = false;
+  setLightsView(v: Float32Array | null) {
+    this.lightsView = v;
+    this.viewVer++;
+  }
   private viewLights() {
     const l = this.lighting, K = this.lightVKey;
     if (!l || (K[0] === l.version && K[1] === this.viewVer && K[2] === this.overVer)) return;
     K[0] = l.version; K[1] = this.viewVer; K[2] = this.overVer;
     // (by the camera as it is, a shake or not: the game sets the lights up from the current camera
     // (ftCo_8009F5AC's HSD_LObjSetupInit) and only the meshes' modelview takes the shake (ftDrawCommon_8008051C))
-    const V = mtxFromGL(this.camView, this.lightMtx, 0);
+    // (or through the view setLightsView gave: set up earlier under another camera - until a color animation's light
+    // sets them up again under the camera drawn through now, which then stays theirs)
+    if (this.lightsView && this.tintLit) this.lightsView.set(this.camView);
+    const V = mtxFromGL(this.lightsView ?? this.camView, this.lightMtx, 0);
     const v = lightsInView(l, V, this.overDir, this.lightV);
     const gl = this.gl, loc = this.loc;
     gl.uniform4fv(loc.uLPosV, v.pos);
