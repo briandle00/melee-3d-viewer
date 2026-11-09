@@ -1,0 +1,1144 @@
+{
+ "about": "bot-samus_mewtwo, the capture's memory at game frame 5022 (the game's own numbers): Samus's parts (jobj->mtx, 3 x 4 row-major float32 bits, parent part, flags), her grapple's item root (jobj->mtx) and its glow joint (bone 1: rotate x, y, z as the orientation constraint left it the frame before, translate, scale, flags, and jobj->mtx as the frame made it). turnBefore / translateBefore: the glow joint's values at the end of game frame 5021 as the simulator's viewer track has them (its \"jp\" joint 1; at 5022 the track's equal the memory's bit for bit) - what frame 5022's matrix was made from",
+ "parts": [
+  {
+   "mtx": [
+    "b3525a30",
+    "00000000",
+    "3f6147ae",
+    "c215f5e7",
+    "80000000",
+    "3f6147ae",
+    "00000000",
+    "3b3c6a7f",
+    "bf6147ae",
+    "80000000",
+    "b3525a30",
+    "00000000"
+   ],
+   "parent": -1,
+   "flags": "3005008e"
+  },
+  {
+   "mtx": [
+    "b3525a30",
+    "00000000",
+    "3f6147ae",
+    "c215f5e7",
+    "00000000",
+    "3f6147ae",
+    "00000000",
+    "3b3c6a7f",
+    "bf6147ae",
+    "80000000",
+    "b3525a30",
+    "00000000"
+   ],
+   "parent": 0,
+   "flags": "30000009"
+  },
+  {
+   "mtx": [
+    "b3525a30",
+    "00000000",
+    "3f6147ae",
+    "c213d609",
+    "00000000",
+    "3f6147ae",
+    "00000000",
+    "4158e5b2",
+    "bf6147ae",
+    "80000000",
+    "b3525a30",
+    "3e533331"
+   ],
+   "parent": 1,
+   "flags": "30050089"
+  },
+  {
+   "mtx": [
+    "b3525a30",
+    "00000000",
+    "3f6147ae",
+    "c213d609",
+    "00000000",
+    "3f6147ae",
+    "00000000",
+    "41417ab2",
+    "bf6147ae",
+    "80000000",
+    "b3525a30",
+    "3e54cb83"
+   ],
+   "parent": 2,
+   "flags": "30000009"
+  },
+  {
+   "mtx": [
+    "3f163aa8",
+    "3ed07e18",
+    "3f039625",
+    "c216f6d6",
+    "be5332c1",
+    "3f44f611",
+    "bebf8406",
+    "4117aec6",
+    "bf1f5b45",
+    "3e0410af",
+    "3f1bc6f1",
+    "3e54cb86"
+   ],
+   "parent": 3,
+   "flags": "30050089"
+  },
+  {
+   "mtx": [
+    "bed07e10",
+    "bf039621",
+    "3f163aae",
+    "c2148998",
+    "bf44f612",
+    "3ebf8403",
+    "be5332b6",
+    "4107e846",
+    "be0410c0",
+    "bf1bc6f5",
+    "bf1f5b40",
+    "bf1a4186"
+   ],
+   "parent": 4,
+   "flags": "10000008"
+  },
+  {
+   "mtx": [
+    "3f43bb4e",
+    "beb988ce",
+    "3e77b119",
+    "c2148998",
+    "bed40ae4",
+    "bf419638",
+    "3e346e7e",
+    "4107e846",
+    "3e0a8bde",
+    "be88aad0",
+    "bf53da80",
+    "bf1a4186"
+   ],
+   "parent": 5,
+   "flags": "10050089"
+  },
+  {
+   "mtx": [
+    "be5e1b42",
+    "bf515d46",
+    "3e77b119",
+    "c20726e3",
+    "bf51ac02",
+    "3e89e631",
+    "3e346e7e",
+    "40d5cf7e",
+    "be737e54",
+    "be3a0ef9",
+    "bf53da80",
+    "bc2a2a80"
+   ],
+   "parent": 6,
+   "flags": "10000009"
+  },
+  {
+   "mtx": [
+    "3f413e9f",
+    "bec3af5c",
+    "3e77b119",
+    "c20d273f",
+    "bede127b",
+    "bf3ec131",
+    "3e346e7e",
+    "3fa2891c",
+    "3e035e19",
+    "be8a6d9a",
+    "bf53da80",
+    "bfcec1ca"
+   ],
+   "parent": 7,
+   "flags": "10000008"
+  },
+  {
+   "mtx": [
+    "3f5a0226",
+    "be5d3d4f",
+    "bd4d0d68",
+    "c20d273f",
+    "be5de6a0",
+    "bf5a56a0",
+    "bbb1b8d1",
+    "3fa28927",
+    "bd414797",
+    "3c8ffbf6",
+    "bf60e931",
+    "bfcec1bf"
+   ],
+   "parent": 8,
+   "flags": "00050089"
+  },
+  {
+   "mtx": [
+    "3f3e98c8",
+    "beeed3f6",
+    "bd4d0d68",
+    "c20c15f1",
+    "beef584b",
+    "bf3edc3d",
+    "bbb1b8d1",
+    "3f9a1f0a",
+    "bd21f28d",
+    "3cff71a9",
+    "bf60e931",
+    "bfd056a4"
+   ],
+   "parent": 9,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f5a0226",
+    "be5d3d4f",
+    "bd4d0d68",
+    "c208ebd8",
+    "be5de6a0",
+    "bf5a56a0",
+    "bbb1b8d1",
+    "3f182b1c",
+    "bd414797",
+    "3c8ffbf6",
+    "bf60e931",
+    "bfda652c"
+   ],
+   "parent": 9,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "bed07e10",
+    "bf039621",
+    "3f163aae",
+    "c21b0870",
+    "bf44f612",
+    "3ebf8403",
+    "be5332b6",
+    "4110a417",
+    "be0410c0",
+    "bf1bc6f5",
+    "bf1f5b40",
+    "3f8e7452"
+   ],
+   "parent": 4,
+   "flags": "10000008"
+  },
+  {
+   "mtx": [
+    "be842287",
+    "bf32894d",
+    "3ef0ec45",
+    "c21b0870",
+    "bf510b92",
+    "3db6af65",
+    "bea19d03",
+    "4110a417",
+    "3e4f513a",
+    "bf077a7b",
+    "bf2c5df8",
+    "3f8e7452"
+   ],
+   "parent": 12,
+   "flags": "10050089"
+  },
+  {
+   "mtx": [
+    "bf177463",
+    "bee6aa51",
+    "3ef0ec45",
+    "c21f8d17",
+    "bf24421a",
+    "3f034db1",
+    "bea19d03",
+    "40aee9de",
+    "bde6baf5",
+    "bf0e286c",
+    "bf2c5df8",
+    "3fffe0a1"
+   ],
+   "parent": 13,
+   "flags": "10000009"
+  },
+  {
+   "mtx": [
+    "3ea2a579",
+    "bf2c1fbd",
+    "3ef0ec45",
+    "c22f5c18",
+    "bf2295db",
+    "bf055e88",
+    "bea19d03",
+    "3fa538a8",
+    "3f050e13",
+    "be6711b9",
+    "bf2c5df8",
+    "3f974e2c"
+   ],
+   "parent": 14,
+   "flags": "10000008"
+  },
+  {
+   "mtx": [
+    "3ed526bd",
+    "be5af8dd",
+    "3f3ec6f3",
+    "c22f5c18",
+    "be708667",
+    "bf574527",
+    "bde16fbb",
+    "3fa538ae",
+    "3f3d25e3",
+    "be165cc7",
+    "bee8e772",
+    "3f974e2a"
+   ],
+   "parent": 15,
+   "flags": "00050089"
+  },
+  {
+   "mtx": [
+    "3e77abca",
+    "becd25ba",
+    "3f3ec6f3",
+    "c22ed3e0",
+    "bf244459",
+    "bf1791d3",
+    "bde16fbb",
+    "3f9b78aa",
+    "3f0d2fc3",
+    "bf035d0f",
+    "bee8e772",
+    "3fb5e925"
+   ],
+   "parent": 16,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3ed526bd",
+    "be5af8dd",
+    "3f3ec6f3",
+    "c22d5ccf",
+    "be708667",
+    "bf574527",
+    "bde16fbb",
+    "3f170f56",
+    "3f3d25e3",
+    "be165cc7",
+    "bee8e772",
+    "400741ed"
+   ],
+   "parent": 16,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f5e9ec7",
+    "3e03b41a",
+    "3d25aaf2",
+    "c215b8d3",
+    "be04553a",
+    "3f5ed216",
+    "3c2fb3e3",
+    "41214b58",
+    "bd1d7070",
+    "bc8778d9",
+    "3f610674",
+    "3e9a6397"
+   ],
+   "parent": 4,
+   "flags": "30000009"
+  },
+  {
+   "mtx": [
+    "3f5afb19",
+    "3c00d830",
+    "be53731f",
+    "c214a8c6",
+    "3cf6ae53",
+    "3f5d7fdc",
+    "3e2179cc",
+    "413c97a8",
+    "3e515821",
+    "be24323a",
+    "3f573cb2",
+    "3f137460"
+   ],
+   "parent": 19,
+   "flags": "30000009"
+  },
+  {
+   "mtx": [
+    "3f60660a",
+    "3d909c52",
+    "bd058127",
+    "c210c664",
+    "bd226246",
+    "3f391621",
+    "3f000719",
+    "41555898",
+    "3d890689",
+    "befe4d40",
+    "3f392d35",
+    "3d9577d8"
+   ],
+   "parent": 20,
+   "flags": "10000009"
+  },
+  {
+   "mtx": [
+    "3f3c24a1",
+    "3d909c52",
+    "3ef52a63",
+    "c20cedc8",
+    "bea43cee",
+    "3f391621",
+    "3ec57d6e",
+    "4160bf84",
+    "beb993db",
+    "befe4d40",
+    "3f212a1b",
+    "bf086c7a"
+   ],
+   "parent": 21,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f3c24a1",
+    "3d909c52",
+    "3ef52a63",
+    "c20cedc8",
+    "bea43cee",
+    "3f391621",
+    "3ec57d6e",
+    "4160bf84",
+    "beb993db",
+    "befe4d40",
+    "3f212a1b",
+    "bf086c7a"
+   ],
+   "parent": 22,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f60660a",
+    "3d909c52",
+    "bd058127",
+    "c202cb4a",
+    "bd226246",
+    "3f391621",
+    "3f000719",
+    "413909c2",
+    "3d890689",
+    "befe4d40",
+    "3f392d35",
+    "bf7cf007"
+   ],
+   "parent": 21,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f60660a",
+    "3d05812f",
+    "3d909c50",
+    "c20a19c8",
+    "bd226246",
+    "bf000714",
+    "3f391624",
+    "41549f25",
+    "3d890689",
+    "bf392d38",
+    "befe4d36",
+    "3e357c9f"
+   ],
+   "parent": 21,
+   "flags": "10000008"
+  },
+  {
+   "mtx": [
+    "3f149276",
+    "bf2951e6",
+    "bc372e75",
+    "c20a19cb",
+    "bf0c5170",
+    "befa70ee",
+    "3ef80bd2",
+    "41549f26",
+    "bebd9cdf",
+    "bea00559",
+    "bf3c0bb0",
+    "3e357c8c"
+   ],
+   "parent": 25,
+   "flags": "10050089"
+  },
+  {
+   "mtx": [
+    "3f50661c",
+    "beab07b3",
+    "bc372e75",
+    "c202cbc5",
+    "be8bde95",
+    "bf2e94b8",
+    "3ef80bd2",
+    "413906a4",
+    "be452fa7",
+    "bee3ae98",
+    "bf3c0bb0",
+    "bf7cf3f1"
+   ],
+   "parent": 26,
+   "flags": "10050089"
+  },
+  {
+   "mtx": [
+    "3f22b1d2",
+    "3d3ae9b4",
+    "bf1b630d",
+    "c1ebc8dd",
+    "3f07f6ca",
+    "bef0c857",
+    "3f054ea7",
+    "412a17fc",
+    "be984116",
+    "bf3e0ddb",
+    "bebbfdc8",
+    "bff74099"
+   ],
+   "parent": 27,
+   "flags": "00050189"
+  },
+  {
+   "mtx": [
+    "be2ab7b1",
+    "3e8f1085",
+    "bf51509a",
+    "c1e5d596",
+    "3f4f5ccb",
+    "be751b70",
+    "be7ce39e",
+    "413a7d9c",
+    "be9a048e",
+    "bf4ca501",
+    "be58efb3",
+    "c007c80a"
+   ],
+   "parent": 28,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "be2ab80f",
+    "3e91a6df",
+    "bf50de43",
+    "c1e58b55",
+    "3f4f5cdf",
+    "be738892",
+    "be7e66a7",
+    "414172d4",
+    "be9a0408",
+    "bf4c4e30",
+    "be5dff5d",
+    "c00e9401"
+   ],
+   "parent": 29,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3eae54ed",
+    "3dfe777e",
+    "bf4d48a7",
+    "c1e57b2f",
+    "3f3ceefc",
+    "bed15e8a",
+    "3e800160",
+    "41388dfc",
+    "beacb628",
+    "bf44ed74",
+    "be865cc9",
+    "c018b0c7"
+   ],
+   "parent": 28,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3eae54f5",
+    "3e060368",
+    "bf4d0393",
+    "c1e2eeea",
+    "3f3ceeee",
+    "bed26bac",
+    "3e7c8ac0",
+    "413e6e6c",
+    "beacb65c",
+    "bf445d94",
+    "be899cbc",
+    "c022899b"
+   ],
+   "parent": 31,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f4dd308",
+    "bcc481ee",
+    "beb6c0f1",
+    "c1e58cf2",
+    "3e8aa390",
+    "bf0872f7",
+    "3f254f7d",
+    "41354900",
+    "be6f684d",
+    "bf3326a2",
+    "bef58d04",
+    "c02ae595"
+   ],
+   "parent": 28,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f4dd30a",
+    "bcb2607b",
+    "beb6d380",
+    "c1e1bfb8",
+    "3e8aa3e9",
+    "bf097814",
+    "3f247687",
+    "413623ca",
+    "be6f6762",
+    "bf326357",
+    "bef7c368",
+    "c02ba6f1"
+   ],
+   "parent": 33,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f5b6098",
+    "be2f1b4e",
+    "3dd4e919",
+    "c1e65118",
+    "be48c9b4",
+    "bf20440c",
+    "3f16276f",
+    "4131e27a",
+    "bd23eae5",
+    "bf18265d",
+    "bf25d224",
+    "c034eb38"
+   ],
+   "parent": 28,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f5b60a6",
+    "be211f52",
+    "3dfd3e6f",
+    "c1e370e0",
+    "be48c8e2",
+    "bf0d2b51",
+    "3f283beb",
+    "412f12e0",
+    "bd23e7c7",
+    "bf2ae12b",
+    "bf127215",
+    "c02e60f8"
+   ],
+   "parent": 35,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "bebce092",
+    "3f35fe60",
+    "3f194875",
+    "c1e433ac",
+    "3f69f0ab",
+    "3eca493f",
+    "3dc05aae",
+    "4132e27f",
+    "be2dde61",
+    "3f14f1c1",
+    "bf4b9f6a",
+    "c0193e48"
+   ],
+   "parent": 28,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "bde6e272",
+    "3f5e2910",
+    "3dbdceb0",
+    "c1e80eab",
+    "3f4ad322",
+    "3d80256f",
+    "3ec1759e",
+    "412fe4d9",
+    "3ebb6810",
+    "3e070316",
+    "bf4a1170",
+    "bfbfaf28"
+   ],
+   "parent": 28,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "bf26eeba",
+    "3f0798ea",
+    "3e86225b",
+    "c1e8ea6a",
+    "3f16fbf5",
+    "3f1b8c8c",
+    "3e754146",
+    "413a05a7",
+    "bd167164",
+    "3eb4c3c2",
+    "bf4e23d9",
+    "bfa2fec2"
+   ],
+   "parent": 38,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3f375692",
+    "bf02e1b8",
+    "bc372e75",
+    "c202cbc5",
+    "bed7f81e",
+    "bf19f9ec",
+    "3ef80bd2",
+    "413906a4",
+    "be940554",
+    "bec71f35",
+    "bf3c0bb0",
+    "bf7cf3f1"
+   ],
+   "parent": 26,
+   "flags": "00050089"
+  },
+  {
+   "mtx": [
+    "3f4a961a",
+    "3c12c9a7",
+    "3ec5062a",
+    "c2143563",
+    "bd7aefb6",
+    "3f5f1939",
+    "3dd87787",
+    "415ff377",
+    "bec290b3",
+    "bdf986d2",
+    "3f48c8c5",
+    "be624d2c"
+   ],
+   "parent": 20,
+   "flags": "30000009"
+  },
+  {
+   "mtx": [
+    "3ecd626e",
+    "3e67e31f",
+    "3f3ff31e",
+    "c2142c2e",
+    "be72ba94",
+    "3f568808",
+    "be014ef8",
+    "4169b93c",
+    "bf3f1c2f",
+    "be13df62",
+    "3ee2d0eb",
+    "be99fa7c"
+   ],
+   "parent": 41,
+   "flags": "000c0189"
+  },
+  {
+   "mtx": [
+    "3f5010e4",
+    "3e872016",
+    "be5737ed",
+    "c217a182",
+    "bde06e00",
+    "3f3998f1",
+    "3ef923ce",
+    "4154641a",
+    "3ea35f59",
+    "bed8b3c7",
+    "3f33d43c",
+    "bea53380"
+   ],
+   "parent": 20,
+   "flags": "10000009"
+  },
+  {
+   "mtx": [
+    "3ef6f9d0",
+    "3e872016",
+    "bf2fe3b8",
+    "c2198e29",
+    "3e6db8c1",
+    "3f3998f1",
+    "3ee20864",
+    "41623fd0",
+    "3f32cd19",
+    "bed8b3c7",
+    "3ea7d315",
+    "bf9d2751"
+   ],
+   "parent": 43,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "3ef6f9d0",
+    "3e872016",
+    "bf2fe3b8",
+    "c2198e29",
+    "3e6db8c1",
+    "3f3998f1",
+    "3ee20864",
+    "41623fd0",
+    "3f32cd19",
+    "bed8b3c7",
+    "3ea7d315",
+    "bf9d2751"
+   ],
+   "parent": 44,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "bf5010e3",
+    "3e872016",
+    "3e5737ff",
+    "c2227ce5",
+    "3de06deb",
+    "3f3998f1",
+    "bef923cf",
+    "4135ad57",
+    "bea35f61",
+    "bed8b3c7",
+    "bf33d43a",
+    "c00f269c"
+   ],
+   "parent": 43,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "bf5010e3",
+    "3e5737e6",
+    "be872022",
+    "c21dbeda",
+    "3de06e20",
+    "bef923d8",
+    "bf3998ed",
+    "41581c62",
+    "bea35f5e",
+    "bf33d439",
+    "3ed8b3cd",
+    "bf75d516"
+   ],
+   "parent": 43,
+   "flags": "10000008"
+  },
+  {
+   "mtx": [
+    "bec0d291",
+    "3f4ad9e7",
+    "3d8c411b",
+    "c21dbed7",
+    "bf2f1d43",
+    "be916de7",
+    "bef34ca5",
+    "41581c5f",
+    "becfc248",
+    "be8360de",
+    "3f3ccc8e",
+    "bf75d4b1"
+   ],
+   "parent": 47,
+   "flags": "10050089"
+  },
+  {
+   "mtx": [
+    "beed5730",
+    "bf3eaf94",
+    "3d8c411b",
+    "c2227c56",
+    "3f1bc369",
+    "bed83e23",
+    "bef34ca5",
+    "4135abfb",
+    "3edec440",
+    "be4fd659",
+    "3f3ccc8e",
+    "c00f2d15"
+   ],
+   "parent": 48,
+   "flags": "10050089"
+  },
+  {
+   "mtx": [
+    "beed604f",
+    "bf3dd5cd",
+    "3dc84b75",
+    "c22b2e25",
+    "3f194d8a",
+    "bedfb75f",
+    "bef2caea",
+    "4162e307",
+    "3ee57496",
+    "be3badd2",
+    "3f3c1d63",
+    "be58a420"
+   ],
+   "parent": 49,
+   "flags": "10000009"
+  },
+  {
+   "mtx": [
+    "beed604f",
+    "bf3dd5cd",
+    "3dc84b75",
+    "c2302679",
+    "3f194d8a",
+    "bedfb75f",
+    "bef2caea",
+    "417c9094",
+    "3ee57496",
+    "be3badd2",
+    "3f3c1d63",
+    "3f7d5028"
+   ],
+   "parent": 50,
+   "flags": "00000008"
+  },
+  {
+   "mtx": [
+    "beed604f",
+    "bf3dd5cd",
+    "3dc84b75",
+    "c22b2e25",
+    "3f194d8a",
+    "bedfb75f",
+    "bef2caea",
+    "4162e307",
+    "3ee57496",
+    "be3badd2",
+    "3f3c1d63",
+    "be58a420"
+   ],
+   "parent": 50,
+   "flags": "00050089"
+  },
+  {
+   "mtx": [
+    "beed604f",
+    "bf3dd5cd",
+    "3dc84b75",
+    "c22b2e25",
+    "3f194d8a",
+    "bedfb75f",
+    "bef2caea",
+    "4162e307",
+    "3ee57496",
+    "be3badd2",
+    "3f3c1d63",
+    "be58a420"
+   ],
+   "parent": 50,
+   "flags": "00050089"
+  },
+  {
+   "mtx": [
+    "beed604f",
+    "bf3dd5cd",
+    "3dc84b75",
+    "c22b2e25",
+    "3f194d8a",
+    "bedfb75f",
+    "bef2caea",
+    "4162e307",
+    "3ee57496",
+    "be3badd2",
+    "3f3c1d63",
+    "be58a420"
+   ],
+   "parent": 50,
+   "flags": "00050089"
+  },
+  {
+   "mtx": [
+    "beed604f",
+    "bf3dd5cd",
+    "3dc84b75",
+    "c22b2e25",
+    "3f194d8a",
+    "bedfb75f",
+    "bef2caea",
+    "4162e307",
+    "3ee57496",
+    "be3badd2",
+    "3f3c1d63",
+    "be58a420"
+   ],
+   "parent": 50,
+   "flags": "00050089"
+  },
+  {
+   "mtx": [
+    "beed604f",
+    "bf3dd5cd",
+    "3dc84b75",
+    "c22b2e25",
+    "3f194d8a",
+    "bedfb75f",
+    "bef2caea",
+    "4162e307",
+    "3ee57496",
+    "be3badd2",
+    "3f3c1d63",
+    "be58a3ef"
+   ],
+   "parent": 50,
+   "flags": "00050088"
+  },
+  {
+   "mtx": [
+    "bf603cd7",
+    "3d4b26b6",
+    "3d8c411b",
+    "c2227c56",
+    "bda17da9",
+    "bf3c88a0",
+    "bef34ca5",
+    "4135abfb",
+    "3cfa1b3a",
+    "bef550c6",
+    "3f3ccc8e",
+    "c00f2d15"
+   ],
+   "parent": 48,
+   "flags": "00050089"
+  },
+  {
+   "mtx": [
+    "b3525a30",
+    "00000000",
+    "3f6147ae",
+    "c1c51cb6",
+    "00000000",
+    "3f6147ae",
+    "00000000",
+    "411581bc",
+    "bf6147ae",
+    "80000000",
+    "b3525a30",
+    "40053be8"
+   ],
+   "parent": 3,
+   "flags": "00000009"
+  },
+  {
+   "mtx": [
+    "b3525a30",
+    "00000000",
+    "3f6147ae",
+    "c215f5e7",
+    "00000000",
+    "3f6147ae",
+    "00000000",
+    "3b3c6a7f",
+    "bf6147ae",
+    "80000000",
+    "b3525a30",
+    "00000000"
+   ],
+   "parent": 0,
+   "flags": "00000008"
+  }
+ ],
+ "itemRoot": {
+  "mtx": [
+   "b36f0965",
+   "00000000",
+   "3f800000",
+   "c22ea3f3",
+   "80000000",
+   "3f800000",
+   "00000000",
+   "417a46b3",
+   "bf800000",
+   "80000000",
+   "b36f0965",
+   "3f4e4f4e"
+  ]
+ },
+ "glow": {
+  "rotate": [
+   "bfb846f9",
+   "3f0e0d0a",
+   "400da5fa"
+  ],
+  "scale": [
+   "3f800000",
+   "3f800000",
+   "3f800000"
+  ],
+  "translate": [
+   "be3c0368",
+   "3e127840",
+   "bec14300"
+  ],
+  "flags": "00080800",
+  "mtx": [
+   "bf06df7c",
+   "bf57b8da",
+   "3de39ba0",
+   "c2302679",
+   "3f2e3541",
+   "befe392a",
+   "bf09f354",
+   "417c9094",
+   "3f025f5f",
+   "be554593",
+   "3f55c45a",
+   "3f7d5028"
+  ],
+  "turnBefore": [
+   "bfb7ef54",
+   "3f03efa2",
+   "400e4f5c"
+  ],
+  "translateBefore": [
+   "be83f50a",
+   "3e09f080",
+   "bd36d400"
+  ]
+ },
+ "tiedTo": 51
+}

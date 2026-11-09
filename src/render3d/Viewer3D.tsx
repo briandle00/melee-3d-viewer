@@ -2356,6 +2356,9 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         if (on && glow) {
           const turn = itemPose(own.spawnId)?.get(1)?.[2];
           const rotZ = turn !== undefined && !Number.isNaN(turn) ? turn : null;
+          // (the turn the frame before left in it: what its matrix is made from, before the constraints)
+          const before = trNow?.pose("jp", String(own.spawnId), fno - 124)?.joints?.get(1) ?? null;
+          const was = before && [0, 1, 2].every((k) => Number.isFinite(before[k])) ? before : null;
           // (its matrix as the game makes it, in float32: under the item's root - at the item's place, turned as the
           // track has it or to its facing, at its size - then lb_8000C2F8's constraints on Samus's ThrowN, cns.ts)
           const resolve = heldConstraintNow?.(a.player, THROWN_PART) ?? null;
@@ -2364,7 +2367,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
             const facing = own.facingDirection < 0 ? -1 : 1;
             gameSrt(glowPlace, size, size, size, rot?.[0] ?? 0, rot ? rot[1] : facing * Math.PI / 2, rot?.[2] ?? 0,
                     own.xPosition, own.yPosition, 0);
-            glow.poseTiedChild(glowPlace, size, resolve, rotZ);
+            glow.poseTiedChild(glowPlace, size, resolve, rotZ, was);
           } else {
             glow.poseUnder(0, on, art?.scale ?? 1, false, 0);
             if (rotZ !== null) glow.setRootRotationZ(rotZ);
