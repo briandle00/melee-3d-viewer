@@ -513,23 +513,30 @@ export class Skeleton {
 
   /** world matrices from the pose, then every drawable's matrices */
   update(parentWorld: Mat | null = null) {
+    // (a pose made only for its joints - the effects' world stepping through frames nothing draws - gets its
+    // joints' world matrices alone: the envelopes' and the drawables' are left until an update that draws)
+    if (this.jointsOnly) {
+      if (this.unchanged(parentWorld)) return;
+      this.remember(parentWorld);
+      this.updates++;
+      this.makeJoints(parentWorld);
+      this.stale = true;
+      return;
+    }
     // (the same pose as last time - a fighter in hitlag, a part standing
     // still on its animation - leaves the matrices as they are; only meshes
     // shown since, or not posed then, get theirs)
-    if (this.unchanged(parentWorld)) {
+    if (!this.stale && this.unchanged(parentWorld)) {
       for (const d of this.drawables) {
         if (d.posedAt !== this.updates && (this.isVisible(d) || this.alsoPosed.has(d.dobj.index))) this.matrices(d);
       }
       return;
     }
+    this.stale = false;
     this.remember(parentWorld);
     this.updates++;
     const W = this.world;
-    // HSD_JObjMakeMatrix: each joint's HSD_MtxSRT, given its parent's accumulated scale (jobj->scl) when it has
-    // one, then PSMTXConcat(parent->mtx, jobj->mtx); in float32, as the game does
-    for (let i = 0; i < this.n; i++) this.makeMatrix(i, parentWorld);
-    if (this.pathOf) this.placeOnPaths(parentWorld);
-    if (this.copies) this.placeCopies();
+    this.makeJoints(parentWorld);
     // the joints the envelopes use: world * inverse bind
     const S = this.skin;
     for (let k = 0; k < this.skinUsed.length; k++) {
@@ -542,6 +549,15 @@ export class Skeleton {
     for (const d of this.drawables) {
       if (this.isVisible(d) || this.alsoPosed.has(d.dobj.index)) this.matrices(d);
     }
+  }
+
+  /** the joints' world matrices from the pose */
+  private makeJoints(parentWorld: Mat | null) {
+    // HSD_JObjMakeMatrix: each joint's HSD_MtxSRT, given its parent's accumulated scale (jobj->scl) when it has
+    // one, then PSMTXConcat(parent->mtx, jobj->mtx); in float32, as the game does
+    for (let i = 0; i < this.n; i++) this.makeMatrix(i, parentWorld);
+    if (this.pathOf) this.placeOnPaths(parentWorld);
+    if (this.copies) this.placeCopies();
   }
 
   // HSD_JObjDispAll on an instance joint: its child's subtree drawn again under PSMTXConcat(jobj->mtx,
@@ -763,6 +779,10 @@ export class Skeleton {
   passHidden: Set<number> | null = null;
 
   private updates = 0;
+  /** set while the skeleton is posed only for its joints' world matrices (update makes no others) */
+  jointsOnly = false;
+  /** the envelopes' and drawables' matrices are not the joints' as they are now (a joints-only update since) */
+  private stale = false;
   private passPosed: Set<number> | null = null;
   private passPosedAt = -1;
   /** the matrices of the meshes a pass's hidden set shows that `hidden`

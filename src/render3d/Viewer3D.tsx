@@ -3250,17 +3250,24 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     hud.seedMagView(null, f);
     return false;
   };
-  const actorsAt = (data: ReplayData, fs: Map<string, Fighter>, f: number): HeldFrame[] => {
+  /** the fighters of frame f posed, their joints' world matrices taken; `jointsOnly`: for nothing that draws them
+   *  (the effects' world stepping through frames), so their skeletons make only the joints' matrices */
+  const actorsAt = (data: ReplayData, fs: Map<string, Fighter>, f: number, jointsOnly = false): HeldFrame[] => {
     const { out, held, poseOne, holdOf } = framePoser(data, fs, f, viewerTrack(), true);
     const heldBy = new Map<Actor, { key: string; on: number; joint: number }>();
     const worlds = new Map<Actor, Float32Array>();
-    for (const h of held) { poseOne(h); worlds.set(h.a, worldByPart(h.a.st.internalCharacterId, h.fi.skeleton.world)); }
-    for (const h of held) {
-      const by = holdOf(h);
-      if (!by) continue;
-      heldBy.set(h.a, by);
-      poseOne(h);
-      worlds.set(h.a, worldByPart(h.a.st.internalCharacterId, h.fi.skeleton.world));
+    if (jointsOnly) for (const h of held) h.fi.skeleton.jointsOnly = true;
+    try {
+      for (const h of held) { poseOne(h); worlds.set(h.a, worldByPart(h.a.st.internalCharacterId, h.fi.skeleton.world)); }
+      for (const h of held) {
+        const by = holdOf(h);
+        if (!by) continue;
+        heldBy.set(h.a, by);
+        poseOne(h);
+        worlds.set(h.a, worldByPart(h.a.st.internalCharacterId, h.fi.skeleton.world));
+      }
+    } finally {
+      if (jointsOnly) for (const h of held) h.fi.skeleton.jointsOnly = false;
     }
     for (const h of held) out.push({ key: actorKey(h.a.player, h.a.nana), st: h.a.st, fighter: h.fi, world: worlds.get(h.a)!, heldBy: heldBy.get(h.a) });
     return out;
@@ -3318,7 +3325,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       posedOther = g !== f || !now;
     };
     const one = (g: number) => {
-      const actors = g === f && now ? now : actorsAt(data, fs, g);
+      const actors = g === f && now ? now : actorsAt(data, fs, g, true);
       w.step(g, actors);
       if (dyn) dynStep(g, actors, data);
     };
