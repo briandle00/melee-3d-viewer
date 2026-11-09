@@ -17,7 +17,10 @@ import { type Prime, ScreenCopies, type Shown } from "./screencopies";
 import { Archive, Image, MObj, TObj, Tlut, decodeImage } from "./hsd";
 import { DrawGroup, Drawable, MatState, Skeleton, TexState, billboardViewOf } from "./skeleton";
 import { Mat, invert, lookAt, mul } from "./math";
-import { HSD_MtxInverseTranspose, PSMTXConcat, concatGL, mkBillBoardMtx, mtxFromGL, mtxToGL, mtxToGL3 } from "./gxmath";
+import {
+  HSD_MtxInverseTranspose, MTXLightPerspective, PSMTXConcat, cobjViewingMtx, concatGL, mkBillBoardMtx, mtxFromGL, mtxToGL,
+  mtxToGL3,
+} from "./gxmath";
 import { type ViewLights, jointInView, lightsInView, newViewLights, specularDirs } from "./gxlights";
 import { SHADOW_SIZE, shadowGray } from "./shadow";
 import type { Tint as ColTint } from "./fx/colanim";
@@ -38,6 +41,15 @@ import { mark, timed } from "./startup";
 
 const tmpM = new Float32Array(16);
 const MIRROR_W = 80, MIRROR_H = 60;
+
+/** the frame's camera as the game has it, for the stage's mirror (Renderer.beginMirror): its eye, interest,
+ *  vertical field of view (degrees) and aspect */
+export interface MirrorCamera {
+  eye: ArrayLike<number>;
+  interest: ArrayLike<number>;
+  fov: number;
+  aspect: number;
+}
 // the fighters' shadows a material takes, at most, and their texture units (after the material's four)
 const MAX_SHADOWS = 4, SHADOW_UNIT = 4;
 
@@ -2194,6 +2206,12 @@ void main() {
   private mirrorCache: TexCache = { image: null, tlut: null, tex: null as unknown as WebGLTexture, tu: 0, tv: 0, su: 0, sv: 0, r: 0,
                                     rx: 0, ry: 0, m: new Float32Array(12), epoch: 0, ver: 0 };
   private mirrorDrawn = false;
+  /** the mirror's texture matrix as the game makes it (grIzumi_801CCEA0: MTXLightPerspective times the mirror
+   *  camera's viewing matrix; GX's Mtx, world to the picture's s, t, q), or null when the frame's camera is not
+   *  the game's */
+  mirrorTexGX: Float32Array | null = null;
+  private mirrorGX = new Float32Array(12);
+  private mirrorLP = new Float32Array(12);
   private size = [1, 1];
   // the most either side of the canvas can be (the card's MAX_VIEWPORT_DIMS; 0 until it is asked)
   private maxDim = 0;
@@ -2203,8 +2221,10 @@ void main() {
     this.mirrorCache.tex = this.mirror && this.mirrorDrawn ? this.mirror.tex : this.white;
     return this.mirrorCache;
   }
-  /** returns the mirror camera's right and up (world directions: what faces it), its view and its projection */
-  beginMirror(): { right: number[]; up: number[]; view: Mat; viewProj: Mat } {
+  /** returns the mirror camera's right and up (world directions: what faces it), its view and its projection.
+   *  `cam`: the frame's camera as the game has it (its eye, interest, vertical field of view in degrees and
+   *  aspect), when it is the game's: the mirror camera is then made as the game makes it */
+  beginMirror(cam: MirrorCamera | null = null): { right: number[]; up: number[]; view: Mat; viewProj: Mat } {
     const gl = this.gl;
     if (!this.mirror) {
       const tex = gl.createTexture()!;
@@ -2225,20 +2245,37 @@ void main() {
       this.bound.fill(null);
     }
     // the mirror camera: the eye and the point it looks at, heights negated
-    const v = this.view;
-    invert(tmpM, v);
-    const eye = [tmpM[12], -tmpM[13], tmpM[14]];
-    const at = [tmpM[12] - v[2] * 100, -(tmpM[13] - v[6] * 100), tmpM[14] - v[10] * 100];
-    lookAt(this.mirrorView, eye, at);
-    mul(this.mirrorViewProj, this.proj, this.mirrorView);
-    // world -> the picture: s = 0.5 + 0.49 x, t = 0.5 + 0.49 y (the game's
-    // light-perspective matrix; GL's pictures run bottom up), over w
-    const m = this.mirrorViewProj, M = this.mirrorCache.m;
+    const M = this.mirrorCache.m;
     this.mirrorCache.ver++;
-    for (let c = 0; c < 4; c++) {
-      M[c] = 0.49 * m[c * 4] + 0.5 * m[c * 4 + 3];
-      M[4 + c] = 0.49 * m[c * 4 + 1] + 0.5 * m[c * 4 + 3];
-      M[8 + c] = m[c * 4 + 3];
+    if (cam) {
+      // (grIzumi_801CCEA0: the frame camera's eye and interest, their y negated (HSD_CObjSetEyePosition,
+      // HSD_CObjSetInterest), its near, far, field of view and aspect; the mirror CObj's roll 0 - its viewing
+      // matrix HSD_CObjSetupViewingMtx's, in single precision. Its texture matrix: MTXLightPerspective(fov,
+      // aspect, 0.49, -0.49, 0.5, 0.5) times that view, PSMTXConcat)
+      const V = this.mirrorGX, T = (this.mirrorTexGX ??= new Float32Array(12));
+      cobjViewingMtx(V, [cam.eye[0], -cam.eye[1], cam.eye[2]], [cam.interest[0], -cam.interest[1], cam.interest[2]], 0);
+      mtxToGL(V, this.mirrorView);
+      MTXLightPerspective(this.mirrorLP, cam.fov, cam.aspect, 0.49, -0.49, 0.5, 0.5);
+      PSMTXConcat(this.mirrorLP, V, T);
+      // (s and q as the game's rows; t from the bottom, as GL's pictures run: q - t)
+      for (let c = 0; c < 4; c++) { M[c] = T[c]; M[4 + c] = T[8 + c] - T[4 + c]; M[8 + c] = T[8 + c]; }
+      mul(this.mirrorViewProj, this.proj, this.mirrorView);
+    } else {
+      this.mirrorTexGX = null;
+      const v = this.view;
+      invert(tmpM, v);
+      const eye = [tmpM[12], -tmpM[13], tmpM[14]];
+      const at = [tmpM[12] - v[2] * 100, -(tmpM[13] - v[6] * 100), tmpM[14] - v[10] * 100];
+      lookAt(this.mirrorView, eye, at);
+      mul(this.mirrorViewProj, this.proj, this.mirrorView);
+      // world -> the picture: s = 0.5 + 0.49 x, t = 0.5 + 0.49 y (the game's
+      // light-perspective matrix; GL's pictures run bottom up), over w
+      const m = this.mirrorViewProj;
+      for (let c = 0; c < 4; c++) {
+        M[c] = 0.49 * m[c * 4] + 0.5 * m[c * 4 + 3];
+        M[4 + c] = 0.49 * m[c * 4 + 1] + 0.5 * m[c * 4 + 3];
+        M[8 + c] = m[c * 4 + 3];
+      }
     }
     // (the picture may not be on a texture unit while it is drawn into)
     for (let n = 0; n < 4; n++) {

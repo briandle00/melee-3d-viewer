@@ -14,6 +14,7 @@
  * and run here; nothing of them is copied into this file.
  */
 import type { Archive } from "../hsd";
+import { cosf, sinf } from "./gamemath";
 
 /** a table entry: where its script is, its priority, and which of the two it runs in */
 export interface ColAnimEntry { cmds: number | null; pri: number; slot: number }
@@ -306,17 +307,30 @@ export class FighterColAnim {
   /** the one drawn: the main one while it runs, else the second */
   get shown(): Overlay { return this.main.index !== 0 ? this.main : this.second; }
 
-  /** the tint for this frame; `facing` turns the light's side (as the game's fighter turns) */
-  tint(facing: number): Tint | null {
+  /** the tint for this frame; `rotY` the fighter's root joint's turn about y (its facing: the light's side) */
+  tint(rotY: number): Tint | null {
     const o = this.shown;
     if (!o.colorOn && !o.lightOn) return null;
     let light: Tint["light"] = null;
     if (o.lightOn) {
-      const yz = (o.rotYZ * Math.PI) / 180, x = ((o.rotX * Math.PI) / 180) * (facing < 0 ? -1 : 1);
-      const z = Math.cos(yz);
       light = { rgb: [byte(o.light[0]), byte(o.light[1]), byte(o.light[2])], a: byte(o.light[3]), adds: o.lightAdds,
-                dir: [z * Math.sin(x), Math.sin(yz), z * Math.cos(x)] };
+                dir: colorLightDir(o.rotX, o.rotYZ, rotY) };
     }
     return { color: o.colorOn ? [byte(o.color[0]), byte(o.color[1]), byte(o.color[2]), byte(o.color[3])] : null, light };
   }
+}
+
+/** the color animation light's direction as ftCo_8009F5AC sets its LObj's position, in single precision: the angles
+ *  in degrees through MTXDegToRad (times 0.01745329252f), the x one times the fighter's root joint's turn about y
+ *  (HSD_JObjGetRotationY) over M_PI_2 (a double division, rounded to a float); y = -sinf(-yz), z = cosf(-yz),
+ *  x = z sinf(x), z = z cosf(x) */
+export function colorLightDir(rotX: number, rotYZ: number, rotY: number): [number, number, number] {
+  const deg = f32(0.01745329252);
+  const yz = f32(f32(rotYZ) * deg);
+  const ax = f32(f32(f32(f32(rotX) * deg) * f32(rotY)) / 1.5707963267948966);
+  const y = -sinf(-yz);
+  let z = cosf(-yz);
+  const x = f32(z * sinf(ax));
+  z = f32(z * cosf(ax));
+  return [x, y, z];
 }

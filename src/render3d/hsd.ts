@@ -11,8 +11,7 @@
  * data is in this file, or anywhere in the repository: it reads your
  * own files, from your own disk, at runtime.
  */
-import { srt } from "./math";
-import { f32, madd } from "./gxmath";
+import { HSD_MtxSRT, f32, madd, mtx as newMtx, sqrtf, type Mtx } from "./gxmath";
 
 export interface Archive {
   data: DataView; // the data block (pointers are offsets into it)
@@ -124,67 +123,129 @@ function loadSpline(a: Archive, o: number): Spline {
            seg: floats(segAt, n), poly: floats(polyAt, Math.max(0, n - 1) * 5) };
 }
 
-/** a point of a spline at parameter u (0..1 over all its segments) */
-function splinePoint(s: Spline, u: number, out: number[]) {
-  const segs = s.n - 1;
-  let i = Math.min(segs - 1, Math.max(0, Math.floor(u * segs)));
-  let t = u * segs - i;
-  if (u >= 1) { i = segs - 1; t = 1; }
-  const P = (k: number, c: number) => s.cv[k * 3 + c] ?? 0;
-  for (let c = 0; c < 3; c++) {
-    if (s.type === 0) out[c] = P(i, c) + t * (P(i + 1, c) - P(i, c));
-    else if (s.type === 1) {
-      const k = i * 3, m = 1 - t;
-      out[c] = m * m * m * P(k, c) + 3 * t * m * m * P(k + 1, c) + 3 * t * t * m * P(k + 2, c) + t * t * t * P(k + 3, c);
+/** splGetSplinePoint (baselib/spline.c): the point of a spline at parameter u (0..1 over all its segments),
+ *  each step as the game's code does it (its disassembly: the segment found by fctiwz, then the kind's
+ *  weights - fmuls, fsubs, fadds, fmsubs, fnmsubs - and each coordinate cp1 * w1 first, then the others added
+ *  by fused fmadds), in single precision. Outside 0..1 the point is left as it was. */
+export function splGetSplinePoint(out: number[], s: Spline, u: number) {
+  const f = Math.fround;
+  u = f(u);
+  if (u < 0 || u > 1) return;
+  const cv = s.cv;
+  // (cp[k] of the control points from `at`, coordinate c)
+  const P = (at: number, k: number, c: number) => cv[(at + k) * 3 + c] ?? 0;
+  if (u < 1) {
+    const tf = f(u * (s.n - 1));
+    const idx = (Math.trunc(tf) << 16) >> 16; // (fctiwz, then the s16 it is kept as)
+    const t = f(tf - idx);
+    if (s.type === 0) {
+      for (let c = 0; c < 3; c++) out[c] = madd(t, f(P(idx, 1, c) - P(idx, 0, c)), P(idx, 0, c));
+    } else if (s.type === 1) {
+      // (splGetBezierPoint)
+      const u1 = f(1 - t), u2 = f(t * t), u12 = f(u1 * u1);
+      const w0 = f(u12 * u1), w1 = f(f(3 * t) * u12), w2 = f(f(3 * u2) * u1), w3 = f(u2 * t);
+      const at = idx * 3;
+      for (let c = 0; c < 3; c++) {
+        let v = f(P(at, 1, c) * w1);
+        v = madd(P(at, 0, c), w0, v); v = madd(P(at, 2, c), w2, v);
+        out[c] = madd(P(at, 3, c), w3, v);
+      }
     } else if (s.type === 2) {
-      const t2 = t * t, t3 = t2 * t, m = 1 - t;
-      out[c] = (m * m * m * P(i, c) + (3 * t3 - 6 * t2 + 4) * P(i + 1, c) + (-3 * t3 + 3 * t2 + 3 * t + 1) * P(i + 2, c) + t3 * P(i + 3, c)) / 6;
-    } else {
-      // cardinal: the curve through points i+1 and i+2, shaped by i and i+3
-      const k = s.tension, t2 = t * t, t3 = t2 * t;
-      out[c] = k * (-t3 + 2 * t2 - t) * P(i, c) + ((2 - k) * t3 + (k - 3) * t2 + 1) * P(i + 1, c) +
-               ((k - 2) * t3 + (3 - 2 * k) * t2 + k * t) * P(i + 2, c) + k * (t3 - t2) * P(i + 3, c);
+      // (splGetBSplinePoint)
+      const k = f(1 / 6), u2 = f(t * t), u1 = f(1 - t), u3 = f(u2 * t);
+      const w0 = f(u1 * f(u1 * f(k * u1)));
+      const w1 = f(k * f(4 + madd(3, u3, -f(6 * u2))));
+      const w2 = f(k * madd(3, f(t + f(-u3 + u2)), 1));
+      const w3 = f(k * u3);
+      for (let c = 0; c < 3; c++) {
+        let v = f(P(idx, 1, c) * w1);
+        v = madd(P(idx, 0, c), w0, v); v = madd(P(idx, 2, c), w2, v);
+        out[c] = madd(P(idx, 3, c), w3, v);
+      }
+    } else if (s.type === 3) {
+      // (splGetCardinalPoint)
+      const k = s.tension, u2 = f(t * t), u3 = f(u2 * t);
+      const w0 = f(k * f(madd(2, u2, -u3) - t));
+      const w1 = f(1 + madd(f(2 - k), u3, f(f(k - 3) * u2)));
+      const w2 = madd(k, t, madd(f(k - 2), u3, f(-madd(2, k, -3) * u2)));
+      const w3 = f(k * f(u3 - u2));
+      for (let c = 0; c < 3; c++) {
+        let v = f(P(idx, 1, c) * w1);
+        v = madd(P(idx, 0, c), w0, v); v = madd(P(idx, 2, c), w2, v);
+        out[c] = madd(P(idx, 3, c), w3, v);
+      }
+    }
+    return;
+  }
+  const last = ((s.n - 1) << 16) >> 16;
+  if (s.type === 0) for (let c = 0; c < 3; c++) out[c] = P(last, 0, c);
+  else if (s.type === 1) for (let c = 0; c < 3; c++) out[c] = P(last * 3, 0, c);
+  else if (s.type === 3) for (let c = 0; c < 3; c++) out[c] = P(last, 1, c);
+  else if (s.type === 2) {
+    // (splGetBSplinePoint at 1, from cp[-1], its weights folded by the compiler: 0, 1/6, 4/6, 1/6)
+    const k = f(1 / 6), w2 = f(k * 4);
+    for (let c = 0; c < 3; c++) {
+      let v = f(P(last - 1, 1, c) * k);
+      v = madd(P(last - 1, 0, c), 0, v); v = madd(P(last - 1, 2, c), w2, v);
+      out[c] = madd(P(last - 1, 3, c), k, v);
     }
   }
 }
 
-/** the point a share `f` (0..1) of the way along a spline by length, as a
- *  PATH track asks: the segment it falls in from the file's table, then the
- *  parameter within it found by halving, the length measured by Simpson's
- *  rule over the segment's speed */
-export function splineAt(s: Spline, f: number, out: number[]) {
-  f = Math.min(1, Math.max(0, f));
-  const segs = s.n - 1;
-  if (segs < 1) { splinePoint(s, 0, out); return; }
-  let u: number;
-  if (f <= 0) u = 0;
-  else if (f >= 1) u = 1;
-  else {
-    let i = 0;
-    while (i < segs - 1 && s.seg[i + 1] < f) i++;
-    let t: number;
-    if (s.type === 0) t = (f - s.seg[i]) / Math.max(1e-9, s.seg[i + 1] - s.seg[i]);
-    else {
-      const q = s.poly.subarray(i * 5, i * 5 + 5);
-      const speed = (x: number) => Math.sqrt(Math.max(0, q[0] * x ** 4 + q[1] * x ** 3 + q[2] * x * x + q[3] * x + q[4]));
-      const length = (a0: number, a1: number) => {
-        const h = (a1 - a0) / 8;
-        let sum = speed(a0) + speed(a1);
-        for (let k = 1; k < 8; k++) sum += (k & 1 ? 4 : 2) * speed(a0 + k * h);
-        return (sum * h) / 3;
-      };
-      let lo = 0, hi = 1, want = s.total * (f - s.seg[i]);
-      t = 0.5;
-      for (let it = 0; it < 40 && hi - lo >= 1e-5; it++) {
-        t = (lo + hi) / 2;
-        const got = length(lo, t);
-        if (want < got + 1e-5) hi = t;
-        else { lo = t; want -= got; }
+/** splArcLengthPolynomial: the curve's speed at t within a segment, the square root of the file's quartic
+ *  (c1 t^3 first, then c0 t^4, c2 t^2 and c3 t added by fmadds, then c4); a square a little under 0 is 0 */
+function arcSpeed(q: Float32Array, o: number, t: number): number {
+  const f = Math.fround;
+  const t2 = f(t * t), t3 = f(t2 * t), t4 = f(t3 * t);
+  let v = f(q[o + 1] * t3);
+  v = madd(q[o], t4, v); v = madd(q[o + 2], t2, v); v = madd(q[o + 3], t, v);
+  v = f(q[o + 4] + v);
+  if (v < 0 && v > f(-0.001)) v = 0;
+  return sqrtf(v);
+}
+
+/** splArcLengthGetParameter: the parameter a share `share` (0..1) of the way along a spline by length - the
+ *  segment it falls in from the file's table, then (curves) the parameter within it found by halving until the
+ *  interval is under 1e-5, each half's length by Simpson's rule over 8 steps of the speed - as the game's code
+ *  does it, in single precision (MSL's sqrtf__Ff for the square roots) */
+export function splArcLengthGetParameter(s: Spline, share: number): number {
+  const f = Math.fround;
+  share = f(share);
+  if (share <= 0) return 0;
+  if (share >= 1) return 1;
+  const seg = s.seg;
+  let idx = 0;
+  while (idx + 1 < seg.length && seg[idx + 1] < share) idx++;
+  let result = 0;
+  if (s.type === 0) result = f(f(share - seg[idx]) / f(seg[idx + 1] - seg[idx]));
+  else if (s.type >= 1 && s.type <= 3) {
+    const o = idx * 5, q = s.poly, EPS = f(0.00001);
+    let start = 0, end = 1;
+    let want = f(s.total * f(share - seg[idx]));
+    for (let guard = 0; guard < 64; guard++) {
+      let d = f(start - end);
+      if (d < 0) d = -d;
+      if (!(d >= EPS)) break;
+      result = f(f(start + end) * 0.5);
+      const dx = f(f(result - start) * 0.125);
+      let x = f(start + dx), mid = 0;
+      for (let i = 2; i <= 8; i++) {
+        mid = madd(i & 1 ? 2 : 4, arcSpeed(q, o, x), mid);
+        x = f(x + dx);
       }
+      const a = arcSpeed(q, o, start), b = arcSpeed(q, o, result);
+      const simpson = f(f(dx * f(f(mid + a) + b)) / 3);
+      if (want < f(EPS + simpson)) end = result;
+      else { start = result; want = f(want - simpson); }
     }
-    u = (t + i) / segs;
   }
-  splinePoint(s, u, out);
+  return f(f(result + idx) / f(s.n - 1));
+}
+
+/** splArcLengthPoint: the point a share `share` (0..1) of the way along a spline by length, as a PATH track asks
+ *  (WObjUpdateFunc, JObjUpdateFunc's HSD_A_J_PATH) */
+export function splineAt(s: Spline, share: number, out: number[]) {
+  splGetSplinePoint(out, s, splArcLengthGetParameter(s, share));
 }
 
 export interface DObj {
@@ -1106,7 +1167,8 @@ export interface LightAnim {
 export interface LightPlaceAnim {
   aobj: AObj;
   spline: Spline | null;
-  mtx: Float32Array | null;
+  /** the spline joint's matrix (GX's Mtx: 3 rows of 4) */
+  mtx: Mtx | null;
 }
 
 export interface Light {
@@ -1152,7 +1214,8 @@ export function loadLights(a: Archive, list: number): Light[] {
       try {
         const j = loadJoint(a, aobj.obj).root;
         spline = j.spline ?? null;
-        mtx = srt(new Float32Array(16), ...j.scale, ...j.rot, ...j.trans);
+        // (HSD_JObjSetupMatrix on the root joint: HSD_JObjMakeMatrix's HSD_MtxSRT, no parent scale)
+        mtx = HSD_MtxSRT(newMtx(), j.scale, j.rot, j.trans, null);
       } catch { spline = null; }
     }
     return { aobj, spline, mtx };

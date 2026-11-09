@@ -757,6 +757,128 @@ static void QuatSlerp(const float* p, const float* q, float* out, float t)
     for (int k = 0; k < 4; k++) out[k] = fmaf(sp, p[k], sq * q[k]);
 }
 
+/* ---------------------------------------------------------------- baselib/spline.c, dolphin mtx's MTXLightPerspective
+ * From the decompilation's C (spline.c), each a * b + c the game's code fuses (its disassembly: fmadds) an fmaf. */
+
+static float splGetHelmite(float fterm, float time, float p0, float p1, float d0, float d1)
+{
+    float _1_T2 = time * time;
+    float t2 = fterm * fterm;
+    float t2_T = _1_T2 * fterm;
+    float t3_T2 = t2 * (_1_T2 * time);
+    float _2t3_T3 = 2.0f * t3_T2 * fterm;
+    float _3t2_T2 = 3.0f * _1_T2 * t2;
+    float a = t3_T2 - t2_T;
+    return fmaf(d1, a, fmaf(d0, time + (a - t2_T), fmaf(p0, 1.0f + (_2t3_T3 - _3t2_T2), p1 * (-_2t3_T3 + _3t2_T2))));
+}
+
+typedef struct { int type, numcv; float tension, totalLength; const float* cv; const float* segLength; const float* segPoly; } Spl;
+
+static void splGetSplinePoint(float* p, const Spl* s, float u)
+{
+    if (u < 0.0f || u > 1.0f) return;
+    if (u < 1.0f) {
+        float t = u * (float) (s->numcv - 1);
+        short idx = (short) (int) t;
+        t = t - (float) idx;
+        const float* cp;
+        switch (s->type) {
+        case 0:
+            cp = s->cv + idx * 3;
+            for (int c = 0; c < 3; c++) p[c] = fmaf(t, cp[3 + c] - cp[c], cp[c]);
+            return;
+        case 1: {
+            cp = s->cv + idx * 9;
+            float u_1 = 1.0f - t, u2 = t * t, u_12 = u_1 * u_1;
+            float b0 = u_12 * u_1, b1 = 3.0f * t * u_12, b2 = 3.0f * u2 * u_1, b3 = u2 * t;
+            for (int c = 0; c < 3; c++) p[c] = fmaf(cp[9 + c], b3, fmaf(cp[6 + c], b2, fmaf(cp[c], b0, cp[3 + c] * b1)));
+            return;
+        }
+        case 2: {
+            cp = s->cv + idx * 3;
+            float u2 = t * t, u3 = u2 * t, u_1 = 1.0f - t, k = 1.0f / 6.0f;
+            float b0 = u_1 * (u_1 * (k * u_1));
+            float b1 = k * (4.0f + fmaf(3.0f, u3, -(6.0f * u2)));
+            float b2 = k * fmaf(3.0f, t + (-u3 + u2), 1.0f);
+            float b3 = k * u3;
+            for (int c = 0; c < 3; c++) p[c] = fmaf(cp[9 + c], b3, fmaf(cp[6 + c], b2, fmaf(cp[c], b0, cp[3 + c] * b1)));
+            return;
+        }
+        case 3: {
+            cp = s->cv + idx * 3;
+            float k = s->tension, u2 = t * t, u3 = u2 * t;
+            float car0 = k * (fmaf(2.0f, u2, -u3) - t);
+            float car1 = 1.0f + fmaf(2.0f - k, u3, (k - 3.0f) * u2);
+            float car3 = k * (u3 - u2);
+            /* (3 - 2k: fnmsubs, one rounding) */
+            float car2 = fmaf(k, t, fmaf(k - 2.0f, u3, (-fmaf(2.0f, k, -3.0f)) * u2));
+            for (int c = 0; c < 3; c++) p[c] = fmaf(cp[9 + c], car3, fmaf(cp[6 + c], car2, fmaf(cp[c], car0, cp[3 + c] * car1)));
+            return;
+        }
+        }
+    } else {
+        short idx = (short) (s->numcv - 1);
+        switch (s->type) {
+        case 0: for (int c = 0; c < 3; c++) p[c] = s->cv[idx * 3 + c]; return;
+        case 1: for (int c = 0; c < 3; c++) p[c] = s->cv[idx * 9 + c]; return;
+        case 2: {
+            const float* cp = s->cv + (idx - 1) * 3;
+            float k = 1.0f / 6.0f;
+            for (int c = 0; c < 3; c++) p[c] = fmaf(cp[9 + c], k, fmaf(cp[6 + c], k * 4.0f, fmaf(cp[c], 0.0f, cp[3 + c] * k)));
+            return;
+        }
+        case 3: for (int c = 0; c < 3; c++) p[c] = s->cv[(idx + 1) * 3 + c]; return;
+        }
+    }
+}
+
+static float splArcLengthPolynomial(const float* q, float t)
+{
+    float t2 = t * t, t3 = t2 * t, t4 = t3 * t;
+    float r = q[4] + fmaf(q[3], t, fmaf(q[2], t2, fmaf(q[0], t4, q[1] * t3)));
+    if (r < 0.0f && r > -0.001f) r = 0.0f;
+    return sqrtf_msl(r);
+}
+
+static float splArcLengthGetParameter(const Spl* s, float arg)
+{
+    int idx = 0;
+    float start = 0.0f, end = 1.0f, result = 0.0f;
+    if (arg <= 0.0f) return start;
+    if (arg >= 1.0f) return end;
+    while (s->segLength[idx + 1] < arg) idx++;
+    if (s->type == 0) result = (arg - s->segLength[idx]) / (s->segLength[idx + 1] - s->segLength[idx]);
+    else if (s->type >= 1 && s->type <= 3) {
+        float want = s->totalLength * (arg - s->segLength[idx]);
+        const float* q = s->segPoly + idx * 5;
+        while (fabsf(start - end) >= 0.00001f) {
+            result = (start + end) * 0.5f;
+            float dx = (result - start) * 0.125f;
+            float mid = 0.0f, t = start + dx;
+            for (int i = 2; i <= 8; i++) {
+                mid = fmaf((i & 1) ? 2.0f : 4.0f, splArcLengthPolynomial(q, t), mid);
+                t += dx;
+            }
+            float simpsons = dx * ((mid + splArcLengthPolynomial(q, start)) + splArcLengthPolynomial(q, result)) / 3.0f;
+            if (want < 0.00001f + simpsons) end = result;
+            else { start = result; want -= simpsons; }
+        }
+    }
+    return (result + (float) idx) / ((float) s->numcv - 1.0f);
+}
+
+static void MTXLightPerspective(Mtx m, float fovY, float aspect, float scaleS, float scaleT, float transS, float transT)
+{
+    float angle = 0.017453292f * (0.5f * fovY);
+    float cot = 1.0f / tanf_msl(angle);
+    memset(m, 0, 48);
+    m[0][0] = scaleS * (cot / aspect);
+    m[0][2] = -transS;
+    m[1][1] = cot * scaleT;
+    m[1][2] = -transT;
+    m[2][2] = -1.0f;
+}
+
 /* ---------------------------------------------------------------- the driver */
 
 #ifndef GXMATH_REF_NO_MAIN
@@ -767,14 +889,14 @@ int main(int argc, char** argv)
     FILE* in = fopen(argv[2], "rb");
     FILE* out = fopen(argv[3], "wb");
     if (!in || !out) return 2;
-    float a[32], r[32];
+    float a[80], r[32];
     struct { const char* name; int nin, nout; } F[] = {
         { "madd", 3, 1 }, { "concat", 24, 12 }, { "multvec", 15, 3 }, { "multvecsr", 15, 3 }, { "inverse", 12, 13 },
         { "quat", 4, 12 }, { "rotaxis", 4, 12 }, { "normalize", 3, 3 }, { "mag", 3, 1 }, { "cross", 6, 3 }, { "dot", 6, 1 },
         { "lookat", 9, 12 }, { "perspective", 4, 16 }, { "frustum", 6, 16 }, { "ortho", 6, 16 }, { "srt", 13, 12 },
         { "srtquat", 14, 12 }, { "scaledadd", 25, 12 }, { "invconcat", 24, 12 }, { "sqrtf", 1, 1 }, { "sinf", 1, 1 },
         { "cosf", 1, 1 }, { "tanf", 1, 1 }, { "frsqrte", 1, 2 }, { "fres", 1, 1 }, { "view", 7, 12 }, { "mkrot", 3, 12 }, { "texmtx", 12, 12 }, { "billboard", 15, 12 },
-        { "invxpose", 12, 12 }, { "getscale", 12, 3 }, { "acosf", 1, 1 }, { "eulerquat", 3, 4 }, { "slerp", 9, 4 },
+        { "invxpose", 12, 12 }, { "getscale", 12, 3 }, { "acosf", 1, 1 }, { "eulerquat", 3, 4 }, { "slerp", 9, 4 }, { "helmite", 6, 1 }, { "spline", 69, 4 }, { "lightpersp", 6, 12 },
     };
     int k = -1;
     for (int i = 0; i < (int) (sizeof F / sizeof F[0]); i++) if (!strcmp(F[i].name, fn)) k = i;
@@ -818,6 +940,12 @@ int main(int argc, char** argv)
         case 31: r[0] = acosf_msl(a[0]); break;
         case 32: EulerToQuat(a, r); break;
         case 33: QuatSlerp(a, a + 4, r, a[8]); break;
+        case 34: r[0] = splGetHelmite(a[0], a[1], a[2], a[3], a[4], a[5]); break;
+        /* (a spline: type, numcv, tension, total, 39 control point floats, 5 segment starts, 20 quartic
+         * coefficients, the share; out the point and the parameter) */
+        case 35: { Spl s = { (int) a[0], (int) a[1], a[2], a[3], a + 4, a + 43, a + 48 };
+                   r[3] = splArcLengthGetParameter(&s, a[68]); splGetSplinePoint(r, &s, r[3]); break; }
+        case 36: MTXLightPerspective(C, a[0], a[1], a[2], a[3], a[4], a[5]); memcpy(r, C, 48); break;
         }
         fwrite(r, 4, F[k].nout, out);
     }

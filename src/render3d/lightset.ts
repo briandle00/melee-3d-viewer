@@ -11,6 +11,7 @@
 import { Light, aobjFrame, sample, splineAt } from "./hsd";
 import { GxLight, LOBJ, distAttn, spotAttn } from "./gx";
 import { pickShadowLight } from "./shadow";
+import { PSMTXMultVec } from "./gxmath";
 
 /** what the renderer's shaders take */
 export interface Lighting {
@@ -208,16 +209,12 @@ export class LightSet {
         if (v === null) continue;
         if (tr.type === 4 && w.spline) {
           // (WObjUpdateFunc: the point a share of the way along the curve by
-          // length; HSD_WObjGetPosition then takes it through the spline
-          // joint's matrix)
+          // length, splArcLengthPoint; HSD_WObjGetPosition then takes it
+          // through the spline joint's matrix, MTXMultVec - in single precision)
           const q = [0, 0, 0];
           splineAt(w.spline, Math.min(Math.max(v, 0), 1), q);
-          const m = w.mtx;
-          if (m) {
-            p[0] = m[0] * q[0] + m[4] * q[1] + m[8] * q[2] + m[12];
-            p[1] = m[1] * q[0] + m[5] * q[1] + m[9] * q[2] + m[13];
-            p[2] = m[2] * q[0] + m[6] * q[1] + m[10] * q[2] + m[14];
-          } else { p[0] = q[0]; p[1] = q[1]; p[2] = q[2]; }
+          if (w.mtx) PSMTXMultVec(w.mtx, q, p);
+          else { p[0] = q[0]; p[1] = q[1]; p[2] = q[2]; }
         } else if (tr.type >= 5 && tr.type <= 7) p[tr.type - 5] = v;
       }
       return p;

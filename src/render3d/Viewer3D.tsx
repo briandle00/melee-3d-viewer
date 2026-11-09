@@ -28,7 +28,7 @@ import { invert, lookAt, mat, perspective, translation, mul } from "./math";
 import { CAM_ASPECT, CAM_STRIDE, cameraPlanes, CamActor, CameraRun, cameraRun, gameProjection, gameView, playerScales } from "./camera";
 import { chargeShakeAt, floorHeights, HIT_FEEL, hitShakeAt, quakeOf, shakeKindOf, smashCharging, trackShake } from "./hitlag";
 import { setBillboardView } from "./skeleton";
-import { DEFAULT_LIGHTING, Renderer } from "./renderer";
+import { DEFAULT_LIGHTING, type MirrorCamera, Renderer } from "./renderer";
 import type { Lighting } from "./lightset";
 import { Stall, idle } from "./idle";
 import { Stage } from "./stage";
@@ -974,6 +974,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
   /** each fighter's camera box bone_pos as its last state with a camera callback left it (the shadow camera's) */
   const cameraBones = new Map<string, { frame: number; bone: number[] }>();
   let gxProjOn = false;
+  // (the frame's camera as the game has it, when it is the game's: the stage's mirror is made from it)
+  let mirrorCam: MirrorCamera | null = null;
   // (and its near and far planes: the stage's, when its code sets them)
   let camPlanes = cameraPlanes(null);
   // every (character, costume) the replay and its runs need, and whether all are in
@@ -1669,11 +1671,14 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       gameView(view, eye, at);
       const d = Math.hypot(eye[0] - at[0], eye[1] - at[1], eye[2] - at[2]);
       camPlanes = cameraPlanes(rawData()?.settings.stageId);
-      gameProjection(proj, gxProj, track[t + 6], Math.abs(aspect - CAM_ASPECT) < 0.01 ? CAM_ASPECT : aspect, ...camPlanes);
+      const camAspect = Math.abs(aspect - CAM_ASPECT) < 0.01 ? CAM_ASPECT : aspect;
+      gameProjection(proj, gxProj, track[t + 6], camAspect, ...camPlanes);
       gxProjOn = true;
+      mirrorCam = { eye, interest: at, fov: track[t + 6], aspect: camAspect };
       cam.dist = d; cam.x = at[0]; cam.y = at[1];
     } else {
       gxProjOn = false;
+      mirrorCam = null;
       const lift = cam.dist * LIFT;
       translation(view, -cam.x, -(cam.y + lift), -cam.dist);
       const f = 1 / Math.tan(FOVY / 2);
@@ -1999,8 +2004,8 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         // meshes posed too - else the first frame of a switch drew them
         // where they last stood: Kirby's Stone blinking out)
         fi.skeleton.update();
-        const fromTrack = tr?.tint(a.player, a.nana ? 1 : 0, fno - 123, a.st.facingDirection);
-        const tint = fromTrack !== undefined ? fromTrack : priming ? null : fxw?.tintOf(akey, a.st.facingDirection) ?? null;
+        const fromTrack = tr?.tint(a.player, a.nana ? 1 : 0, fno - 123, fi.skeleton.rot[1]);
+        const tint = fromTrack !== undefined ? fromTrack : priming ? null : fxw?.tintOf(akey, fi.skeleton.rot[1]) ?? null;
         // Kirby's copy's hat: the viewer track's copy (kb.kind, 4 for none),
         // else the replay's (kirby.ts). A hat in his colors covers his body:
         // its meshes instead of his body's lookup 0, unless his face is in
@@ -2414,7 +2419,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
     // (not drawn while no part of the pond is in view: nothing would show it)
     if (st?.mirror && st.mirrorSurfaces.some(({ sk, d }) => sk.isVisible(d) && r.inView(d))) {
       const m0 = performance.now(), d0 = r.draws;
-      const axesM = r.beginMirror();
+      const axesM = r.beginMirror(mirrorCam);
       // (grIzumi_801CCEA0: the mirror's camera draws links 0, 2 and 5 - the
       // scenery under the stage's lights, and the fighters - in their opaque
       // and cut-out passes, then links 4, 5 and 6 in all three passes: the
@@ -4176,7 +4181,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
         if (ag?.valid(g - 123)) {
           for (const a of now) {
             const [pl, nn] = a.key.split(":").map(Number);
-            const facing = a.st.facingDirection;
+            const facing = Math.fround((Math.PI / 2) * a.st.facingDirection);
             const said = ag.tint(pl, nn, g - 123, facing);
             if (said !== undefined) {
               vs.tint.frames++;
