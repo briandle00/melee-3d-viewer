@@ -1472,6 +1472,8 @@ export class FxWorld {
   /** a spawn none of whose pieces drew, and why (the parity harness's) */
   unplaced: ((frame: number, gfx: number, by: string | null, why: string) => void) | null = null;
 
+  /** the spawn's carrier (efLib_CreateGenerator_AppSRT_SetPos), for the generator piece after it */
+  private carrier: { key: string; part: number; p: number[] } | null = null;
   /** one piece (placePieces): true when it drew, else why not */
   private placePiece(e: TrackEvent, a: ActorFrame | undefined, spawnId: number | null, key: string | null): true | string {
     const v = e.map((x) => (typeof x === "number" ? x : 0));
@@ -1481,13 +1483,30 @@ export class FxWorld {
     const callback = String(e[19] ?? ""), lifetime = v[20], mirrored = v[24] === 1;
     const fileNo = Math.floor(id / 1000);
     const bank = fileNo === 30 ? this.stageBank?.() ?? null : this.banks.get(fileNo) ?? null;
-    if (how === "carrier") return "a carrier";
+    if (Number(e[5]) === 0) this.carrier = null;
+    if (how === "carrier") {
+      // (efLib_CreateGenerator_AppSRT_SetPos: an effect of its own carries the generator's transform - its root
+      // placed each update at the fighter's joint plus its parameters, efLib_Cb_AccumOffset_FromParams)
+      this.carrier = callback === "AccumOffset_FromParams" && a && part >= 0 ? { key: a.key, part, p: [v[21], v[22], v[23]] } : null;
+      return "a carrier";
+    }
     if (!bank) return `effect file ${fileNo} not loaded`;
     // what it goes with: the fighter's joint (the track names it by its place
     // in the fighter's joint list, fp->parts, as jointWorld takes it - not a
     // named part), or the item
     let follow: (() => Float32Array | null) | null = null;
-    if (a && part >= 0) {
+    const carrier = this.carrier;
+    if (!isModel && carrier && a && carrier.key === a.key) {
+      // (on the carrier's root: no turn, at the joint's place (lb_8000B1CC) plus the parameters, in float32)
+      const m = new Float32Array(16), f32 = Math.fround;
+      follow = () => {
+        const w = this.jointWorld(carrier.key, carrier.part);
+        if (!w) return null;
+        m.fill(0); m[0] = m[5] = m[10] = m[15] = 1;
+        m[12] = f32(w[12] + carrier.p[0]); m[13] = f32(w[13] + carrier.p[1]); m[14] = f32(w[14] + carrier.p[2]);
+        return m;
+      };
+    } else if (a && part >= 0) {
       follow = () => this.jointWorld(a.key, part);
     } else if (e.length >= 31 && v[29] >= 0 && v[30] >= 0 && how !== "place" && how !== "srt") {
       // (a generator - or a model - on an item's joint, which a newer track names: the joint's own turn and place,
