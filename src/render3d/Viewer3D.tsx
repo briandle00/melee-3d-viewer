@@ -49,6 +49,7 @@ import { copiesFromReplay, HAT_JOINT, KIRBY, KIRBY_ITEMS, KirbyCopy, KirbyHat, p
 import { onAngelPlatform, runNumber, shineAt, SHY_GUY } from "~/common/effects";
 import { ActorFrame, FxWorld, type FxSnapshot, type LearnedFx, type LearnedPiece, NO_WORLD, stepThrough } from "./fx/world";
 import { Checkpoints, jumpTo, type Kept } from "./fx/checkpoints";
+import { stateAge } from "./stateage";
 import { buildParticles } from "./fx/draw";
 import { srtApply } from "./fx/particles";
 import { Before, hitSparks, powershielded } from "./fx/contact";
@@ -4575,13 +4576,6 @@ function drawStand(r: Renderer, stand: Prop, st: PlayerState, scale: number, sha
 
 /** how many frames a fighter has been in its present state (0 on the frame
  *  it began), from the replay: the entry's states keep no count of their own */
-function stateAge(data: ReplayData, fno: number, player: number, nana: boolean): number {
-  const at = (g: number) => { const p = data.frames[g]?.players[player]; return nana ? p?.nanaState : p?.state; };
-  const s = at(fno)?.actionStateId;
-  let g = fno;
-  while (g > 0 && fno - g < 600 && at(g - 1)?.actionStateId === s) g--;
-  return fno - g;
-}
 
 // The angel platform under a fighter coming back after a lost stock, at its
 // own animation (it loops), sized for the fighter; without PlCo.dat a pale
