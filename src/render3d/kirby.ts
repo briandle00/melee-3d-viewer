@@ -62,6 +62,9 @@ export interface KirbyHat {
   /** a colored hat's face: the textures turned with Kirby's own (its
    *  symbol's +8: ftKb_Init_UnkCallbackPairs0_1, face.ts) */
   face?: FaceTextures | null;
+  /** the skeleton whose envelope matrices its joints that are his were given (poseSkin) */
+  boundTo?: Skeleton | null;
+  boundMap?: number[] | null;
   /** Yoshi's copy: the hat with the animations his moves put on it (its
    *  tongue: the copy data's slots 1-3, HSD_JObjAddAnimAll on the hat), by slot */
   anims?: (Prop | null)[];
@@ -246,6 +249,15 @@ export function poseSkin(hat: KirbyHat, kirby: Skeleton, quats: HatQuats | null,
     hat.parts = hatJointParts(sk.n, hat.mask ?? 0);
   }
   const map = hat.map ?? Array.from({ length: sk.n }, (_, i) => i);
+  // (the hat's joints that are his are his own JObjs to the game's envelopes: a mesh weighting two of them blends
+  // his joints' matrices with HIS envelope matrices (PlKb<color>.dat's), not the copy file's - Mewtwo's hat keeps
+  // other ones for its joints 31 and 32 - SetupEnvelopeModelMtx / ftPartsSetupEnvelopeMtx: MTXConcat(jp->mtx,
+  // jp->envelopemtx), HSD_MtxScaledAdd)
+  if (hat.map && (hat.boundTo !== kirby || hat.boundMap !== hat.map)) {
+    hat.boundTo = kirby;
+    hat.boundMap = hat.map;
+    map.forEach((j, h) => { if (j >= 0 && j < kirby.n) sk.useInvBind(h, kirby.invBindOf(j)); });
+  }
   sk.resetPose();
   sk.clearQuats();
   map.forEach((j, h) => {

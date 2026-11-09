@@ -373,6 +373,18 @@ export class Skeleton {
     return [this.rest[o], this.rest[o + 1], this.rest[o + 2]];
   }
 
+  /** a joint's envelope matrix (jobj->envelopemtx: its inverse bind), or null */
+  invBindOf(j: number): Mat | null {
+    return this.invBind[j] ?? null;
+  }
+  /** a joint's envelope matrix taken from another skeleton's joint (the matrices made from it follow at the next
+   *  update; a mesh whose node matrix is that joint's own takes it again) */
+  useInvBind(j: number, m: Mat | null) {
+    if (j < 0 || j >= this.n || !m || !this.invBind[j]) return;
+    this.invBind[j] = m;
+    for (const d of this.drawables) if (d.pobj.kind === "envelope" && d.node === 1 && d.nodeJoint === j) this.setupNode(d);
+  }
+
   /** every joint back to its Euler turn (none turned by a quaternion) */
   clearQuats() {
     this.quatOn.fill(0);
