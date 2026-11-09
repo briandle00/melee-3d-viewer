@@ -265,6 +265,8 @@ export interface ModelFx {
   /** its root's scale is its animation's times `scale`, set on the root itself each step (efLib_Cb_SetScaleRotY_FromFighter:
    *  HSD_JObjSetScale of the fighter root's scale times the effect root's, float32), not a parent's */
   rootScaleMul?: boolean;
+  /** a constrained root's turn as its last frame's constraint left it (JObjUpdateFunc 0x37), for the next */
+  held?: { turn: Float32Array | null };
   rootRotationZ?: boolean;
   /** held to the joint it is under by place and turn constraints (Prop.poseConstrained), not made its child */
   constrained?: boolean;
@@ -2120,7 +2122,7 @@ export class FxWorld {
     if (parent) {
       if (m.constrained) {
         pr.rootScaleSet = !!m.scaleSet;
-        pr.poseConstrained(age, parent, m.scale, false, age, m.underOrient?.() ?? null);
+        pr.poseConstrained(age, parent, m.scale, false, age, m.underOrient?.() ?? null, m.held ??= { turn: null });
         pr.rootScaleSet = false;
       } else pr.poseChild(age, parent, m.scale, false);
       if (m.secondChildOff) pr.hideSecondChild();
