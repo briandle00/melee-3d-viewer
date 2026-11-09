@@ -196,8 +196,26 @@ export function markFrame(external: number): number {
 const DEAD_LAST = 10, REBIRTH = 12, REBIRTH_WAIT = 13, WAIT = 14;
 const DEAD_UP_STAR = 4, DEAD_UP_STAR_ICE = 5, DEAD_UP_FALL = 6, DEAD_UP_FALL_ICE = 9;
 const CLIFF_CATCH = 252, DAMAGE_FLY_FIRST = 87, DAMAGE_FLY_LAST = 91;
-/** states entered without clearing the name tag's count (Ft_MF_SkipNametagVis) */
-const KEEPS_TAG = new Set([REBIRTH_WAIT, 253, 183, 184, 185, 191, 192, 193, 247, 248]);
+const SQUAT = 39, SQUAT_WAIT = 40;
+/** states entered without clearing the name tag's count (Ft_MF_SkipNametagVis): RebirthWait (ftCo_800D5600),
+ *  CliffWait, the DownBound / DownDamage states (ftCo_DownBound.c), FlyReflectWall / Ceil, JumpAerialF / B and
+ *  ItemScrewAir (ftCo_800CBAC4), DamageFall (ftCo_80090780: flags 0x18001), DownReflect (fn_800C7DC4: 0x18040) */
+const KEEPS_TAG = new Set([REBIRTH_WAIT, 253, 183, 184, 185, 191, 192, 193, 247, 248, 27, 28, 155, 38, 335]);
+/** a character's own states entered through ftCo_800CBAC4 too: Kirby's and Jigglypuff's aerial jumps
+ *  (ftCo_800D74A4: the jump table's state for the jump; Kirby's JumpAerialF1-F5 and F1Met-F5Met, Jigglypuff's
+ *  JumpAerialF1-F5), by internal character */
+const KEEPS_TAG_OWN = new Map<number, Set<number>>([
+  [4, new Set([341, 342, 343, 344, 345, 346, 347, 348, 349, 350])],
+  [15, new Set([341, 342, 343, 344, 345])],
+]);
+/** the states whose end goes to SquatWait through ftCo_800D638C (Ft_MF_SkipNametagVis, the count kept): Squat
+ *  (ftCo_Squat_Anim), AttackLw3 (ftCo_AttackLw3_Anim); Game & Watch's AttackLw3 (ftGw_AttackLw3_Anim), Samus's
+ *  bombs (ftSs_SpecialLw_IASA, ftSs_SpecialLwBomb_IASA), by internal character. Any other way in
+ *  (fn_800D62C4: Landing's ftCo_SquatWait_CheckInput) sets it to the idle count */
+const SQUAT_KEEPS = new Set([SQUAT, 57]);
+const SQUAT_KEEPS_OWN = new Map<number, Set<number>>([[24, new Set([345])], [13, new Set([341, 355])]]);
+const ownHas = (m: Map<number, Set<number>>, kind: number | undefined, s: number) =>
+  kind !== undefined && (m.get(kind)?.has(s) ?? false);
 /** states whose start sets the count to 1 (ThrownKirbyStar, ThrownCopyStar, YoshiEgg, KirbyYoshiEgg, BarrelWait,
  *  Barrel) */
 const TAG_AT_ONCE = new Set([290, 291, 277, 332, 293, 340]);
@@ -340,9 +358,17 @@ export class PlayerHud {
     prevState = -1;
     for (let i = 0; i < n; i++) {
       const s = st(i)?.actionStateId ?? prevState;
+      // (Fighter_procAnim steps it before the state's anim callback and the IASA proc can change the state: a
+      // state entered keeping the count has had the frame's step too)
+      if (count > 1 && i + FIRST_FRAME >= goFrame && !frozen(i)) count--; // (not while the intro holds the players still)
       if (s !== prevState) {
         const kb = Math.hypot(st(i)?.attackBasedXSpeed ?? 0, st(i)?.attackBasedYSpeed ?? 0);
-        if (s === WAIT || s === CLIFF_CATCH) count = tagIdle;
+        const kind = st(i)?.internalCharacterId;
+        // (Wait: ft_08A1's entry; CliffCatch: ftcliffcommon.c; Squat: ftCo_Squat_Enter)
+        if (s === WAIT || s === CLIFF_CATCH || s === SQUAT) count = tagIdle;
+        else if (s === SQUAT_WAIT) {
+          if (!SQUAT_KEEPS.has(prevState) && !ownHas(SQUAT_KEEPS_OWN, kind, prevState)) count = tagIdle;
+        }
         // (the launch's count from the frame the hit landed, the frame the
         // replay shows it: see game())
         else if (s >= DAMAGE_FLY_FIRST && s <= DAMAGE_FLY_LAST && kb >= tags.launchSpeed) count = tags.launch;
@@ -350,8 +376,8 @@ export class PlayerHud {
         // (Kirby's stars, Yoshi's eggs and the barrel set it to 1 as they start: ftCo_ThrownKirby.c inlineB2,
         // ftCo_YoshiEgg.c, ftkirbyyoshiegg.c, ftCo_Barrel_Enter, ftCo_BarrelWait.c)
         else if (TAG_AT_ONCE.has(s)) count = 1;
-        else if (!KEEPS_TAG.has(s)) count = 0;
-      } else if (count > 1 && i + FIRST_FRAME >= goFrame && !frozen(i)) count--; // (not while the intro holds the players still)
+        else if (!KEEPS_TAG.has(s) && !ownHas(KEEPS_TAG_OWN, kind, s)) count = 0;
+      }
       const gameFrame = i + FIRST_FRAME;
       // (a player with a nametag has it over the fighter the whole game: fn_802FCC44)
       this.tag[i] = (count === 1 || gameFrame < goFrame || nametag) && this.stocks[i] > 0 ? 1 : 0;
