@@ -13,7 +13,10 @@ import { gunzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { decodeTrack, decodeTrackFloats, readTrack } from "../src/render3d/trackcodec.ts";
+import { decodeTrack, decodeTrackFloats, readTrack, trackEvents } from "../src/render3d/trackcodec.ts";
+/** the compact form read, its pose lines (kept compact: TrackData.poses) made events again in the track's order */
+const readAll = (b: Uint8Array) => { const t = readTrack(b); return { ...t, events: trackEvents(t) }; };
+
 
 const python = (() => {
   for (const p of ["python3", "python"]) {
@@ -27,7 +30,7 @@ const want = JSON.parse(readFileSync(dir + "track-vtb2.json", "utf8"));
 decodeTrackFloats(want.events);
 
 test("a VTB2 track reads back to its events, bit for bit and in order", () => {
-  const got = readTrack(new Uint8Array(gunzipSync(vtb)));
+  const got = readAll(new Uint8Array(gunzipSync(vtb)));
   assert.equal(got.events.length, want.events.length);
   const kinds = new Set<string>();
   want.events.forEach((a: (number | string)[], i: number) => {
@@ -42,7 +45,7 @@ test("a VTB2 track reads back to its events, bit for bit and in order", () => {
 });
 
 test("the floats are the single's bits: a -0 stays one, the chain's values are the fighter's", () => {
-  const got = readTrack(new Uint8Array(gunzipSync(vtb)));
+  const got = readAll(new Uint8Array(gunzipSync(vtb)));
   const lm = got.events.find((e) => e[1] === "lm") as number[];
   assert.ok(Object.is(lm[lm.length - 2], -0));
   // every "fp" value is the value of the "fj" line of its frame and fighter
@@ -70,7 +73,8 @@ test("the floats are the single's bits: a -0 stays one, the chain's values are t
 });
 
 test("a gzipped VTB2 track is read by decodeTrack as a host sends it", async () => {
-  const got = await decodeTrack(vtb.buffer.slice(vtb.byteOffset, vtb.byteOffset + vtb.byteLength) as ArrayBuffer);
+  const read = await decodeTrack(vtb.buffer.slice(vtb.byteOffset, vtb.byteOffset + vtb.byteLength) as ArrayBuffer);
+  const got = { ...read, events: trackEvents(read) };
   assert.equal(got.events.length, want.events.length);
 });
 

@@ -11,12 +11,14 @@ import assert from "node:assert/strict";
 import { gunzipSync } from "node:zlib";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { decodeTrackFloats, readTrack } from "../src/render3d/trackcodec.ts";
+import { decodeTrackFloats, readTrack, trackEvents } from "../src/render3d/trackcodec.ts";
 import { LINK_JOINTS, ViewerTrack } from "../src/render3d/track.ts";
 
 const dir = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const json = () => JSON.parse(readFileSync(dir + "track-v3.json", "utf8"));
-const compact = () => readTrack(new Uint8Array(gunzipSync(readFileSync(dir + "track-v3.vtb"))));
+const compactRead = () => readTrack(new Uint8Array(gunzipSync(readFileSync(dir + "track-v3.vtb"))));
+// (its pose lines made events again, in order, for the comparisons with the JSON)
+const compact = () => { const t = compactRead(); return { ...t, events: trackEvents(t) }; };
 const f32 = (x: number) => Math.fround(x);
 
 test("a version 3 track's compact form reads back to its events, bit for bit and in order", () => {
