@@ -167,7 +167,11 @@ test("a follow-only transform's particle is drawn at the transform's place plus 
   const c = Math.fround(Math.cos(0.4)), n = Math.fround(Math.sin(0.4));
   const view = [c, 0, -n, 0, 0, 1, 0, 0, n, 0, c, 0, 0, 0, -50, 1];
   const axes = { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], view };
-  const q = quadOf(buildParticles(one, axes).data);
+  const built = buildParticles(one, axes);
+  // (drawn in the camera's space, psDispSubAppSRT's GX_PNMTX1: back into the world by the view's inverse to check)
+  assert.equal(built.batches[0].view, true);
+  const toWorld = (v: number[]) => [0, 1, 2].map((j) => [0, 1, 2].reduce((a, i) => a + view[j * 4 + i] * (v[i] - view[12 + i]), 0));
+  const q = quadOf(built.data).map(toWorld);
   const mid = [0, 1, 2].map((i) => (q[0][i] + q[2][i]) / 2);
   // (the camera's right is (c, 0, n), its up (0, 1, 0): the place moves 1 along the right and 2 up from the transform's)
   const want = [7 + c, 1 + 2, -3 + n];

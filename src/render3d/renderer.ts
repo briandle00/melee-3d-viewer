@@ -2510,13 +2510,16 @@ void main() {
   /** The game's particles: quads fx/draw.ts built (17 floats a vertex, four
    *  a quad), drawn batch by batch - each batch one texture and one blend. */
   drawParticles(data: Float32Array, batches: { sprite: { key: string; w: number; h: number; rgba: Uint8Array } | null;
-                additive: boolean; near?: boolean; zwrite: boolean; nozcomp: boolean; first: number; count: number }[]) {
+                additive: boolean; near?: boolean; zwrite: boolean; nozcomp: boolean; view?: boolean; first: number;
+                count: number }[]) {
     if (!batches.length) return;
     const gl = this.gl;
     const quads = data.length / (17 * 4);
     gl.useProgram(this.particleProg);
     // (an overlay's particles - the HUD's - through its camera)
-    gl.uniformMatrix4fv(this.ploc.uViewProj, false, this.overlayVP ?? this.viewProj);
+    const vp = this.overlayVP ?? this.viewProj;
+    let inView = false;
+    gl.uniformMatrix4fv(this.ploc.uViewProj, false, vp);
     gl.uniform1i(this.ploc.uTex, 0);
     gl.bindVertexArray(this.pvao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.pvbo);
@@ -2535,6 +2538,8 @@ void main() {
     gl.colorMask(true, true, true, true);
     gl.activeTexture(gl.TEXTURE0);
     for (const b of batches) {
+      // (a batch in the camera's space - psDispSubAppSRT's - through the pass's projection alone)
+      if (!!b.view !== inView) { inView = !!b.view; gl.uniformMatrix4fv(this.ploc.uViewProj, false, inView ? this.camProj : vp); }
       gl.bindTexture(gl.TEXTURE_2D, b.sprite ? this.spriteTexture(b.sprite, b.near) : this.white);
       if (b.additive) gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
       else gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
