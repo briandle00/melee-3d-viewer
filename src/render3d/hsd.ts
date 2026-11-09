@@ -12,6 +12,7 @@
  * own files, from your own disk, at runtime.
  */
 import { srt } from "./math";
+import { f32, madd } from "./gxmath";
 
 export interface Archive {
   data: DataView; // the data block (pointers are offsets into it)
@@ -923,12 +924,26 @@ export function sample(keys: Key[], t: number): number | null {
   const k = keys[lo];
   if (k.kind === 0) return k.p0;
   if (k.duration === 0) return k.p1;
-  const dt = Math.min(Math.max(t - k.time, 0), k.duration);
-  const u = dt / k.duration;
-  if (k.kind === 1) return k.p0 + (k.p1 - k.p0) * u;
-  // Hermite with per-frame slopes, as sysdolphin's splines are
-  const u2 = u * u, u3 = u2 * u, D = k.duration;
-  return k.p0 * (2 * u3 - 3 * u2 + 1) + k.p1 * (-2 * u3 + 3 * u2) + k.d0 * D * (u3 - 2 * u2 + u) + k.d1 * D * (u3 - u2);
+  const dt = f32(Math.min(Math.max(t - k.time, 0), k.duration));
+  // (in float32, as FObjUpdateAnim makes them in this -fp_contract on code: a line's slope (p1 - p0) / fterm once, then
+  // d0 * time + p0 fused; a curve by splGetHelmite)
+  if (k.kind === 1) return madd(f32(f32(k.p1 - k.p0) / f32(k.duration)), dt, k.p0);
+  return splGetHelmite(f32(1 / k.duration), dt, k.p0, k.p1, k.d0, k.d1);
+}
+
+/** splGetHelmite (spline.c): the Hermite curve with per-frame slopes, `fterm` 1 / the segment's frames (1.0 / fobj->fterm,
+ *  a double quotient rounded to a float), in float32 - each sum fusing its first product, as -fp_contract on code does */
+export function splGetHelmite(fterm: number, time: number, p0: number, p1: number, d0: number, d1: number): number {
+  const _1_T2 = f32(time * time);
+  const t2 = f32(fterm * fterm);
+  const t2_T = f32(_1_T2 * fterm);
+  const t3_T2 = f32(t2 * f32(_1_T2 * time));
+  const _2t3_T3 = f32(f32(2 * t3_T2) * fterm);
+  const _3t2_T2 = f32(f32(3 * _1_T2) * t2);
+  const a = f32(t3_T2 - t2_T);
+  const ends = madd(p0, f32(1 + f32(_2t3_T3 - _3t2_T2)), f32(p1 * f32(-_2t3_T3 + _3t2_T2)));
+  const start = madd(d0, f32(time + f32(a - t2_T)), ends);
+  return madd(d1, a, start);
 }
 
 /** a key list with the key last sampled (sample()) */
