@@ -1431,8 +1431,10 @@ export class FxWorld {
     let follow: (() => Float32Array | null) | null = null;
     if (a && part >= 0) {
       follow = () => this.jointWorld(a.key, part);
-    } else if (!isModel && e.length >= 31 && v[29] >= 0 && v[30] >= 0 && how !== "place" && how !== "srt") {
-      // (a generator on an item's joint, which a newer track names: the joint's own turn and place, "ij")
+    } else if (e.length >= 31 && v[29] >= 0 && v[30] >= 0 && how !== "place" && how !== "srt") {
+      // (a generator - or a model - on an item's joint, which a newer track names: the joint's own turn and place,
+      // "ij"; a model made a child of it turns with it: efalt.c 0x498, Kirby's hammer's effect, efLib_Create_AttachChild
+      // on it_80272C90's joint)
       const item = v[29], joint = v[30];
       if (this.itemAt.has(item)) follow = () => this.itemJointWorld(item, joint);
     } else if (spawnId !== null && how !== "place" && how !== "srt") {
