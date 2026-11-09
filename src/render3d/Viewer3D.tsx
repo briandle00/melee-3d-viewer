@@ -70,6 +70,7 @@ import { PoseLog, poseLogCommand } from "./poselog";
 import type { ColAnimTables, Tint as ColTint } from "./fx/colanim";
 import { BgFlash, FLASH_CAMERA, flashQuad } from "./fx/bgflash";
 import { itemAnimation, itemAnimationIndex } from "./item-animation";
+import { illusionCopyAt } from "./illusion";
 import { samusBombClocks, samusBombRotation } from "./item-facing";
 import { shyGuyAnim, shyGuyClock } from "./shyguy";
 import { THUNDERS, thunderScaleY } from "./thunder";
@@ -5116,7 +5117,7 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
   // drawn after it, itfoxillusion.c it_8029CD18)
   const illusion = ILLUSIONS.has(it.typeId);
   if (!illusion || it.state !== 2) drawProp(r, art);
-  const copy = illusion ? illusionCopyAt(data, fs, it, frame) : null;
+  const copy = illusion ? illusionCopy(data, fs, it, frame) : null;
   if (copy) {
     art.prop.poseScaled(copy[0], copy[1], 0, [scale, scale, scale], turn ? turn[1] : rotationY);
     drawProp(r, art);
@@ -5126,48 +5127,13 @@ function drawArticle(r: Renderer, data: ReplayData, fs: Map<string, Fighter>, it
 
 /** Fox's Illusion and Falco's Phantasm (itfoxillusion.c) */
 const ILLUSIONS = new Set([0x38, 0x39]);
-/** Fox's (and Falco's) SpecialSStart, SpecialS, SpecialSEnd, SpecialAirSStart, SpecialAirS, SpecialAirSEnd */
-const FOX_S_START = 347, FOX_S = 348, FOX_S_AIR_START = 350, FOX_S_AIR = 351, FOX_S_LAST = 352;
-
-/** where the Illusion's copy stands, or null before it is made. Its anim callback (itFoxillusion_UnkMotion0_Anim,
- *  states 0 and 1) makes it once its owner's move variable 2 is 2 (it_8029CD78: the model again, at rest, the
- *  item's turn and scl), and each frame's phys puts it at the owner's ghostEffectPos[3] - his place after each
- *  dash frame's phys (ftFox_SpecialS_SetPhys: SpecialS, SpecialAirS) four places back, all four his place as
- *  the start began (ftFox_SpecialS_SetVars) */
-function illusionCopyAt(data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number): [number, number] | null {
+/** where the Illusion's copy stands (illusion.ts), or null before it is made */
+function illusionCopy(data: ReplayData, fs: Map<string, Fighter>, it: ReplayItem, frame: number): [number, number] | null {
   const fi = ownerOf(data, fs, it, frame);
   if (!fi) return null;
-  const stAt = (g: number) => data.frames[g]?.players[it.owner]?.state;
-  const itemAt = (g: number) => data.frames[g]?.items?.find((q) => q.spawnId === it.spawnId);
-  // (made: the first frame of its life its owner's script has set variable 2 to 2 by his state's counter)
-  let made = false;
-  for (let g = frame; g >= 0 && frame - g < 120; g--) {
-    const q = g === frame ? it : itemAt(g);
-    if (!q) break;
-    const st = stAt(g);
-    if (!st || q.state > 1 || (st.actionStateId !== FOX_S && st.actionStateId !== FOX_S_AIR)) continue;
-    let v = 0;
-    for (const e of fi.scriptFor(st.actionStateId)) {
-      if (e.kind === "cmdVar" && e.index === 2 && e.frame <= st.actionStateFrameCounter + 0.001) v = e.value;
-    }
-    if (v === 2) { made = true; break; }
-  }
-  if (!made) return null;
-  // (the dash frames' places, the latest first, back to the start)
-  const back: [number, number][] = [];
-  for (let g = frame; g >= 0 && frame - g < 120 && back.length < 4; g--) {
-    const st = stAt(g);
-    if (!st || st.actionStateId < FOX_S_START || st.actionStateId > FOX_S_LAST) break;
-    if (st.actionStateId === FOX_S || st.actionStateId === FOX_S_AIR) back.push([st.xPosition, st.yPosition]);
-    else if (st.actionStateId === FOX_S_START || st.actionStateId === FOX_S_AIR_START) {
-      // (the start's first frame)
-      let e = g;
-      while (e > 0 && stAt(e - 1)?.actionStateId === st.actionStateId) e--;
-      const s0 = stAt(e)!;
-      while (back.length < 4) back.push([s0.xPosition, s0.yPosition]);
-    }
-  }
-  return back.length >= 4 ? back[3] : null;
+  return illusionCopyAt((g) => data.frames[g]?.players[it.owner]?.state,
+                        (g) => (g === frame ? it : data.frames[g]?.items?.find((q) => q.spawnId === it.spawnId))?.state,
+                        (s) => fi.scriptFor(s), frame);
 }
 
 /** Mr. Game & Watch's torch (forward smash, itgamewatchfire.c) */
