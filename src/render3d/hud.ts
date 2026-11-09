@@ -730,7 +730,7 @@ export class Hud {
         // (its entry animations are done by frame 31)
         const end = m.animLength(v.anim);
         const rest = digitRest(v.animFrame, v.hitAnimFrame, end);
-        if (!m.same(`${v.percent}|${v.layout.frame.join()}|${v.color}|${v.layout.dx}|${v.layout.shown}|${v.anim}|${Math.min(v.animFrame, 31)}|${v.spaced}|${v.offset.join()}|${rest}`)) {
+        if (!m.same(`${v.percent}|${v.layout.frame.join()}|${v.color}|${v.layout.dx}|${v.layout.shown}|${v.anim}|${Math.min(v.animFrame, 31)}|${v.spaced}|${v.offset.join()}|${rest}|${v.scatter}`)) {
           m.begin();
           // (the digits at their stored places: the animation's last running frame's - see digitRest)
           if (rest) m.anim(v.anim, end - 1);
