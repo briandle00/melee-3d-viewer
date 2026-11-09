@@ -25,7 +25,7 @@ import { AObj, Archive, Image, JObj, MatAnim, loadAnimJoint, loadJoint, loadMatA
 import { applyMatAnim, Skeleton } from "./skeleton";
 import { ident, lookAt, Mat, mul } from "./math";
 import { gameProjection, gameView } from "./camera";
-import { madd, type Mtx } from "./gxmath";
+import { C_MTXOrtho, madd, projectionToGL, type Mtx } from "./gxmath";
 import { atan2f } from "./fx/gamemath";
 import { gameSrt } from "./prop";
 import type { PlayerState, ReplayData } from "../common/types";
@@ -429,6 +429,7 @@ export class Hud {
   private flatProj = new Float32Array(16);
   private flatView = ident(new Float32Array(16));
   private picProj = new Float32Array(16);
+  private picGx = new Float32Array(16);
   /** what the checks read: the last frame drawn */
   last: { percents: { player: number; percent: number; hidden: boolean }[]; timer: string | null; tags: number[];
           magnified: number[]; arrows: number[]; stocks: number[][] } = { percents: [], timer: null, tags: [], magnified: [], arrows: [], stocks: [] };
@@ -877,12 +878,19 @@ export class Hud {
    *  camera bone, over the stage's colors for where it is (ifmagnify.c) */
   private picture(r: Renderer, pic: RenderTarget, a: HudActor) {
     const [bx, by, bz] = a.bone!;
-    const half = 6.4 * a.zoom;
-    // (drawn upside down: the texture's first row is the picture's top)
-    ortho(this.picProj, -half, half, half, -half, 0.1, 32768);
-    const view = lookAt(new Float32Array(16), [bx, by, bz + 300], [bx, by, bz]);
+    // (ifMagnify_802FBBDC, in float32: the camera's ortho rect - ifMagnify_802FC618 made it 0.1f times the 64 by 64
+    // picture each way - times the fighter's size over 8 (ftLib_80086B80 / 8.0f), HSD_CObjSetOrtho; its interest the
+    // camera box's bone (ftLib_80086B90), its eye there at z 300 (not 300 in front of the bone); the projection
+    // C_MTXOrtho's, the view HSD_CObjSetupViewingMtx's. Drawn upside down: the texture's first row is the top)
+    const f = Math.fround;
+    const half = f(f(0.1) * PIC), scale = f(a.zoom);
+    const top = f(half * scale), bottom = f(f(-half) * scale), left = f(f(-half) * scale), right = f(half * scale);
+    C_MTXOrtho(this.picGx, top, bottom, left, right, 0.1, 32768);
+    projectionToGL(this.picGx, this.picProj);
+    for (const k of [1, 5, 9, 13]) this.picProj[k] = -this.picProj[k];
+    const view = gameView(new Float32Array(16), [bx, by, 300], [bx, by, bz]);
     const bg = this.background(a.st.xPosition, a.st.yPosition);
-    r.overlay(this.picProj, view, pic, [bg[0], bg[1], bg[2], 1], true);
+    r.overlay(this.picProj, view, pic, [bg[0], bg[1], bg[2], 1], true, this.picGx);
     a.draw();
     r.endOverlay();
   }

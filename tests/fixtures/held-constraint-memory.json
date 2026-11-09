@@ -1,0 +1,493 @@
+{
+"about": "A held item's tied joint in the game's memory (capture of a public bot replay, Dolphin's MEM1 after the frame): the holder's joints from the target part up to the root (jobj->mtx, 3x4 row major, float bits), the tied joint's matrix and its rotate. Ness's bat in his forward smash (bot-ness_ics game frame 204, target part 42, the tied joint the item's root) and Falco's blaster in his neutral special (bot-fox_falco game frame 3983, target part 61, the tied joint 1 under the item's root, 0.85 its size).",
+"cases": [
+{
+"name": "bat",
+"chain": [
+{
+"flags": 9,
+"mtx": [
+"3f3d8dfb",
+"bf639b33",
+"bf3d9722",
+"c26f9c81",
+"be025459",
+"3f5f0d25",
+"bf22a270",
+"40d9a6b1",
+"3f57d8e3",
+"3ec81242",
+"3ebd1b52",
+"bf363250"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"bf8e3592",
+"3e921010",
+"3f4186d6",
+"c26cabc4",
+"bd9cc2b6",
+"bf8728c1",
+"be76d1d9",
+"40d6b698",
+"3f017883",
+"be66c03d",
+"3f552ed1",
+"bf940265"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"bfa74034",
+"bebf5ff9",
+"be4d3cc4",
+"c264f08c",
+"3f194f38",
+"bf4acf66",
+"bee0bf1e",
+"40b8d7ea",
+"3a940925",
+"bef713c8",
+"3f6038e4",
+"bf95b2a6"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"bf98a1de",
+"beb4d1d7",
+"be4d3cc4",
+"c25c032b",
+"3f07a24e",
+"bf4d3122",
+"bee0bf1e",
+"40991c76",
+"bbf07f36",
+"bef70c9b",
+"3f6038e4",
+"bf93f086"
+]
+},
+{
+"flags": 8,
+"mtx": [
+"3ef58e99",
+"3f5555fa",
+"be8cb3b7",
+"c25c032b",
+"bdee85f3",
+"be7ff382",
+"bf76130a",
+"40991c74",
+"bf5ea617",
+"3efc6c65",
+"bcbaf42e",
+"bf93f086"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"bef58e96",
+"3e8cb3b1",
+"bf5555fc",
+"c25e6315",
+"3dee861d",
+"3f76130b",
+"3e7ff368",
+"409f1aa2",
+"3f5ea617",
+"3cbaf32c",
+"befc6c65",
+"bcce4400"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"bf11ad37",
+"3ed0fac7",
+"bf36bf0d",
+"c2630ead",
+"3e91385f",
+"3f698a20",
+"3e974d39",
+"4053d959",
+"3f45973a",
+"bd0c8abc",
+"bf228846",
+"3efffffa"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"becfdb5e",
+"3d9992b2",
+"3f692a7d",
+"c2630ead",
+"3e033a4a",
+"3f7dcfc7",
+"bcc8c01a",
+"4053d959",
+"bf67a4aa",
+"3ddaabbe",
+"bed30011",
+"3efffffa"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"b36f0965",
+"00000000",
+"3f800000",
+"c2630ead",
+"00000000",
+"3f800000",
+"00000000",
+"407c86f8",
+"bf800000",
+"80000000",
+"b36f0965",
+"3efffffa"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"b36f0965",
+"00000000",
+"3f800000",
+"c2630ead",
+"00000000",
+"3f800000",
+"00000000",
+"407c86f8",
+"bf800000",
+"80000000",
+"b36f0965",
+"3efffffa"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"b36f0965",
+"00000000",
+"3f800000",
+"c2700000",
+"00000000",
+"3f800000",
+"00000000",
+"38d1b717",
+"bf800000",
+"80000000",
+"b36f0965",
+"00000000"
+]
+},
+{
+"flags": 268763278,
+"mtx": [
+"b36f0965",
+"00000000",
+"3f800000",
+"c2700000",
+"80000000",
+"3f800000",
+"00000000",
+"38d1b717",
+"bf800000",
+"80000000",
+"b36f0965",
+"00000000"
+]
+}
+],
+"parent": null,
+"mtx": [
+"3f09a913",
+"bf10a7cf",
+"bf20306d",
+"c26f9c81",
+"bd14ef2f",
+"3f39d767",
+"bf2fd1cd",
+"40d9a6b1",
+"3f57a2f8",
+"3ec8bcf8",
+"3ebd58ed",
+"bf363250"
+],
+"rot": [
+"3f508904",
+"bf80341e",
+"bd8a45b1"
+]
+},
+{
+"name": "blaster",
+"chain": [
+{
+"flags": 9,
+"mtx": [
+"3d8c26dc",
+"3ceb0846",
+"3f853096",
+"c205a873",
+"bf7f40b3",
+"3e27d64f",
+"3d25059f",
+"40f69386",
+"be2070bb",
+"bf7e5bfa",
+"3c8f42d3",
+"3f23cce5"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"3f9220f9",
+"bdb46061",
+"3d9a849d",
+"c209d2d2",
+"3d117c7f",
+"be3aa55c",
+"bf8c635e",
+"40fc58bc",
+"3d95ff67",
+"3f8b9adc",
+"be307b40",
+"3f1e9b08"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"3f8269e4",
+"3ecb9da4",
+"beb1c431",
+"c213bcb9",
+"3e1cd194",
+"bf72b7e1",
+"bf0fb009",
+"40f00fdb",
+"beffd307",
+"3ee54830",
+"bf614853",
+"3fec86f8"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"3f685aef",
+"bf0f3282",
+"beb1c431",
+"c21ba560",
+"bf2c9c58",
+"bf2ed53d",
+"bf0fb009",
+"410f8818",
+"3d935ae5",
+"3f2801ee",
+"bf614853",
+"3fd87646"
+]
+},
+{
+"flags": 8,
+"mtx": [
+"bf3025fe",
+"bf294e29",
+"bf0c0582",
+"c21ba560",
+"bdc50b4f",
+"3f418de5",
+"bf4b0c63",
+"410f8818",
+"3f5a51ed",
+"bee587ba",
+"bf07e1c8",
+"3fd87646"
+]
+},
+{
+"flags": 9,
+"mtx": [
+"3f302601",
+"3f0c0582",
+"3f294e25",
+"c217d5a5",
+"3dc50b72",
+"3f4b0c5d",
+"bf418dea",
+"4111ece1",
+"bf5a51ea",
+"3f07e1d0",
+"3ee587b3",
+"3f023a9f"
+]
+},
+{
+"flags": 268435465,
+"mtx": [
+"3f7c13fd",
+"3e469e9a",
+"3ee68fa7",
+"c216c48e",
+"be23b103",
+"3f8a8123",
+"bdeea899",
+"40f7ca56",
+"beed52a5",
+"3d1f3b23",
+"3f7f2f2a",
+"be0b1570"
+]
+},
+{
+"flags": 268435465,
+"mtx": [
+"3f8ab7f4",
+"bdbbb19f",
+"3e289b64",
+"c2165a3c",
+"3d937117",
+"3f8b7803",
+"3e07ceb0",
+"40d049ca",
+"be3253e6",
+"bdf58783",
+"3f8a2cbe",
+"3435cc72"
+]
+},
+{
+"flags": 268435465,
+"mtx": [
+"3f83024b",
+"beb6670d",
+"be40fa2f",
+"c2165a3c",
+"3ecc475a",
+"3f77e5b3",
+"3eac32ca",
+"40d049ca",
+"3d695e3c",
+"bec338ad",
+"3f83de87",
+"3435cc72"
+]
+},
+{
+"flags": 268435465,
+"mtx": [
+"b383785e",
+"00000000",
+"3f8ccccd",
+"c217623c",
+"00000000",
+"3f8ccccd",
+"00000000",
+"40cc29ca",
+"bf8ccccd",
+"80000000",
+"b383785e",
+"3445348d"
+]
+},
+{
+"flags": 268435465,
+"mtx": [
+"b383785e",
+"00000000",
+"3f8ccccd",
+"c20a2f09",
+"00000000",
+"3f8ccccd",
+"00000000",
+"411214e5",
+"bf8ccccd",
+"80000000",
+"b383785e",
+"00000000"
+]
+},
+{
+"flags": 268435465,
+"mtx": [
+"b383785e",
+"00000000",
+"3f8ccccd",
+"c20a2f09",
+"00000000",
+"3f8ccccd",
+"00000000",
+"38d1b717",
+"bf8ccccd",
+"80000000",
+"b383785e",
+"00000000"
+]
+},
+{
+"flags": 268763534,
+"mtx": [
+"b383785e",
+"00000000",
+"3f8ccccd",
+"c20a2f09",
+"80000000",
+"3f8ccccd",
+"00000000",
+"38d1b717",
+"bf8ccccd",
+"80000000",
+"b383785e",
+"00000000"
+]
+}
+],
+"parent": [
+"b34b2e63",
+"00000000",
+"3f59999a",
+"c20a2f09",
+"80000000",
+"3f59999a",
+"00000000",
+"38d1b717",
+"bf59999a",
+"80000000",
+"b34b2e63",
+"00000000"
+],
+"mtx": [
+"3d3cd6ac",
+"3c8615de",
+"3f593d53",
+"c205a873",
+"bf568920",
+"3e0ac63b",
+"3d2fc831",
+"40f69386",
+"be09b2bb",
+"bf56c6a3",
+"3cc069f7",
+"3f23cce5"
+],
+"rot": [
+"3c9dfd77",
+"bd5e4597",
+"bfb4b252"
+]
+}
+]
+}

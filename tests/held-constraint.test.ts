@@ -100,3 +100,34 @@ test("a fighter's parts with a gap in its part list (Kirby's hats) map to its mo
     setPartSkips({});
   }
 });
+
+// (the game's own numbers: tests/fixtures/held-constraint-memory.json, the capture's memory after the frame)
+import fs from "node:fs";
+import { heldTurn } from "../src/render3d/cns.ts";
+const MEM = JSON.parse(fs.readFileSync(new URL("./fixtures/held-constraint-memory.json", import.meta.url), "utf8"));
+const fromHex = (h: string) => new Float32Array(new Uint32Array([parseInt(h, 16)]).buffer)[0];
+const bitsOf = (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0];
+const ulpsUp = (x: number, k: number) => new Float32Array(new Int32Array([new Int32Array(new Float32Array([x]).buffer)[0] + k]).buffer)[0];
+
+for (const c of MEM.cases) {
+  const chain = c.chain.map((j: { flags: number; mtx: string[] }) => ({ flags: j.flags, gl: mtxToGL(new Float32Array(j.mtx.map(fromHex)), new Float32Array(16)) }));
+  const model: CnsModel = { world: (j) => chain[j]?.gl ?? null, parent: (j) => (j + 1 < chain.length ? j + 1 : -1), flags: (j) => chain[j]?.flags ?? 0 };
+  const want = new Float32Array(c.mtx.map(fromHex));
+  const parent = c.parent ? mtxToGL(new Float32Array(c.parent.map(fromHex)), new Float32Array(16)) : null;
+
+  test(`the game's ${c.name}: its turn taken back from its matrix (HSD_MtxGetRotation, 0x37), bit for bit`, () => {
+    const t = heldTurn(mtxToGL(want, new Float32Array(16)), parent);
+    assert.deepEqual(Array.from(t).map(bitsOf), c.rot.map((h: string) => parseInt(h, 16)));
+  });
+
+  test(`the game's ${c.name}: its matrix from its holder's joints, each axis's length its own matrix's, bit for bit`, () => {
+    // (the lengths HSD_MtxColMag found in the tied joint's matrix as made: its scale, within a unit in the last place,
+    // from the turn the frame before - the game's own run of frames gives these; the rest is the constraints' math)
+    const lengths: Record<string, number[]> = { bat: [ulpsUp(1, 0), ulpsUp(1, 1), ulpsUp(1, 1)],
+                                                blaster: [ulpsUp(f(0.85), -1), ulpsUp(f(0.85), -1), ulpsUp(f(0.85), 1)] };
+    const m = new Float32Array(12);
+    lengths[c.name].forEach((k, i) => { m[i * 5] = k; });
+    assert.ok(resolvePositionOrientation(m, model, 0));
+    assert.deepEqual(Array.from(m).map(bitsOf), Array.from(want).map(bitsOf));
+  });
+}

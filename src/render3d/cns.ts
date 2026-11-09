@@ -12,10 +12,14 @@
  *    parent's, each column a unit one) up to the root, whose own matrix is taken. The fighter's joints are
  *    scaled unevenly on the way (ftData's scales), so this is not its world matrix's columns made unit ones;
  *    other targets give their world matrix's columns, unit ones times the joint's lengths.
- * The matrix is left so (no update makes it again from the pose): the joints under it are made on it.
- * In float32 in the game's order (gxmath.ts).
+ * The matrix is left so (no update makes it again from the pose): the joints under it are made on it. And the joint's
+ * turn is taken back from it (JObjUpdateFunc's 0x37: HSD_MtxGetRotation of it against its parent's), which the next
+ * frame's HSD_JObjMakeMatrix makes its matrix from - so each axis's length the constraint keeps next frame comes from
+ * this frame's turn (heldTurn), and an item held from its pick-up on (it_802742F4 lays the file's rest pose first)
+ * has its matrix from that whole run of frames. In float32 in the game's order (gxmath.ts, fx/gamemath.ts).
  */
-import { HSD_MtxColMag, HSD_MtxInverseConcat, PSMTXConcat, PSVECMag, f32, mtxFromGL, type Mtx } from "./gxmath";
+import { HSD_MtxColMag, HSD_MtxInverseConcat, PSMTXConcat, PSVECMag, f32, fmuls, frsqrte, mtxFromGL, nmsub, sqrtf, type Mtx } from "./gxmath";
+import { atan2f, atanf, cosf } from "./fx/gamemath";
 import { JOBJ } from "./hsd";
 import { partSkips, partToModelJoint } from "./parts";
 
@@ -107,4 +111,64 @@ export function fighterCnsModel(internalId: number, world: Float32Array, parent:
       return j < 0 ? 0 : flags[j] ?? 0;
     },
   };
+}
+
+const FLT_MIN = f32(1.17549435e-38), HALF_PI = f32(Math.PI / 2);
+
+/** lbRefract_80022DF8: 1 / sqrt(x) as the console makes it - frsqrte and three single-precision Newton steps */
+function rsqrtSteps(x: number): number {
+  if (!(x > 0)) return x ? NaN : Infinity;
+  let g = frsqrte(x);
+  for (let k = 0; k < 3; k++) g = f32(fmuls(0.5, g) * nmsub(fmuls(g, g), x, 3));
+  return g;
+}
+
+/** the game's asinf: atanf(x / sqrt(1 - x * x)) */
+function asinf(x: number): number {
+  return atanf(f32(x * rsqrtSteps(nmsub(x, x, 1))));
+}
+
+/** HSD_MtxGetRotation's calcVal: atan2f, or a quarter turn when x is (next to) 0 */
+function calcVal(x: number, y: number): number {
+  if (Math.abs(x) <= FLT_MIN) return y >= 0 ? HALF_PI : -HALF_PI;
+  return atan2f(y, x);
+}
+
+/** HSD_MtxGetRotation: the x, y, z turn of a matrix (its columns' lengths taken out) into `out` */
+export function HSD_MtxGetRotation(m: Mtx, out: number[] | Float32Array): number[] | Float32Array {
+  const len = (c: number) => sqrtf(f32(f32(f32(m[c] * m[c]) + f32(m[4 + c] * m[4 + c])) + f32(m[8 + c] * m[8 + c])));
+  const l0 = len(0);
+  if (!(l0 < FLT_MIN)) {
+    const l1 = len(1);
+    if (!(l1 < FLT_MIN)) {
+      const l2 = len(2);
+      if (!(l2 < FLT_MIN)) {
+        const t = f32(f32(-m[8]) / l0);
+        out[1] = t >= 1 ? HALF_PI : t <= -1 ? -HALF_PI : asinf(t);
+        if (cosf(out[1]) >= FLT_MIN) {
+          out[0] = calcVal(f32(m[10] / l2), f32(m[9] / l1));
+          out[2] = calcVal(m[0], m[4]);
+          return out;
+        }
+        out[0] = calcVal(m[5], m[1]);
+        out[2] = 0;
+        return out;
+      }
+    }
+  }
+  out[0] = out[1] = out[2] = 0;
+  return out;
+}
+
+const L = new Float32Array(12), PW = new Float32Array(12);
+/** the turn a tied joint is left with (JObjUpdateFunc's 0x37 after the constraints): HSD_MtxGetRotation of its matrix
+ *  `world` against its parent's (`parent`, null for a root: the item's root has no parent in the game, its place being
+ *  its own translate, which the turn does not see), both column-major 4 x 4s */
+export function heldTurn(world: ArrayLike<number>, parent: ArrayLike<number> | null): Float32Array {
+  mtxFromGL(world, L, 0);
+  if (parent) {
+    mtxFromGL(parent, PW, 0);
+    HSD_MtxInverseConcat(PW, L, L);
+  }
+  return HSD_MtxGetRotation(L, new Float32Array(3)) as Float32Array;
 }
