@@ -129,7 +129,7 @@ test("a quad under a transform is sized by the view it is drawn through (the sta
   // the renderer hands the mirror pass its camera's view and projection (beginMirror), so its particles are
   // sized as the game's mirror camera draws them
   const src = readFileSync(new URL("../src/render3d/renderer.ts", import.meta.url), "utf8");
-  assert.match(src, /beginMirror\(\): \{ right: number\[\]; up: number\[\]; view: Mat; viewProj: Mat \}/);
+  assert.match(src, /beginMirror\([^)]*\): \{ right: number\[\]; up: number\[\]; view: Mat; viewProj: Mat \}/);
 });
 
 import { drawPoint, followMatrix } from "../src/render3d/fx/appsrt.ts";
