@@ -40,6 +40,8 @@ const POSE: Record<string, [number, number, number]> = {
   fj: [3, 1, 2], fp: [3, 1, 2], wf: [3, 1, 2], jp: [1, 1, -1], wi: [1, 1, -1], sp: [1, 1, 0], ws: [1, 1, 0], lm: [2, 2, -1],
   // (track version 3: the parts a quaternion turns, a chain link's joints below its root)
   fq: [3, 1, 2], lj: [1, 2, -1],
+  // (a fighter's costume hat's joints: Jigglypuff's ribbons)
+  fh: [3, 1, 2],
 };
 /** a type whose values are those of another's line of the same frame and head */
 const DERIVE: Record<string, string> = { fp: "fj" };

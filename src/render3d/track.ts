@@ -61,6 +61,11 @@
  *       x, y, z (part 0: the quaternion and the scale). A part going from one
  *       to the other is sent whole in the line it goes to: of "fj" and "fq",
  *       the part's latest line is the one that lays it (quatTurned)
+ *   ["fh", f, port, sub, character, (joint, mask, values)...]
+ *       a fighter's costume hat's joints below its root as the game posed
+ *       them (Jigglypuff's ribbons, swung by ftCo_8009DC54's chains), by
+ *       preorder index in the hat's tree, the nine values of "jp"; a joint not
+ *       yet sent is at its file's rest
  *   ["lj", f, spawn_id, (joint, link, mask, values)...]
  *       a chain link's joints below its root ("lm" has the root's matrix),
  *       by preorder index in the link's tree (1 the root's first child), the
@@ -131,6 +136,7 @@ const POSES: Record<string, { key: number; width: number; out: boolean; links: b
   sp: { key: 1, width: 9, out: false, links: false },
   fj: { key: 3, width: 9, out: false, links: false },
   fq: { key: 3, width: 10, out: false, links: false },
+  fh: { key: 3, width: 9, out: false, links: false },
   lj: { key: 1, width: 9, out: false, links: false, pair: true },
 };
 /** "lj": a link's joint is kept as link * LINK_JOINTS + joint */

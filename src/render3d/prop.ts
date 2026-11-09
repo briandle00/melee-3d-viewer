@@ -346,7 +346,7 @@ export class Prop {
   /** its root given another model's joint's matrix outright (HSD_JObjCopyMtx
    *  with a user-defined matrix: the root's own place is not applied, only
    *  what hangs under it) */
-  poseMatrix(m: Float32Array, frame?: number) {
+  poseMatrix(m: Float32Array, frame?: number, joints?: Map<number, Float32Array> | null) {
     const sk = this.skeleton;
     sk.constrained = null;
     sk.resetPose();
@@ -365,6 +365,8 @@ export class Prop {
       sk.trans[0] = sk.trans[1] = sk.trans[2] = 0;
       sk.scale[0] = sk.scale[1] = sk.scale[2] = 1;
     }
+    // (its joints below the root as the game posed them, when the track has them: a costume hat's "fh")
+    if (joints) this.layTrackJoints(joints);
     this.place.set(m.subarray(0, 16));
     sk.update(this.place);
   }
@@ -417,8 +419,11 @@ export class Prop {
 
   /** the track's joints over the animation's (its root is the item's place, never in it) */
   private layTrackPose() {
-    const tp = this.trackPose;
-    if (!tp) return;
+    if (this.trackPose) this.layTrackJoints(this.trackPose);
+  }
+
+  /** joints below the root, as a track's pose line has them (NaN: the file's rest) */
+  private layTrackJoints(tp: Map<number, Float32Array>) {
     const sk = this.skeleton;
     for (const [j, v] of tp) {
       if (j <= 0 || j >= sk.n) continue;
