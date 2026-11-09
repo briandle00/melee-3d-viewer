@@ -2012,7 +2012,10 @@ void main() {
     // (one drawn through another camera it was not posed under - a mirror's, a shadow's - made again under that
     // camera's view, as HSD_JObjMakePositionMtx makes it with the vmtx of the camera drawing)
     if (!bb && d && d.bbMV && d.bbW && d.bbKind && !this.shifted) {
-      const V12 = mtxFromGL(V, this.bbV12, 0), W12 = mtxFromGL(d.bbW, this.bbW12, 0);
+      const V12 = mtxFromGL(V, this.bbV12, 0);
+      // (a copy through an instance joint: the view times its base, then its own joint's matrix)
+      if (d.copy) PSMTXConcat(V12, mtxFromGL(d.copy.base, this.bbW12, 0), V12);
+      const W12 = mtxFromGL(d.copy ? d.copy.joint : d.bbW, this.bbW12, 0);
       PSMTXConcat(V12, W12, W12);
       mkBillBoardMtx(d.bbKind, d.bbPersp ?? false, d.bbRotZ ?? 0, W12, this.bbP12);
       bb = mtxToGL(this.bbP12, this.bbMVAgain);
@@ -2020,7 +2023,14 @@ void main() {
     const N = this.nrmBuf, T = this.nrmTmp;
     for (let k = 0; k < count; k++) {
       if (bb && !(k === 1 && d!.second >= 0)) MV.set(bb, k * 16);
-      else concatGL(MV, k * 16, V, 0, M, k * 16);
+      else if (k === 0 && d?.copy) {
+        // (a copy through an instance joint: (view times its base) times its own joint's matrix, HSD_JObjDispAll)
+        const V12 = mtxFromGL(V, this.bbV12, 0);
+        PSMTXConcat(V12, mtxFromGL(d.copy.base, this.bbW12, 0), V12);
+        PSMTXConcat(V12, mtxFromGL(d.copy.joint, this.bbW12, 0), V12);
+        mtxToGL(V12, this.bbMVAgain);
+        MV.set(this.bbMVAgain, 0);
+      } else concatGL(MV, k * 16, V, 0, M, k * 16);
       // (and its normal matrix: HSD_MtxInverseTranspose of the modelview, as SetupRigidModelMtx loads it)
       mtxToGL3(HSD_MtxInverseTranspose(mtxFromGL(MV, T, k * 16), T), N, k * 9);
     }
