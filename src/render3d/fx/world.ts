@@ -245,6 +245,10 @@ export interface ModelFx {
    *  place or on a joint: efLib_Create_Attach_Pos and the attach calls set the root's translation; a few
    *  models' roots have a place of their own in the file, 114 units toward the camera in one) */
   rootSet?: boolean;
+  /** the dispatch set its root's scale (efLib_Create_Attach_Scale and its kin: HSD_JObjSetScale on the root), which
+   *  takes the place of the file's rest scale of the root rather than scaling it again (a track's piece with a
+   *  scale other than 1: Bowser's Whirling Fortress, EfKpData model 1, whose root rests at 1.25, 1, 1.25) */
+  scaleSet?: boolean;
   /** kept this far above the joint it follows ("offsetY" callback) */
   offsetY?: number;
   /** its joint 1 carried along z as it ages ("jabZ" callback) */
@@ -1550,6 +1554,7 @@ export class FxWorld {
       rotY: ry, rotZ: rz, rotX: v[13] || undefined, scale: sx || 1, age: 0, life, follow: placed ? null : onJoint, owner: null, turn,
       by: a?.key, whose: key, under: how === "child" ? onJoint : null, steady: NEVER_PAUSED.has(Number(e[2])),
       rootSet: how !== "child" && !(how === "create" && t[0] === 0 && t[1] === 0 && t[2] === 0),
+      scaleSet: how !== "child" && (sx !== 1 || v[17] !== 1 || v[18] !== 1),
     };
     if (callback === "SetRotYAndTransition" && turn) m.rootRotationY = true;
     if (FACING_CALLBACKS.has(callback) || callback === "SetRotYZ_FromParamZ_FighterDir" || m.rootRotationY) turn?.(m);
@@ -2022,7 +2027,9 @@ export class FxWorld {
       return;
     }
     const [x, y, z] = this.modelPlace(m);
+    pr.rootScaleSet = !!m.scaleSet;
     pr.pose(age, x, y, z, m.scale, m.rootRotationY ? 0 : m.rotY, false, m.rootRotationZ ? 0 : m.rotZ, m.rotX ?? 0, m.rootSet);
+    pr.rootScaleSet = false;
     // (what its update callback sets after the animation: the root's turn, a joint's place)
     if (m.rootRotationY) pr.setRootRotationY(m.rotY);
     if (m.rootRotationZ) pr.setRootRotationZ(m.rotZ);

@@ -66,9 +66,15 @@ export class Prop {
   /** whether its animation sets the root's scale (HSD_A_J_SCAX..SCAZ on joint 0) */
   private rootScaled: boolean;
 
-  /** an item's root at the item's own scale alone (itemRoot): the file's rest scale of it dropped */
+  /** an effect model whose root's scale its dispatch set (HSD_JObjSetScale: efLib_Create_Attach_Scale and its kin),
+   *  set before each pose: the place's scale is the root's, the file's rest scale of it dropped as an item's is; a
+   *  root whose animation sets its scale keeps the animation's */
+  rootScaleSet = false;
+
+  /** an item's root at the item's own scale alone (itemRoot), and an effect's whose dispatch set it (rootScaleSet):
+   *  the file's rest scale of it dropped */
   private itemRootScale() {
-    if (!this.itemRoot || this.rootScaled) return;
+    if ((!this.itemRoot && !this.rootScaleSet) || this.rootScaled) return;
     const sk = this.skeleton;
     sk.scale[0] = sk.scale[1] = sk.scale[2] = 1;
   }
