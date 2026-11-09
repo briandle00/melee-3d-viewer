@@ -61,3 +61,38 @@ test("game files: each throw's beam plays its own animation, held where it is pu
   // (four throws, four animations)
   assert.equal(new Set(worlds.map((w) => w.join())).size, 4);
 });
+
+test("game files: the beam's root as lb_8000C2F8's constraints leave it, its joints played at the throw's speed", withGameFiles, async () => {
+  const { Fighter, fighterFiles } = await import("../src/render3d/fighter.ts");
+  const { motionTableFromDol } = await import("../src/render3d/dol.ts");
+  const { resolvePositionOrientation } = await import("../src/render3d/cns.ts");
+  const files = fighterFiles(SAMUS, 0)!;
+  const motion = motionTableFromDol(readGameFile("main.dol"));
+  const f = new Fighter(SAMUS, readGameFile(files[0]), readGameFile(files[1]), readGameFile(files[2]), 0, motion, "test");
+  // (a target joint turned a little about z and y, scaled, at (10, 20, -3): a model of one joint)
+  const c = Math.fround(Math.cos(0.3)), s = Math.fround(Math.sin(0.3));
+  const world = new Float32Array([c * 1.1, s * 1.1, 0, 0, -s * 1.1, c * 1.1, 0, 0, 0, 0, 1.1, 0, 10, 20, -3, 1].map(Math.fround));
+  const model = { world: () => world, parent: () => -1, flags: () => 0 };
+  const resolve = (m: Float32Array) => { resolvePositionOrientation(m, model, 0); };
+  const beam = f.throwAccessory(4, 1)!;
+  const rate = Math.fround(1 / 0.85);
+  beam.poseTied(7, resolve, 1, 7, rate);
+  const sk = beam.skeleton;
+  // (the root: at the target's place, along its axes, each as long as the root's own was - its scale 1 here)
+  assert.deepEqual(Array.from(sk.world.slice(12, 15)), [10, 20, -3]);
+  for (let col = 0; col < 3; col++) {
+    const len = Math.hypot(sk.world[col * 4], sk.world[col * 4 + 1], sk.world[col * 4 + 2]);
+    assert.ok(Math.abs(len - 1) < 1e-5, `column ${col}: ${len}`);
+    for (let r = 0; r < 3; r++) assert.ok(Math.abs(sk.world[col * 4 + r] - world[col * 4 + r] / 1.1) < 1e-5);
+  }
+  // (the root's scale: the fighter's, unless its animation sets it)
+  beam.poseTied(7, resolve, 1.25, 7, rate);
+  assert.ok(Math.abs(Math.hypot(sk.world[0], sk.world[1], sk.world[2]) - 1.25) < 1e-5);
+  // (the joints at the throw's speed: another speed, another pose; the materials' frame moves no joint)
+  beam.poseTied(7, resolve, 1, 7, rate);
+  const at = Array.from(sk.world);
+  beam.poseTied(9, resolve, 1, 7, rate);
+  assert.deepEqual(Array.from(sk.world), at);
+  beam.poseTied(7, resolve, 1, 7, 1);
+  assert.notDeepEqual(Array.from(sk.world), at);
+});
