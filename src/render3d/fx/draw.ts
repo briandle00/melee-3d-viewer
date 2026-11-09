@@ -13,7 +13,7 @@ import { K, Particle } from "./particles";
 import type { Sprite } from "./bank";
 import { appExtents, appMatrix, drawPoint, followMatrix, mtxDir, mtxPoint } from "./appsrt";
 import { madd, msub, PSMTXInverse, PSMTXMultVec, PSMTXRotAxisRad, mtxFromGL } from "../gxmath";
-import { cosf, sinf, tanf } from "./gamemath";
+import { atan2f, cosf, sinf, tanf } from "./gamemath";
 
 export const FLOATS = 17; // pos 3, uv 2, prim 4, env 4, alpha-compare 3, textured 1
 
@@ -66,18 +66,61 @@ const f32 = Math.fround;
 // (psUpdateBillboardAxes: the inverse view's right plus and minus its up, per axis - HSD_PSDisp_804D7914..7928 - and
 // psDispSub's turn and corners, kept)
 const bbAxes = new Float32Array(6), rotM = new Float32Array(12), rotAxis = [0, 0, 0], exactV = new Float32Array(12);
+const psCam: PsCamera = { view: viewG, pv: new Float32Array(8) };
 
-/** A plain particle's corners as psDispSub makes them (no transform of its own, not a trail or a direction
- *  particle): its size times the billboard axes (psUpdateBillboardAxes, from the inverse of the view), turned by its
- *  rotation about right x up when that is more than 0.01 (PSMTXRotAxisRad, the axis and the turn as the game's
- *  fused multiply-adds round them), the four corners its place less right, less up, plus right, plus up
- *  (psDispSubMakePolygon) - in float32, the game's order, so a corner the camera sees almost edge on lands where the
- *  game's does. Into `out` (12 floats) */
-export function psDispSubCorners(p: Particle, axes: Float32Array, out: Float32Array): Float32Array {
+/** the camera as psDispParticles keeps it for psDispSub: the view (vmtx, GX's 3 x 4) and the projection's first two
+ *  rows times it (pvmtx: GXGetProjectionv's perspective scale and offset, p[1] p[2] and p[3] p[4]) */
+export interface PsCamera { view: Float32Array; pv: Float32Array }
+
+/** psDispParticles' pvmtx rows for a perspective projection (GX's 4 x 4 `gx`, as C_MTXPerspective makes it): each
+ *  x_scale * vmtx[0][c] + x_offset * vmtx[2][c], and y_scale * vmtx[1][c] + y_offset * vmtx[2][c] (that product made
+ *  first) - the sum fusing its first product, as -fp_contract on code does */
+export function psCamera(view: Float32Array, gx: ArrayLike<number>, out: PsCamera): PsCamera {
+  const xs = gx[0], xo = gx[2], ys = gx[5], yo = gx[6], v = view, pv = out.pv;
+  out.view = view;
+  for (let c = 0; c < 4; c++) {
+    pv[c] = madd(xs, v[c], f32(xo * v[8 + c]));
+    pv[4 + c] = madd(ys, v[4 + c], f32(yo * v[8 + c]));
+  }
+  return out;
+}
+
+/** A particle's corners as psDispSub makes them (no transform of its own): its size times the billboard axes
+ *  (psUpdateBillboardAxes, from the inverse of the view), turned about right x up when the turn is more than 0.01
+ *  (PSMTXRotAxisRad, the axis and the turn as the game's fused multiply-adds round them) - by its rotation, or for
+ *  a trail or a direction particle by its way across the picture (atan2f of where it is less where it was a step
+ *  back, each through pvmtx over its depth, -1.0f / w; plus its rotation for a direction particle) - then its place
+ *  less right, less up, plus right, plus up, a trail's first and last from where it was (psDispSubMakePolygon). In
+ *  float32, the game's order, so a corner the camera sees almost edge on lands where the game's does. Into `out`
+ *  (12 floats); null for a trail or a direction particle without the camera's perspective (`cam`) */
+export function psDispSubCorners(p: Particle, axes: Float32Array, out: Float32Array, cam: PsCamera | null = null): Float32Array | null {
   const size = p.size;
   let rx = f32(axes[0] * size), ux = f32(axes[1] * size), ry = f32(axes[2] * size), uy = f32(axes[3] * size);
   let rz = f32(axes[4] * size), uz = f32(axes[5] * size);
-  const angle = p.rotate;
+  const x = p.px, y = p.py, z = p.pz;
+  const trail = (p.kind & K.TRAIL) !== 0;
+  // (where it was a step back: calcTornadoLastPos for a tornado, else its place less its velocity)
+  let qx = 0, qy = 0, qz = 0;
+  if (trail || p.kind & K.DIRVEC) {
+    if (p.kind & K.TORNADO) { tornadoLast(p, lastT); qx = lastT[0]; qy = lastT[1]; qz = lastT[2]; }
+    else { qx = f32(x - p.vx); qy = f32(y - p.vy); qz = f32(z - p.vz); }
+  }
+  let angle: number;
+  if (trail || p.kind & K.DIRVEC) {
+    if (!cam) return null;
+    const v = cam.view, pv = cam.pv;
+    const w0 = f32(v[11] + madd(v[10], z, madd(v[8], x, f32(v[9] * y))));
+    if (w0 === 0) return null;
+    const w0inv = f32(-1 / w0);
+    const w1 = f32(v[11] + madd(v[10], qz, madd(v[8], qx, f32(v[9] * qy))));
+    if (w1 === 0) return null;
+    const w1inv = f32(-1 / w1);
+    const row = (o: number, px: number, py: number, pz: number) => f32(pv[o + 3] + madd(pv[o + 2], pz, madd(pv[o], px, f32(pv[o + 1] * py))));
+    const sx = msub(w0inv, row(0, x, y, z), f32(w1inv * row(0, qx, qy, qz)));
+    const sy = msub(w0inv, row(4, x, y, z), f32(w1inv * row(4, qx, qy, qz)));
+    angle = Math.abs(sy) < FLT_MIN ? (sx >= 0 ? f32(1.5707964) : f32(-1.5707964)) : atan2f(sx, sy);
+    if (p.kind & K.DIRVEC) angle = f32(angle + p.rotate);
+  } else angle = p.rotate;
   if (Math.abs(angle) > 0.01) {
     rotAxis[0] = msub(ry, uz, f32(rz * uy));
     rotAxis[1] = msub(rz, ux, f32(rx * uz));
@@ -91,11 +134,11 @@ export function psDispSubCorners(p: Particle, axes: Float32Array, out: Float32Ar
     const nuz = madd(m[10], uz, madd(m[8], ux, f32(m[9] * uy)));
     rx = nrx; ry = nry; rz = nrz; ux = nux; uy = nuy; uz = nuz;
   }
-  const x = p.px, y = p.py, z = p.pz;
-  out[0] = f32(x - rx); out[1] = f32(y - ry); out[2] = f32(z - rz);
+  const bx = trail ? qx : x, by = trail ? qy : y, bz = trail ? qz : z;
+  out[0] = f32(bx - rx); out[1] = f32(by - ry); out[2] = f32(bz - rz);
   out[3] = f32(x - ux); out[4] = f32(y - uy); out[5] = f32(z - uz);
   out[6] = f32(x + rx); out[7] = f32(y + ry); out[8] = f32(z + rz);
-  out[9] = f32(x + ux); out[10] = f32(y + uy); out[11] = f32(z + uz);
+  out[9] = f32(bx + ux); out[10] = f32(by + uy); out[11] = f32(bz + uz);
   return out;
 }
 /** where a tornado particle was a step back (psdisp.c calcTornadoLastPos): its angle round its generator and its
@@ -127,7 +170,8 @@ export function tornadoLast(p: Particle, out: number[]): number[] {
  *  perspective projection (viewProj), a trail's or a direction particle's way across the picture is where
  *  the projection puts it and where it was, as the game's psDispSub measures it */
 export function buildParticles(list: Particle[],
-                               axes: { right: number[]; up: number[]; viewProj?: ArrayLike<number>; view?: ArrayLike<number> } = WORLD_AXES,
+                               axes: { right: number[]; up: number[]; viewProj?: ArrayLike<number>; view?: ArrayLike<number>;
+                                       gxProj?: ArrayLike<number> | null } = WORLD_AXES,
                                shift: ((p: Particle) => [number, number] | null) | null = null):
     { data: Float32Array; batches: Batch[] } {
   const R = axes.right, U = axes.up;
@@ -169,6 +213,8 @@ export function buildParticles(list: Particle[],
     bbAxes[2] = f32(viewInv[4] + viewInv[5]); bbAxes[3] = f32(viewInv[4] - viewInv[5]);
     bbAxes[4] = f32(viewInv[8] + viewInv[9]); bbAxes[5] = f32(viewInv[8] - viewInv[9]);
   }
+  // (with a perspective camera's GX projection: psDispSub's pvmtx, for the trails' and direction particles' turn)
+  const cam = haveView && axes.gxProj && axes.gxProj[15] === 0 ? psCamera(viewG, axes.gxProj, psCam) : null;
   for (let qi = 0; qi < kept; qi++) {
     const p = list[order[qi]];
     const textured = groups[batchOf[qi]].sprite ? 1 : 0;
@@ -256,7 +302,7 @@ export function buildParticles(list: Particle[],
     // corners, across and up the picture from its middle: -R, -U, +R, +U
     // (a trail's first and last from where it was: one step of its velocity back, in the world - psDispSubMakePolygon)
     // (a plain one's as the game makes them, with the camera's view: psDispSubCorners)
-    const exact = haveView && !srt && !moved && !(p.kind & (K.TRAIL | K.DIRVEC)) ? psDispSubCorners(p, bbAxes, exactV) : null;
+    const exact = haveView && !srt && !moved ? psDispSubCorners(p, bbAxes, exactV, cam) : null;
     const corners = CORNERS;
     corners[0] = -rx; corners[1] = -ry; corners[2] = -ux; corners[3] = -uy;
     corners[4] = rx; corners[5] = ry; corners[6] = ux; corners[7] = uy;
