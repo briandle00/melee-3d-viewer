@@ -67,15 +67,21 @@ export function poseLinesOf(events: TrackEvent[], h: number): PoseLines {
   let total = 0;
   for (const e of events) total += e.length - 2 - h;
   const frames = new Int32Array(n), heads = new Int32Array(n * h), start = new Uint32Array(n), end = new Uint32Array(n);
-  const flat = new Float32Array(total);
+  const flat = new Float32Array(total), bits = new Uint32Array(flat.buffer);
   let at = 0;
-  events.forEach((e, l) => {
+  for (let l = 0; l < n; l++) {
+    const e = events[l];
     frames[l] = e[0];
     for (let k = 0; k < h; k++) heads[l * h + k] = Number(e[2 + k]);
     start[l] = at;
-    for (let k = 2 + h; k < e.length; k++) flat[at++] = Number(e[k]);
+    for (let k = 2 + h; k < e.length; k++) {
+      const v = e[k];
+      // (a float still as its word, as a JSON track has them: its bits straight in - decodeTrackFloats' test)
+      if (typeof v === "string" && v.length === 10 && v.charCodeAt(0) === 48 && v.charCodeAt(1) === 120) bits[at++] = Number(v);
+      else flat[at++] = Number(v);
+    }
     end[l] = at;
-  });
+  }
   return { h, frames, heads, start, end, flat };
 }
 
@@ -112,14 +118,16 @@ const f32 = new Float32Array(1), u32 = new Uint32Array(f32.buffer);
 /** a track's exact floats - strings "0x" and the IEEE single's eight hex
  *  digits - as the numbers they are, in place (anything else is left) */
 export function decodeTrackFloats(events: TrackEvent[]): void {
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i];
-    for (let k = 2; k < e.length; k++) {
-      const v = e[k];
-      if (typeof v === "string" && v.length === 10 && v.charCodeAt(0) === 48 && v.charCodeAt(1) === 120) {
-        u32[0] = Number(v);
-        e[k] = f32[0];
-      }
+  for (let i = 0; i < events.length; i++) decodeEventFloats(events[i]);
+}
+
+/** one event's exact floats as numbers, in place (decodeTrackFloats) */
+export function decodeEventFloats(e: TrackEvent): void {
+  for (let k = 2; k < e.length; k++) {
+    const v = e[k];
+    if (typeof v === "string" && v.length === 10 && v.charCodeAt(0) === 48 && v.charCodeAt(1) === 120) {
+      u32[0] = Number(v);
+      e[k] = f32[0];
     }
   }
 }

@@ -104,7 +104,7 @@
  */
 import { colorLightDir, type Tint } from "./fx/colanim";
 import { hasTrack, liveTrack, trackAnswer } from "./files";
-import { decodeTrackFloats, type PoseLines, poseLinesOf } from "./trackcodec";
+import { decodeEventFloats, type PoseLines, poseLinesOf } from "./trackcodec";
 import { pageCache, trim } from "../state/pageCache";
 
 export type TrackEvent = [number, string, ...(number | string)[]];
@@ -272,8 +272,9 @@ export class ViewerTrack {
   readonly until: number;
 
   constructor(data: TrackData) {
-    // (a track handed over with its floats still as words: read them now)
-    if (!data.decoded) { decodeTrackFloats(data.events); data.decoded = true; }
+    // (a track handed over with its floats still as words (a JSON track): read below, those of the events kept - a
+    // pose line's words go straight into its lines' floats, poseLinesOf, not made numbers in the events first)
+    const words = !data.decoded;
     this.seconds = data.seconds ?? 0;
     this.version = data.version ?? 0;
     // (a track that says it is not exact without saying where holds for none of it)
@@ -294,6 +295,7 @@ export class ViewerTrack {
         list.push(e);
         continue;
       }
+      if (words) decodeEventFloats(e);
       if (n === undefined) {
         let list = this.instants.get(type);
         if (!list) this.instants.set(type, (list = []));
