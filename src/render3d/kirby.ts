@@ -242,6 +242,7 @@ export function poseSkin(hat: KirbyHat, kirby: Skeleton, ...swung: (Map<number, 
   }
   const map = hat.map ?? Array.from({ length: sk.n }, (_, i) => i);
   sk.resetPose();
+  sk.clearQuats();
   map.forEach((j, h) => {
     if (j < 0) {
       const p = hat.parts?.[h];
@@ -262,6 +263,9 @@ export function poseSkin(hat: KirbyHat, kirby: Skeleton, ...swung: (Map<number, 
       sk.scale[h * 3 + k] = kirby.scale[j * 3 + k];
       sk.trans[h * 3 + k] = kirby.trans[j * 3 + k];
     }
+    // (a joint his blend or the track turns by a quaternion turns the hat's by the same one, not by an Euler
+    // stand-in for it)
+    if (kirby.quatOn[j]) { for (let k = 0; k < 4; k++) sk.quat[h * 4 + k] = kirby.quat[j * 4 + k]; sk.quatOn[h] = 1; }
     sk.shown[h] = kirby.shown[j];
   });
   if (hat.thin !== undefined) sk.scale[0] = hat.thin;

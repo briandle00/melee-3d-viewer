@@ -4850,6 +4850,8 @@ function layTrackSwing(fi: Fighter, char: number, joints: Map<number, Float32Arr
       if (all && !Number.isNaN(v[3 + k])) sk.scale[j * 3 + k] = v[3 + k];
       if (all && !Number.isNaN(v[6 + k])) sk.trans[j * 3 + k] = v[6 + k];
     }
+    // (an Euler turn as the game left it: not the quaternion the viewer's own blend may have given the joint)
+    sk.quatOn[j] = 0;
     laid = true;
   }
   return laid;
