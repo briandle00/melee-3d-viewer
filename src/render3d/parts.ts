@@ -30,6 +30,13 @@ export function partToModelJoint(internalId: number, part: number, skips = partS
   return j;
 }
 
+/** the part whose world matrix a model joint's is in a by-part layout (worldByPart): the first part that maps to
+ *  it, or -1 */
+export function modelJointToPart(internalId: number, joint: number, parts: number, skips = partSkips(internalId)): number {
+  for (let p = joint; p < parts; p++) if (partToModelJoint(internalId, p, skips) === joint) return p;
+  return -1;
+}
+
 /** a posed model's joint matrices (16 floats each) laid out by part: a part
  *  the model leaves out takes its parent's place (the joint 0 when unknown) */
 export function worldByPart(internalId: number, world: Float32Array): Float32Array {

@@ -6,7 +6,7 @@
 import { AObj, Archive, DObj, JObj, MatAnim, loadAnimJoint, loadJoint, loadMatAnimJoint } from "./hsd";
 import { RENDER } from "./gx";
 import { ident, invert, Mat, mul } from "./math";
-import { HSD_MtxSRT, type Mtx, mtxToGL } from "./gxmath";
+import { HSD_MtxColMag, HSD_MtxSRT, type Mtx, mtxFromGL, mtxToGL } from "./gxmath";
 import { Skeleton } from "./skeleton";
 
 // the root's place as the game makes a joint's matrix: HSD_MtxSRT, in float32 with its own sinf and cosf
@@ -29,6 +29,9 @@ const NO_DOBJS: DObj[] = [];
 export function effectOverAll(life: number): boolean {
   return Math.trunc(Math.fround(10 * Math.fround(life))) % 10 !== 0;
 }
+
+// (poseConstrained's: the root's own matrix, GX's 3 x 4)
+const ownM = new Float32Array(12);
 
 export class Prop {
   skeleton: Skeleton;
@@ -282,9 +285,27 @@ export class Prop {
    *  the root's own animation makes it (HSD's resolveCnsOrientation copies the target's axes, so the root's
    *  animated turn is not added on top). `jointFrame`: the joints' animation at a frame of its own, the materials
    *  staying at `frame` (Samus's throw beam: lb_8000C2F8's constraints, its joints at the throw's speed) */
-  poseConstrained(frame: number, parent: Float32Array, scale: number, loop = true, jointFrame = frame) {
+  poseConstrained(frame: number, parent: Float32Array, scale: number, loop = true, jointFrame = frame,
+                  orient: ((own: number[]) => Float32Array) | null = null) {
     this.pose(frame, 0, 0, 0, scale, 0, loop, 0, 0, false, jointFrame);
     const sk = this.skeleton;
+    if (orient) {
+      // (the axes as resolveCnsOrientation makes them, given the root's own columns' lengths, HSD_MtxColMag of its
+      // matrix: `orient` - FxWorld.jointOrient - in float32, the game's order)
+      mtxFromGL(sk.world, ownM, 0);
+      const o = orient([HSD_MtxColMag(ownM, 0), HSD_MtxColMag(ownM, 1), HSD_MtxColMag(ownM, 2)]);
+      for (let c = 0; c < 3; c++) {
+        for (let r = 0; r < 3; r++) this.place[c * 4 + r] = o[r * 4 + c];
+        this.place[c * 4 + 3] = 0;
+        sk.rot[c] = 0;
+        sk.trans[c] = 0;
+        sk.scale[c] = 1;
+      }
+      for (let r = 12; r < 15; r++) this.place[r] = parent[r];
+      this.place[15] = 1;
+      sk.update(this.place);
+      return;
+    }
     for (let c = 0; c < 3; c++) {
       const j = c * 4;
       const own = Math.hypot(sk.world[j], sk.world[j + 1], sk.world[j + 2]);
