@@ -509,8 +509,9 @@ const shadowJoint = new Float32Array(12);
 function cameraBone(fi: Fighter, st: PlayerState): [number, number, number] {
   const joint = partToModelJoint(st.internalCharacterId, fi.cameraPart);
   if (joint >= 0 && joint < fi.skeleton.n) {
-    const W = fi.skeleton.world, o = fi.cameraOffset, k = joint * 16;
-    return [0, 1, 2].map((i) => W[k + i] * o[0] + W[k + 4 + i] * o[1] + W[k + 8 + i] * o[2] + W[k + 12 + i]) as [number, number, number];
+    // (lb_8000B1CC: PSMTXMultVec of the joint's matrix and ftData's offset, in float32 - ftLib_800866DC)
+    const m = mtxFromGL(fi.skeleton.world, new Float32Array(12), joint * 16);
+    return Array.from(PSMTXMultVec(m, fi.cameraOffset, [0, 0, 0])) as [number, number, number];
   }
   return [st.xPosition, st.yPosition + (fi.cameraBox?.lift ?? 8) * fi.modelScale, 0];
 }
@@ -2702,7 +2703,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
           // (the magnifier's size: the camera box's target_ext.v.z, ftData +0x3C's last float times fp->x34_scale.y
           // - the player's scale, not the model's (ftCamera_80076064, ftLib_80086B80) - over 8)
           nameTagHeight: fi.nameTagHeight, bone,
-          zoom: ((fi.cameraBox?.v[2] ?? 8) * (playerScales(data.settings.playerSettings)[a.player] ?? 1)) / 8,
+          zoom: Math.fround(Math.fround(Math.fround(fi.cameraBox?.v[2] ?? 8) * Math.fround(playerScales(data.settings.playerSettings)[a.player] ?? 1)) / 8),
           // (ifMagnify_802FBBDC draws it through ftDrawCommon_80080C28, as the pond's mirror does: its
           // low-detail model, and nothing while any of the three hide bits is set)
           draw: () => {
