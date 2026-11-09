@@ -1074,6 +1074,57 @@ export class Fighter {
     return { anim };
   }
 
+  private visJointsOf = new Map<FigaTree, number[]>();
+  /** the joints an animation shows and hides (its NODE and BRANCH tracks: HSD_A_J_NODE, HSD_A_J_BRANCH) */
+  private visJoints(tracks: Track[][], anim: FigaTree): number[] {
+    let out = this.visJointsOf.get(anim);
+    if (!out) {
+      out = [];
+      tracks.forEach((list, j) => { if (list.some((t) => t.type === 11 || t.type === 12)) out!.push(j); });
+      this.visJointsOf.set(anim, out);
+    }
+    return out;
+  }
+
+  /** A joint's shown or hidden is its JObj's flag, which only a NODE or BRANCH track (or the code) sets: a move
+   *  whose animation has no such track for it leaves it as the last one that had left it - the joint is not laid
+   *  back to the file's flags when an animation changes (Fighter_ChangeMotionState, HSD_JObjAddAnimAll). Donkey
+   *  Kong's joint 48: his wait and most of his moves hide it with a branch track, his headbutt shows it, and his
+   *  hand slap and the throws he is thrown in, which have none, keep it hidden. The pose laid the file's flags
+   *  (resetPose) where the animation has no track: each joint some earlier animation of its own sets is set as the
+   *  latest such animation left it, at its frame on the last frame it played (the viewer track's records) */
+  private carryShown(g: GameAnim, frame: number) {
+    const sk = this.skeleton, own = (a: TrackAnim) => a.kind === this.internalId || (this.internalId === NANA && a.kind === POPO);
+    const now = g.at(frame);
+    if (!now) return;
+    const nowAnim = now.anim >= 0 && own(now) ? this.anim(now.anim) : null;
+    const set = new Set(nowAnim ? this.visJoints(this.ownTracks(nowAnim), nowAnim) : []);
+    let f = now.since - 1;
+    for (let steps = 0; steps < 64; steps++) {
+      const a = g.at(f);
+      if (!a || a.since > f) return;
+      const anim = a.anim >= 0 && own(a) ? this.anim(a.anim) : null;
+      if (anim) {
+        const tracks = this.ownTracks(anim), joints = this.visJoints(tracks, anim);
+        if (joints.length) {
+          for (const j of joints) {
+            if (set.has(j) || j >= sk.n) continue;
+            for (const tr of tracks[j]) {
+              if (tr.type !== 11 && tr.type !== 12) continue;
+              if (tr.keys.length && tr.keys[0].time > a.frame) continue;
+              const v = sample(tr.keys, a.frame);
+              if (v === null) continue;
+              if (tr.type === 11) sk.shown[j] = v > 0.5 ? 1 : 0;
+              else sk.setBranchShown(j, v > 0.5);
+            }
+          }
+          return;
+        }
+      }
+      f = a.since - 1;
+    }
+  }
+
   animFor(actionStateId: number): FigaTree | null {
     const sm = this.subactionOf(actionStateId);
     return sm === null ? null : this.anim(sm);
@@ -1397,6 +1448,7 @@ export class Fighter {
     sk.clearQuats();
     this.posedBy = "animation";
     this.body(state, 0);
+    if (state.game) this.carryShown(state.game, state.game.frame);
     if (face?.parts.length) this.applyParts(face.parts);
     if (xRot && xRot.joint > 1 && xRot.joint < sk.n) sk.rot[xRot.joint * 3] = xRot.angle;
     // (TransN: an animation's root motion goes to the physics, not the model
