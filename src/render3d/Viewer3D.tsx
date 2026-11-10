@@ -100,7 +100,7 @@ interface Actor { st: PlayerState; inputs?: PlayerInputs; costume: number; playe
                  /** Kirby's Stone this frame: parts 0 and 1 (kirbystone.ts) */
                  stone?: { part0?: number; part1?: number } | null;
                  /** held or thrown: who holds it, and where its XRotN is moved to */
-                 captor?: Actor | null; hold?: { joint: number; d: [number, number, number] } | null;
+                 captor?: Actor | null; hold?: { joint: number; to: [number, number, number] } | null;
                  /** in Kirby's inhale: its root's size this frame, or the turn it keeps as his star (kirbyHeld) */
                  kirbyHeld?: { shrink?: number; turn?: number } | null }
 
@@ -1928,11 +1928,10 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const tj = partToModelJoint(cc, ek.partToJoint(cc, TRANSN2)), vj = partToModelJoint(vc, ek.partToJoint(vc, XROTN));
       if (tj < 0 || vj < 0) continue;
       poseActor(c.f, c.a);
-      const at = c.f.skeleton.position(tj);
-      a.hold = null;
-      poseActor(fi, a);
-      const from = fi.skeleton.position(vj);
-      a.hold = { joint: vj, d: [at[0] - from[0], at[1] - from[1], at[2] - from[2]] };
+      // (its XRotN at that point itself: a difference taken from a pose of its own before - the way until
+      // 2026-11-10 - came out a ulp off the point when the pose it was added to was not that one to the bit,
+      // and one full gate in five drew Roy thrown by Marth so, bot-tp_marth_roy-1565)
+      a.hold = { joint: vj, to: c.f.skeleton.position(tj) };
       poseActor(fi, a);
       const fa = frameActors.find((x) => x.key === actorKey(a.player, a.nana));
       if (fa) fa.world = worldByPart(vc, fi.skeleton.world);
@@ -3217,11 +3216,7 @@ export function Viewer3D(props: { onFail: (reason: string) => void; onStall?: (r
       const tj = partToModelJoint(cc, ek.partToJoint(cc, TRANSN2)), vj = partToModelJoint(vc, ek.partToJoint(vc, XROTN));
       if (tj < 0 || vj < 0) return undefined;
       poseOne(c);
-      const at = c.fi.skeleton.position(tj);
-      h.a.hold = null;
-      poseOne(h);
-      const from = h.fi.skeleton.position(vj);
-      h.a.hold = { joint: vj, d: [at[0] - from[0], at[1] - from[1], at[2] - from[2]] };
+      h.a.hold = { joint: vj, to: c.fi.skeleton.position(tj) };
       return { key: actorKey(c.a.player, c.a.nana), on: tj, joint: vj };
     };
     return { out, held, poseOne, holdOf };

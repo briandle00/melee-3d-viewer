@@ -622,7 +622,7 @@ export class Skeleton {
     if (this.constrained && this.constrained.joint === i) this.constrained.resolve(L);
     mtxToGL(L, W, o);
     // (a joint held somewhere else, its children with it)
-    if (this.shift && this.shift.joint === i) { W[o + 12] += this.shift.d[0]; W[o + 13] += this.shift.d[1]; W[o + 14] += this.shift.d[2]; }
+    if (this.shift && this.shift.joint === i) { W[o + 12] = this.shift.to[0]; W[o + 13] = this.shift.to[1]; W[o + 14] = this.shift.to[2]; }
   }
 
   // HSD_JObjMakeMatrix's last step: a joint on a PATH animation (its AObj's
@@ -805,9 +805,10 @@ export class Skeleton {
    *  not sheared by it, and the root takes this one. Set together with the
    *  matrix given to update(). */
   rootScale: [number, number, number] | null = null;
-  /** one joint moved by d in the world after it is posed, and its children
-   *  with it (a fighter held: its XRotN where its holder's TransN2 is) */
-  shift: { joint: number; d: [number, number, number] } | null = null;
+  /** one joint put at a point of the world after it is posed, and its children made on it (a fighter held or
+   *  thrown: its XRotN at its holder's TransN2 - ftCo_800DB368's lb_8000C1C0, a position constraint, which makes
+   *  the joint matrix's translation the holder's joint's point itself, whatever the pose under it) */
+  shift: { joint: number; to: [number, number, number] } | null = null;
   /** a joint the game ties to another model's joint by constraints (an item held: lb_8000C2F8), and what they do
    *  to its matrix once HSD_JObjMakeMatrix has made it (HSD_JObjSetupMatrixSub's HSD_RObjUpdateAll: cns.ts); the
    *  joints under it are made on the matrix it leaves */
