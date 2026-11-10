@@ -23,6 +23,7 @@ import {
 } from "./gxmath";
 import { type ViewLights, jointInView, lightsInView, newViewLights, specularDirs } from "./gxlights";
 import { SHADOW_SIZE, shadowGray } from "./shadow";
+import { shakenView } from "./hitlag";
 import type { Tint as ColTint } from "./fx/colanim";
 import { FOG_GLSL, type FogRegs, NO_FOG, gxSetFog, nearFar } from "./fog";
 import {
@@ -1381,7 +1382,8 @@ void main() {
       for (let r = 0; r < 4; r++) out[12 + r] = m[12 + r] + dx * m[r] + dy * m[4 + r];
     };
     at(this.shiftVP, this.camVP);
-    at(this.shiftView, this.camView);
+    // (the view the draw logs and the modelviews go by: the game's PSMTXConcat(view, offset), hitlag.ts)
+    shakenView(this.camView, dx, dy, this.shiftView);
     gl.uniformMatrix4fv(this.loc.uViewProj, false, this.shiftVP);
     gl.uniformMatrix4fv(this.loc.uView, false, this.shiftView);
     this.setCull(this.shiftVP);

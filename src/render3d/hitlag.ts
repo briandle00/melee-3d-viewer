@@ -38,6 +38,7 @@
  */
 import type { PlayerState } from "../common/types";
 import { Archive, ptr } from "./hsd";
+import { PSMTXConcat, mtxFromGL, mtxToGL } from "./gxmath";
 
 type V2 = [number, number];
 
@@ -300,6 +301,19 @@ export function trackShake(tr: ShakeTrack | null | undefined, key: string, g: nu
   if (!v) return null;
   const x = Number(v[0]), y = Number(v[1]);
   return x === 0 && y === 0 ? null : [x, y];
+}
+
+const shakeT = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]);
+const shakeV = new Float32Array(12);
+
+/** the view a fighter moved by its draw offset (dx, dy) is drawn through, as the game makes it: an identity
+ *  matrix whose translation is the offset (its z 0 + 0), then PSMTXConcat(view, it) in float32 -
+ *  ftDrawCommon_8008051C for the fighter, it_8026EB18 for the item it holds. Each entry of the translation is
+ *  view[r][0] dx, + view[r][1] dy, + view[r][2] 0, + view[r][3], a rounding each fused step (not the one of the
+ *  sum taken whole). `view` and `out` are column-major 4 x 4s (out's last row 0 0 0 1) */
+export function shakenView(view: ArrayLike<number>, dx: number, dy: number, out: Float32Array): Float32Array {
+  shakeT[3] = dx; shakeT[7] = dy;
+  return mtxToGL(PSMTXConcat(mtxFromGL(view, shakeV), shakeT, shakeV), out);
 }
 
 /** whether a smash attack is charging at the end of frame `g` (its smash_attrs.state Charging,
