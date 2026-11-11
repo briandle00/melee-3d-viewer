@@ -19,6 +19,7 @@ import { gameFilesFrom, setLiveTrack, type LiveTrack } from "../render3d/files";
 import { replayStore } from "../state/replayStore";
 import { shouldPublish } from "./policy";
 import type { FromWorker, ToWorker } from "./protocol";
+import { fetchRetry } from "../render3d/net";
 
 /** what a host page sets before the viewer loads (all optional) */
 export interface SimConfig {
@@ -76,7 +77,8 @@ class SimFeed implements LiveTrack {
     if (!files) { this.fail("the game files cannot be handed to the simulator"); return; }
     let replay: ArrayBuffer;
     try {
-      replay = await (await fetch(this.url)).arrayBuffer();
+      // (asked again over a few seconds when there is no answer: render3d/net.ts)
+      replay = await (await fetchRetry(this.url)).arrayBuffer();
     } catch (e) {
       this.fail(`the replay could not be read: ${e}`);
       return;

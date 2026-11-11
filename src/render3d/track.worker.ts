@@ -9,6 +9,7 @@
  */
 import { prepareTrack, type PreparedTrack, type TrackPiece, trackAnswerOf, trackPieces } from "./trackcodec";
 import type { TrackData } from "./track";
+import { fetchRetry } from "./net";
 
 const post = (piece: TrackPiece, transfer: ArrayBuffer[] = []) =>
   (self as unknown as { postMessage(m: unknown, t: Transferable[]): void }).postMessage(piece, transfer);
@@ -16,12 +17,11 @@ const post = (piece: TrackPiece, transfer: ArrayBuffer[] = []) =>
 self.onmessage = async (e: MessageEvent<{ url: string }>) => {
   let track: PreparedTrack | null = null, answer: unknown = null;
   try {
-    const r = await fetch(e.data.url, { cache: "no-store" });
-    if (r.ok) {
-      const a = (await trackAnswerOf(await r.arrayBuffer())) as { state: string; track?: TrackData };
-      if (a.state === "ready") track = prepareTrack(a.track!);
-      else answer = a;
-    }
+    // (asked again over a few seconds when there is no answer: net.ts)
+    const r = await fetchRetry(e.data.url, { cache: "no-store" });
+    const a = (await trackAnswerOf(await r.arrayBuffer())) as { state: string; track?: TrackData };
+    if (a.state === "ready") track = prepareTrack(a.track!);
+    else answer = a;
   } catch {
     track = null;
     answer = null;
