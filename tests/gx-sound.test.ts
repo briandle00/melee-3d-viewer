@@ -21,6 +21,7 @@ import crypto from "node:crypto";
 import { driveOrder, readTape, type Tape } from "../src/sim/tape.ts";
 import { GxSession, type SessionBackend } from "../src/render3d/gxpath/session.ts";
 import { GxCore } from "../src/render3d/gxpath/core.ts";
+import { SessionSound } from "../src/render3d/gxpath/exportsound.ts";
 import { nativeRow, nativeTape } from "../src/render3d/gxpath/tapebridge.ts";
 import { gxNames } from "../src/sim/gamefiles.ts";
 import { gameFiles } from "./game-files.ts";
@@ -190,6 +191,43 @@ test("a seek back has the sound of a straight play, row for row", withSound, asy
       assert.equal(sha([pcm.get(r)!]), sha([straight.pcm.get(r)!]), `row ${r} after a seek back to ${back}`);
     }
     assert.ok(pcm.has(back + 40), `row ${back + 40} stepped again`);
+  }
+  s.close();
+});
+
+test("a video from the first row has every row's sound from it, the first row's too: as the match opened, shown, and rewound to", withSound, async () => {
+  // (Export Video of the whole game seeks to row 0 and steps a row a frame, keeping each row's sound as it is handed out - exportsound.ts.
+  // Row 0 is stepped when the match opens, and a seek back to it rewinds to the state after it: its sound was never handed out again,
+  // and every video from the first row with the sound failed with "the sound of game frame -123 was not made")
+  const tape = tapeOf(ROWS);
+  const straight = await soundSession(tape);
+  await straight.s.warmup();
+  while (straight.s.index < 120) straight.s.step(false);
+  straight.s.close();
+
+  const { s } = await soundSession(tape);
+  await s.warmup();
+  const video = async () => {
+    const snd = new SessionSound(tape.gameFrame(0), tape.gameFrame(119), (row) => tape.gameFrame(row));
+    s.onSound = (p, row) => snd.take(p, row);
+    // (as the page's export seeks: tests/gxpath-export.test.ts, src/gxpage.ts seekForExport)
+    if (s.needsRestart(0)) await s.rewindFor(0);
+    while (!s.seekStep(0, 1e9)) { /* one call */ }
+    for (let r = 1; r < 120; r++) s.step(true);
+    const got: Int16Array[] = [];
+    for await (const b of snd.blocks()) got.push(b.pcm);
+    s.onSound = null;
+    return got;
+  };
+  // (the match as it opened; row 0 shown and nothing after it; rewound to from far on)
+  for (const before of [-1, 0, 300]) {
+    if (before >= 0) {
+      if (s.needsRestart(before)) await s.rewindFor(before);
+      while (!s.seekStep(before, 1e9)) { /* */ }
+    }
+    const got = await video();
+    assert.equal(got.length, 120, `a block a row (from ${before})`);
+    for (let r = 0; r < 120; r++) assert.equal(sha([got[r]]), sha([straight.pcm.get(r)!]), `row ${r}'s sound (from ${before})`);
   }
   s.close();
 });

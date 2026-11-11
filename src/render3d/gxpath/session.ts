@@ -222,8 +222,8 @@ export class GxSession {
     backend.drawing = false;
     backend.onPicture = this.wantPictures ? (rgba) => { this.onPicture?.(rgba, this.index - 1); } : null;
     // (the register files the stream starts from are taken when the first frame is stepped: row 0 is stepped here and fed first)
+    // (its sound is handed out when the row is shown - step - not here: a video made from the first row listens from its seek on)
     core.step(nativeRow(whole, 0));
-    this.sound(0, false);
     this.firstStepped = true;
     this.gpu = new GxGpu(backend, core.initial() as unknown as Dff);
     backend.prepareMemory?.(this.gpu.mem, this.gpu.regs);
@@ -247,8 +247,10 @@ export class GxSession {
     this.atMark();
     const i = this.index;
     const t0 = performance.now();
-    if (i === 0 && this.firstStepped) this.firstStepped = false;
-    else {
+    if (i === 0 && this.firstStepped) {
+      this.firstStepped = false;
+      this.sound(0, false);
+    } else {
       core.step(nativeRow(this.whole!, i));
       this.sound(i, draw && this.feeding);
     }
@@ -383,6 +385,9 @@ export class GxSession {
   seekStep(row: number, budgetMs = 8, tail = 2): boolean {
     const end = Math.min(row, this.frameCount - 1);
     const t0 = performance.now();
+    // the first row again with nothing stepped after it (rewound to the state after it, or never left): its sound once more, from the
+    // module as that row left it - a video of the game from its first frame has that row's sound (exportsound.ts) like every other's
+    if (end === 0 && this.index === 1) this.sound(0, false);
     if (this.canRewind && this.core) {
       // (far ahead: checkpoints a little before here when the match gets there, so going back near here is a rewind)
       if (this.feeding && end - this.index > NEAR) this.cps.backMarks(end - SEEK_LEAD);
