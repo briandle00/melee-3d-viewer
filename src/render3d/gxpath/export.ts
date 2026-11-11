@@ -144,15 +144,20 @@ export const canExport = () => typeof VideoEncoder !== "undefined" && typeof Vid
 // H.264 profiles and levels to try, the best first: High at level 5.1 (2560 x 1920 at 60), then Main and Baseline
 /** bits a pixel of the game's 640 x 480 at 60 frames a second; a scaled video gets this times the scale (its pixels are blocks of the
  *  game's: the encoder needs far fewer bits than its size alone would say) */
-export const BITS_PER_PIXEL = 0.5;
+export const BITS_PER_PIXEL = 0.25;
 /** at most this many bits a second: the graphics card's encoder made frames of a few dB when asked for 74 Mbit/s (1280 x 960) */
 export const MAX_BITRATE = 50e6;
 const CODECS = ["avc1.640033", "avc1.4d0033", "avc1.42e033", "avc1.640028", "avc1.4d0028", "avc1.42e028"];
 
 async function encoderConfig(width: number, height: number, fps: number, scale: number, asked?: number): Promise<{ config: VideoEncoderConfig; hardware: boolean }> {
-  // half a bit of the game's pixel at 60, times the scale, at most MAX_BITRATE: 9.2 Mbit/s at 640 x 480, 18 at 1280 x 960, 37 at 2560 x 1920
-  // (measured on a public game: decoded back, 41 dB from the picture in luma at 1x, 41 at 2x with 18; a bit a pixel bought 3 dB for
-  // twice the file)
+  // a quarter of a bit of the game's pixel at 60, times the scale, at most MAX_BITRATE: 4.6 Mbit/s at 640 x 480, 9.2 at 1280 x 960,
+  // 18 at 2560 x 1920. Measured on a public game's 600 rows (bot-marth_roy, Final Destination, decoded back against the picture), the
+  // graphics card's encoder making files about 1.2 times the rate asked: at 1x, 9.2 Mbit/s asked gave 11.0 (44.0 dB luma on average,
+  // 39.2 at the worst frame), 6 gave 7.2 (41.8, 36.3), 4.5 gave 5.4 (40.1, 34.2), 3.5 gave 4.1 (38.5, 32.7). A frame grab at 1x shows
+  // no difference down to 4.5; at 3.5 the stage's faint moving grid fades. At 2x 9 Mbit/s gave 11.1 (42.6, 36.1) against 18.2 (45.7,
+  // 39.7) at 18.4, while below it a frame fell to 26 dB; at 4x (the browser's own encoder: the card's took none) 18.4 gave 18.3 (40.3,
+  // 31.4). Half a bit a pixel (until 2026-11-11) made a 3:09 game at 1x a 221 MB file; a quarter makes it about half that, with
+  // nothing to see lost
   const bitrate = asked ?? Math.min(MAX_BITRATE, Math.round(640 * 480 * fps * BITS_PER_PIXEL * scale));
   for (const hw of ["prefer-hardware", "no-preference"] as const) {
     for (const codec of CODECS) {

@@ -196,13 +196,16 @@ test("2x and 4x: the picture drawn scaled pixel for pixel (no smoothing) at 1280
   }
 });
 
-test("the bitrate: half a bit a game pixel a frame, times the scale, at most MAX_BITRATE; one asked for is used", async () => {
+test("the bitrate: a quarter of a bit a game pixel a frame (4.6 Mbit/s at 1x and 60), times the scale, at most MAX_BITRATE; one asked for is used", async () => {
   for (const [scale, fps] of [[1, 60], [2, 60], [4, 60]] as const) {
     withBrowser();
     const r = await exportMp4(options({ scale, fps, to: 0 }).opts);
     assert.equal(r.bitrate, Math.min(MAX_BITRATE, Math.round(640 * 480 * fps * BITS_PER_PIXEL * scale)));
   }
-  assert.equal(BITS_PER_PIXEL, 0.5);
+  assert.equal(BITS_PER_PIXEL, 0.25);
+  withBrowser();
+  // (a 3:09 game at 640 x 480 was 221 MB at half a bit, about 9.3 Mbit/s: half that now)
+  assert.equal((await exportMp4(options({ to: 0 }).opts)).bitrate, 4608000);
   withBrowser();
   assert.equal((await exportMp4(options({ to: 0, bitrate: 1234567 }).opts)).bitrate, 1234567);
 });
