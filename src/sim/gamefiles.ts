@@ -5,6 +5,7 @@
  * (tools/data/extract.py: REQUIRED_FILES, and every fighter file).
  */
 import type { GameFilesFrom } from "./protocol";
+import { failOf, fetchRetry } from "../render3d/net";
 
 const REQUIRED = [
   "PlCo.dat", "PdPm.dat", "ItCo.dat", "ItCo.usd",
@@ -56,11 +57,20 @@ export function profileNames(have: string[]): string[] {
   return [...REQUIRED, ...OPTIONAL.filter((n) => set.has(n)), ...fighters];
 }
 
+/** a game file from a folder by URL, asked again over a few seconds when there is no answer (render3d/net.ts); a failure names the file */
+async function urlFile(name: string, url: URL): Promise<Response> {
+  return await fetchRetry(url).catch((e) => {
+    const f = failOf(e);
+    throw new Error(`${name}: ${f.kind === "gone" ? "not in the game files folder" : f.status ? "HTTP " + f.status : f.message}`);
+  });
+}
+
 /** the names the simulator reads: its build's list, else the extraction's way */
 export async function namesToRead(from: GameFilesFrom, list: string | null): Promise<string[]> {
   if (list) {
-    const r = await fetch(list);
-    if (r.ok) {
+    // (asked again over a few seconds when there is no answer: render3d/net.ts)
+    const r = await fetchRetry(list).catch(() => null);
+    if (r) {
       const names = await r.json();
       if (Array.isArray(names) && names.every((n) => typeof n === "string")) return names;
     }
@@ -91,8 +101,7 @@ export async function readSoundFiles(from: GameFilesFrom, names: string[]): Prom
       return;
     }
     const base = new URL((from as { base: string }).base.replace(/\/?$/, "/"));
-    const r = await fetch(new URL(name.split("/").map(encodeURIComponent).join("/"), base));
-    if (!r.ok) throw new Error(`${name}: ${r.status === 404 ? "not in the game files folder" : "HTTP " + r.status}`);
+    const r = await urlFile(name, new URL(name.split("/").map(encodeURIComponent).join("/"), base));
     out.set(name, new Uint8Array(await r.arrayBuffer()));
   };
   for (let i = 0; i < names.length; i += 4) await Promise.all(names.slice(i, i + 4).map(one));
@@ -111,8 +120,7 @@ export async function readGameFiles(from: GameFilesFrom, names: string[]): Promi
       return;
     }
     const base = new URL((from as { base: string }).base.replace(/\/?$/, "/"));
-    const r = await fetch(new URL(encodeURIComponent(name), base));
-    if (!r.ok) throw new Error(`${name}: ${r.status === 404 ? "not in the game files folder" : "HTTP " + r.status}`);
+    const r = await urlFile(name, new URL(encodeURIComponent(name), base));
     out.set(name, new Uint8Array(await r.arrayBuffer()));
   };
   // (a few at a time)

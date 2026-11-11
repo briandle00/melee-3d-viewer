@@ -25,6 +25,7 @@ import { GxSession, type GameFiles, type SessionBackend } from "./render3d/gxpat
 import { musicEnabled, sound, soundConfigured, soundState } from "./audio";
 import { canExport, canExportSound, ExportCanceled, exportMp4, saveFile, videoName, type ExportOptions, type ExportScale } from "./render3d/gxpath/export";
 import { SessionSound } from "./render3d/gxpath/exportsound";
+import { failOf, fetchRetry } from "./render3d/net";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const q = new URLSearchParams(location.search);
@@ -164,9 +165,13 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
   session?.close();
   const t0 = performance.now(), mark = (k: string) => { loadTimes[k] = performance.now() - t0; };
   info("reading the replay...");
-  const res = await fetch(url);
-  // (a replay the server does not have is said as that, not as the bytes of its error page failing to decode)
-  if (!res.ok) throw new Error(`the replay could not be read: HTTP ${res.status} for ${url}`);
+  // (asked again over a few seconds when there is no answer: render3d/net.ts; a replay the server does not have is said as that, not
+  // as the bytes of its error page failing to decode)
+  const res = await fetchRetry(url).catch((e) => {
+    const f = failOf(e);
+    throw new Error(f.kind === "gone" ? `the replay is not there anymore (HTTP ${f.status} for ${url})`
+                    : `the replay could not be read: ${f.status ? "HTTP " + f.status : f.message} for ${url}`);
+  });
   const bytes = new Uint8Array(await res.arrayBuffer());
   // (another replay: sound off, and the next start opens this one; the same one played again in another Playback keeps it)
   if (url !== currentUrl) { sound.load(new Blob([bytes as unknown as BlobPart])); sound.playback(playbackMode); }

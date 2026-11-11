@@ -65,10 +65,13 @@
  * Messages out (to the parent):
  *   {type: "frame", frame, running}      whenever the frame changes
  *   {type: "loaded", frames}             after a replay is ready
- *   {type: "failed", reason}             a replay asked for cannot be shown:
+ *   {type: "failed", reason, retry}      a replay asked for cannot be shown:
  *                                        not fetched, not read, or not one
  *                                        this viewer plays (the player says
- *                                        the same where the picture would be)
+ *                                        the same where the picture would be,
+ *                                        with Try Again unless retry is
+ *                                        "none"; "auto": it asks again by
+ *                                        itself every few seconds)
  *   {type: "renderer", renderer, reason} which viewer is drawing ("3d" or
  *                                        "svg") and, when 3D cannot run, why
  *   {type: "track", state}               the viewer track: "ready",
@@ -114,7 +117,8 @@ import { diagLoaded, diagLoading, diagRunning, diagView } from "~/diag";
 import { fileListSource, prefetchReplay, setFileSource, setTrackUrl, status } from "~/render3d/files";
 import { simAsked, simForReplay } from "~/sim/embed";
 import { mark } from "~/render3d/startup";
-import { askedMode, chooseMode, loadError, loadProblem, waitingText, type Mode } from "~/embedmode";
+import { askedMode, chooseMode, fetchProblem, problemNote, readProblem, waitingText, type LoadProblem, type Mode } from "~/embedmode";
+import { AGAIN_MS, fetchRetry, whenBack } from "~/render3d/net";
 import { precompilePrograms } from "~/render3d/renderer";
 import "~/state/fileStore";
 import "~/state/replayStore";
@@ -158,40 +162,80 @@ function post(message: object) {
 // once it is in: otherwise the load, finishing later, puts the frame back to
 // where it started and the page is told a frame nobody asked for (a page that
 // opens a game and seeks straight away - the mixup explorer - lost its seek).
+// A play asked for meanwhile is kept too: it plays once the replay is in.
 let loading = false;
+// (the same, for what the player says: "Loading replay…")
+const [loadingNow, setLoadingNow] = createSignal(false);
 let seekAfterLoad: number | null = null;
+let playAfterLoad = false;
 // the viewer track the page gave for the replay shown (the simulator makes none then)
 let givenTrack: string | null = null;
 
-// why the replay last asked for is not shown (null: it is, or it is on its way): said where the picture would be
-const [problem, setProblem] = createSignal<string | null>(null);
-function failed(reason: string) {
-  loading = false;
-  setProblem(reason);
-  post({ type: "failed", reason });
+// The replay asked for last, and why it is not shown (null: it is, or it is on its way), said where the picture would be. Its fetch
+// is asked again over a few seconds when it gets no answer (render3d/net.ts fetchRetry); when that was not enough the player says so
+// with Try Again, and asks again by itself every few seconds and whenever the page may fetch again (back online, shown again). A
+// replay the server says is not there (404) is asked again only by Try Again. One failed request left the player on "No replay
+// loaded" for good, its Play button running a clock over nothing.
+const [problem, setProblem] = createSignal<LoadProblem | null>(null);
+// (a try under way while a problem is shown: its note says so)
+const [trying, setTrying] = createSignal(false);
+let lastAsk: { url: string; name: string; frame?: number; trackUrl?: string | null } | null = null;
+let loadSeq = 0;
+let loadStop: AbortController | null = null;
+let againTimer = 0;
+const againLater = () => { clearTimeout(againTimer); againTimer = setTimeout(() => loadAgain(false), AGAIN_MS) as unknown as number; };
+function failed(p: LoadProblem) {
+  loading = false; setLoadingNow(false);
+  playAfterLoad = false;
+  pause();
+  batch(() => { setTrying(false); setProblem(p); });
+  post({ type: "failed", reason: p.text, retry: p.retry });
+  clearTimeout(againTimer);
+  if (p.retry === "auto") againLater();
 }
+/** the replay asked for last, asked again (pressed: Try Again; else by itself, only for a failure that may pass and while the page
+ *  can be seen) */
+function loadAgain(pressed: boolean) {
+  const p = problem(), a = lastAsk;
+  if (!p || !a || trying()) return;
+  if (!pressed && p.retry !== "auto") return;
+  if (!pressed && document.visibilityState !== "visible") { againLater(); return; }
+  void loadUrl(a.url, a.name, a.frame, a.trackUrl);
+}
+whenBack(() => loadAgain(false));
 
 async function loadUrl(url: string, name: string, frame?: number, trackUrl?: string | null) {
-  loading = true;
-  seekAfterLoad = null;
-  setProblem(null);
+  const mine = ++loadSeq;
+  loadStop?.abort();
+  const stop = (loadStop = new AbortController());
+  clearTimeout(againTimer);
+  // (the same replay asked again keeps its problem on show, saying it is trying, until it is in; another one starts afresh)
+  const again = lastAsk !== null && lastAsk.url === url && problem() !== null;
+  lastAsk = { url, name, frame, trackUrl };
+  loading = true; setLoadingNow(true);
+  // (a seek asked while it failed is kept for the try again)
+  if (!again) seekAfterLoad = null;
+  if (again) setTrying(true);
+  else batch(() => { setProblem(null); setTrying(false); });
   setTrackUrl(url, trackUrl ?? null);
   givenTrack = trackUrl ?? null;
   simForReplay(url, givenTrack);
   try {
-    await loadReplay(url, name, frame);
+    await loadReplay(url, name, frame, stop.signal);
   } catch (e) {
-    failed(loadError(e));
+    if (mine !== loadSeq) return;
+    failed(fetchProblem(e));
   }
 }
 
-async function loadReplay(url: string, name: string, frame?: number) {
+async function loadReplay(url: string, name: string, frame: number | undefined, signal: AbortSignal) {
   mark("replayRequested");
   diagLoading();
-  const res = await fetch(url);
-  // (a replay the server does not have is said as that, not as the bytes of its error page failing to read)
-  if (!res.ok) { failed(loadProblem({ status: res.status, failed: 0, skipped: 0, loaded: 0 })!); return; }
+  // (asked again over a few seconds when there is no answer; a replay the server does not have is said as that, not as the bytes of
+  // its error page failing to read)
+  const res = await fetchRetry(url, undefined, { signal });
   const blob = await res.blob();
+  if (signal.aborted) return;
   // (the game's files are asked for now, while the replay is read)
   void blob.slice(0, 2048).arrayBuffer().then((head) => { if (!LINE_ART) prefetchReplay(head); }).catch(() => {});
   const start = frame === undefined ? 0 : toIndex(frame);
@@ -200,11 +244,14 @@ async function loadReplay(url: string, name: string, frame?: number) {
   if (source() !== url) setSource(null);
   // a start frame > 0 keeps it paused there (Slippi Lab's own behavior)
   await load([new File([blob], name)], start === 0 ? 1 : start);
+  if (signal.aborted) return;
   mark("replayParsed");
   const stub = fileStore.stubs[0];
   // (not read, or not one these players play: said, rather than "Reading replay…" for good)
-  if (stub === undefined) { failed(loadProblem({ failed: fileStore.failed.length, skipped: fileStore.skipped, loaded: 0 })!); return; }
+  if (stub === undefined) { failed(readProblem({ failed: fileStore.failed.length, skipped: fileStore.skipped, loaded: 0 })!); return; }
   await localLibrary.select(stub);
+  if (signal.aborted) return;
+  batch(() => { setProblem(null); setTrying(false); });
   // (once it is in: the 3D viewer finds its viewer track by it)
   setSource(url);
 }
@@ -215,12 +262,18 @@ let ghostRequest = 0;
 const ghostCache = new Map<string, ReturnType<typeof parseReplay>>();
 async function loadGhosts(list: { url: string; label?: string; color?: string }[]) {
   const mine = ++ghostRequest;
+  // (each asked again over a few seconds when there is no answer; one that still cannot be had or read is left out, the others drawn)
   const ghosts = await Promise.all(
     list.map(async (g) => {
       let replayData = ghostCache.get(g.url);
       if (replayData === undefined) {
-        const buf = await (await fetch(g.url)).arrayBuffer();
-        replayData = parseReplay(decode(buf, { useTypedArrays: true }));
+        try {
+          const buf = await (await fetchRetry(g.url)).arrayBuffer();
+          replayData = parseReplay(decode(buf, { useTypedArrays: true }));
+        } catch (e) {
+          console.warn("replay drawn over this one: left out:", g.url, e);
+          return null;
+        }
         ghostCache.set(g.url, replayData);
       }
       return {
@@ -230,7 +283,7 @@ async function loadGhosts(list: { url: string; label?: string; color?: string }[
       };
     })
   );
-  if (mine === ghostRequest) setGhosts(ghosts);
+  if (mine === ghostRequest) setGhosts(ghosts.filter((g): g is NonNullable<typeof g> => g !== null));
 }
 
 window.addEventListener("message", (event) => {
@@ -244,7 +297,7 @@ window.addEventListener("message", (event) => {
       if (Array.isArray(m.files)) { setFileSource(fileListSource(m.files.filter((f: unknown) => f instanceof File))); recheck(); }
       break;
     case "seek":
-      if (loading) seekAfterLoad = toIndex(m.frame);
+      if (loading || problem()) seekAfterLoad = toIndex(m.frame);
       else jump(toIndex(m.frame));
       break;
     case "ghosts":
@@ -254,14 +307,19 @@ window.addEventListener("message", (event) => {
       setRange(m.start === null || m.start === undefined ? undefined
                : [toIndex(m.start), toIndex(m.end)]);
       break;
+    // (no replay in, or another on its way: nothing plays - a clock running over nothing said a replay was playing - and a play
+    // asked while one loads waits for it)
     case "play":
-      if (!replayStore.running) togglePause();
+      if (!playable()) playAfterLoad = loading;
+      else if (!replayStore.running) togglePause();
       break;
     case "pause":
+      playAfterLoad = false;
       pause();
       break;
     case "toggle":
-      togglePause();
+      if (!playable()) playAfterLoad = loading && !playAfterLoad;
+      else togglePause();
       break;
     case "renderer":
       if (m.renderer === "3d" || m.renderer === "svg") setAsked(m.renderer);
@@ -299,6 +357,11 @@ window.addEventListener("message", (event) => {
       break;
   }
 });
+
+/** whether a replay is in to play: loaded, and not another one on its way or failed */
+function playable(): boolean {
+  return !!replayStore.replayData && !loading && problem() === null;
+}
 
 // V on a player with the keyboard's focus: the page is told, and may cycle
 // the view. Only the key alone, never while typing in a field.
@@ -351,7 +414,7 @@ function Embed() {
       () => replayStore.replayData,
       (data) => {
         if (!data) return;
-        loading = false;
+        loading = false; setLoadingNow(false);
         diagLoaded(
           data.settings.playerSettings.filter((p) => p).map((p) => p!.externalCharacterId),
           data.settings.stageId ?? null
@@ -360,6 +423,10 @@ function Embed() {
         if (seekAfterLoad !== null) {
           jump(seekAfterLoad);
           seekAfterLoad = null;
+        }
+        if (playAfterLoad) {
+          playAfterLoad = false;
+          if (!replayStore.running) togglePause();
         }
       }
     )
@@ -448,10 +515,24 @@ function Embed() {
     <>
       <div class="flex h-screen flex-col overflow-hidden bg-white" data-renderer={mode().renderer}>
         <Show
-          when={replayStore.replayData && mode().renderer !== "pending"}
+          when={replayStore.replayData && mode().renderer !== "pending" && problem() === null}
           fallback={
-            <div class="flex h-full items-center justify-center text-slate-500">
-              {waitingText(fileStore.parseProgress, problem())}
+            <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-slate-500"
+                 data-load-state={problem() ? "failed" : "waiting"}>
+              <p data-load-text>{waitingText(fileStore.parseProgress, loadingNow(), problem())}</p>
+              <Show when={problem()}>
+                {(p) => <>
+                  <Show when={problemNote(p(), trying())}>
+                    <p class="text-sm text-slate-400" data-load-note>{problemNote(p(), trying())}</p>
+                  </Show>
+                  <Show when={p().retry !== "none"}>
+                    <button type="button" data-load-retry disabled={trying()} onClick={() => loadAgain(true)}
+                            class="mt-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                      Try Again
+                    </button>
+                  </Show>
+                </>}
+              </Show>
             </div>
           }
         >

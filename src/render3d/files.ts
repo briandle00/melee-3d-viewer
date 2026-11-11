@@ -32,6 +32,7 @@ import type { GameFilesFrom } from "../sim/protocol";
 import { fileRead, mark, timed, timing } from "./startup";
 import { cacheGet, cachePut, sha256 } from "./gamecache";
 import { replayHead } from "./prefetch";
+import { failOf, fetchRetry } from "./net";
 
 export interface Status {
   available: boolean; // the files and the action table are there
@@ -59,8 +60,11 @@ export type FileSource = ((name: string) => Promise<ArrayBuffer>) & {
 export function folderUrlSource(base: string): FileSource {
   const dir = new URL(base.endsWith("/") ? base : base + "/", location.href);
   const s: FileSource = async (name) => {
-    const r = await fetch(new URL(encodeURIComponent(name), dir), { cache: "no-store" });
-    if (!r.ok) throw new Error(`${name}: ${r.status === 404 ? "not in the game files folder" : "HTTP " + r.status}`);
+    // (asked again over a few seconds when there is no answer: net.ts)
+    const r = await fetchRetry(new URL(encodeURIComponent(name), dir), { cache: "no-store" }).catch((e) => {
+      const f = failOf(e);
+      throw new Error(`${name}: ${f.kind === "gone" ? "not in the game files folder" : f.status ? "HTTP " + f.status : f.message}`);
+    });
     return r.arrayBuffer();
   };
   s.from = { kind: "url", base: dir.href };
@@ -207,8 +211,8 @@ export async function trackAnswer(replayUrl: string): Promise<unknown | null> {
   const url = trackUrls.get(replayUrl);
   if (!url) return { state: "none", reason: "no viewer track given" };
   try {
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) return null;
+    // (asked again over a few seconds when there is no answer: net.ts)
+    const r = await fetchRetry(url, { cache: "no-store" });
     // (the compact form, trackcodec.ts, is gzipped; the simulator's export is JSON)
     return await trackAnswerOf(await r.arrayBuffer());
   } catch {
