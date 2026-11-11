@@ -31,26 +31,45 @@ export function askedMode(s: FilesStatus, asked: "3d" | "svg", webgl2: () => boo
   return asked === "3d" ? pick3d(s, webgl2) : { renderer: "svg", reason: LINE_ART_ASKED, failed: false };
 }
 
-/** how a replay's load ended: its file not found or not read (failed), or read and not one these players play
- *  (skipped: a CPU player, a stage other than the six the line art has, a character the game has no fighter for) */
-export interface LoadOutcome { status?: number; failed: number; skipped: number; loaded: number }
+/** why a replay asked for is not shown, and whether trying again may bring it: "auto" (no answer, the server busy: the player asks
+ *  again by itself every few seconds and when the page may fetch again, render3d/net.ts), "button" (the server said it is not there or
+ *  not given: asked again only when Try Again is pressed), "none" (it was read and is not one these players show) */
+export interface LoadProblem { text: string; retry: "auto" | "button" | "none" }
 
-/** why a replay that was asked for is not shown, or null when it is */
-export function loadProblem(o: LoadOutcome): string | null {
-  if (o.status !== undefined && (o.status < 200 || o.status > 299)) return `The replay could not be fetched (HTTP ${o.status}).`;
+/** a replay's fetch that failed (render3d/net.ts FetchFailed, or any error the load met) */
+export function fetchProblem(e: unknown): LoadProblem {
+  const f = e as { kind?: string; status?: number | null; message?: string };
+  switch (f?.kind) {
+    case "gone":
+      return { text: "The replay is not there anymore: it was moved, renamed or deleted.", retry: "button" };
+    case "refused":
+      return { text: `The replay could not be loaded: the server refused it (HTTP ${f.status}).`, retry: "button" };
+    case "server":
+      return { text: `The replay could not be loaded: the server could not send it (HTTP ${f.status}).`, retry: "auto" };
+    case "network":
+      return { text: "The replay could not be loaded: the server did not answer.", retry: "auto" };
+  }
+  return { text: `The replay could not be opened: ${e instanceof Error ? e.message : String(e)}`, retry: "button" };
+}
+
+/** how a replay's read ended: not read (failed), or read and not one these players play (skipped: a CPU player, a stage other than
+ *  the six the line art has, a character the game has no fighter for); null when it was read and is shown */
+export function readProblem(o: { failed: number; skipped: number; loaded: number }): LoadProblem | null {
   if (o.loaded > 0) return null;
-  if (o.failed > 0) return "The replay could not be read: the file is damaged or not a Slippi replay.";
-  if (o.skipped > 0) return "This viewer does not play this replay: it has a CPU player or a stage other than the six tournament stages.";
-  return "The replay could not be read.";
+  if (o.failed > 0) return { text: "The replay could not be read: the file is damaged or not a Slippi replay.", retry: "none" };
+  if (o.skipped > 0) {
+    return { text: "This viewer does not play this replay: it has a CPU player or a stage other than the six tournament stages.", retry: "none" };
+  }
+  return { text: "The replay could not be read.", retry: "none" };
 }
 
-/** a load that stopped with an error (the network, the reader) */
-export function loadError(e: unknown): string {
-  const m = e instanceof Error ? e.message : String(e);
-  return `The replay could not be opened: ${m}`;
+/** the line under a problem: what the player does about it */
+export function problemNote(p: LoadProblem, trying: boolean): string | null {
+  if (trying) return "Trying again…";
+  return p.retry === "auto" ? "It tries again by itself every few seconds." : null;
 }
 
-/** what the player says where the picture would be while there is no replay to show */
-export function waitingText(parseProgress: number, problem: string | null): string {
-  return problem ?? (parseProgress > 0 ? "Reading replay…" : "No replay loaded");
+/** what the player says where the picture would be while there is no replay to show (a problem says itself: problemNote) */
+export function waitingText(parseProgress: number, loading: boolean, problem: LoadProblem | null): string {
+  return problem ? problem.text : parseProgress > 0 ? "Reading replay…" : loading ? "Loading replay…" : "No replay loaded";
 }
