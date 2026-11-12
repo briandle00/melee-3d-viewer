@@ -301,7 +301,9 @@ export class GxSession {
 
   /** the module back to a checkpoint (null: the state after the first row); the renderer is not fed until the stream starts again */
   private async rewind(c: Checkpoint | null): Promise<void> {
-    const m = await this.cps.rewind(this.wasm as unknown as CheckpointMemory, c, async () => {
+    // (a module that opens the match again in milliseconds is opened again and the checkpoint's pages written: no pass over its ~0.9 GiB
+    // to find the pages changed since, a fifth of the time of a seek back - checkpoints.ts rewindFresh)
+    const reopen = async (): Promise<CheckpointMemory | null> => {
       // pages this instance changed that were never seen as they started: the match opened again has them (openIn: this module rewound
       // to its state after the game files loaded, or a fresh instance that loads them - the same bytes as the instance the baseline came
       // from; a fresh instance without the game data kept would lay its memory out differently), its first row stepped
@@ -312,7 +314,8 @@ export class GxSession {
       this.core = core;
       if (this.closed) { core.destroy(); this.core = null; return null; }
       return core.mod as unknown as CheckpointMemory;
-    });
+    };
+    const m = this.core?.canReopen ? await this.cps.rewindFresh(c, reopen) : await this.cps.rewind(this.wasm as unknown as CheckpointMemory, c, reopen);
     if (!m) return;
     this.index = c ? c.row : 1;
     this.firstStepped = false;

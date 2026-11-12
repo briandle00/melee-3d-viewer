@@ -164,6 +164,9 @@ export class GxCore {
     return true;
   }
 
+  /** another match can be opened in this instance in milliseconds (rewind(), then openMatch): the game data loaded and its state kept */
+  get canReopen(): boolean { return this.kept && !!this.mod._msl_gxw_rewind; }
+
   /** bytes kept for rewind() */
   get keptBytes(): number { return this.kept ? this.mod._msl_gxw_kept_bytes?.() ?? 0 : 0; }
 

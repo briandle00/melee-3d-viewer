@@ -9,6 +9,12 @@
  * the match passes them, none within SPACING rows after another. A place sought to marks two, a little before the row its stream starts
  * again at (backMarks): BACK rows before it and SPACING further, so a frame back or two seconds back from there rewinds to one near
  * instead of playing the match again from far.
+ *
+ * Going back without a pass over the memory (rewindFresh): when the match can be opened again in milliseconds (a module that keeps its state
+ * after the game data loads: core.ts canReopen), it is opened again - every page then the baseline's - and the checkpoint's pages written:
+ * a fifth of the time of the pass over the module's ~0.9 GiB the rewind above starts with. Checkpoints can be kept without a pass too, when
+ * the pages that differ from the baseline at that row are known (keepPages: a list made once by a pass at that row, stored.ts), and added
+ * whole (add: one made elsewhere, by another instance of the same module playing the same tape, stored.ts).
  */
 
 /** the module's memory as the checkpoints read and write it (the graphics build: its heap top, msl_gxw_heap_top) */
@@ -19,6 +25,25 @@ export interface Checkpoint { row: number; pages: Map<number, Uint8Array> }
 export const PAGE = 65536;
 /** checkpoints kept, and rows a checkpoint serves for (none is taken within this many rows after another) */
 export const KEEP = 10, SPACING = 300;
+
+/** a pass over the module's memory with two 32-bit hashes a page: the [2p] and [2p + 1] words are page p's. A list of the pages that
+ *  differ from the baseline made from it is kept for good (stored.ts), so a page is taken as unchanged only when 64 bits say so */
+export function pageHashes2(m: CheckpointMemory): Uint32Array {
+  const top = m._msl_gxw_heap_top(), n = Math.ceil(top / PAGE), out = new Uint32Array(2 * n);
+  const u32 = new Uint32Array(m.HEAPU8.buffer, 0, Math.min(n * (PAGE / 4), m.HEAPU8.length >> 2));
+  const P = 16777619;
+  for (let p = 0; p < n; p++) {
+    let h0 = 2166136261, h1 = 0x01000193, h2 = 0x9e3779b9, h3 = 0x85ebca6b;
+    const a = p * (PAGE / 4), end = Math.min(a + PAGE / 4, u32.length);
+    let i = a;
+    for (; i + 3 < end; i += 4) { h0 = Math.imul(h0 ^ u32[i], P); h1 = Math.imul(h1 ^ u32[i + 1], P); h2 = Math.imul(h2 ^ u32[i + 2], P); h3 = Math.imul(h3 ^ u32[i + 3], P); }
+    for (; i < end; i++) h0 = Math.imul(h0 ^ u32[i], P);
+    // (each word is two of the four chains, each chain over every fourth word: a change to any word changes its chain, and so its half)
+    out[2 * p] = Math.imul(h0 ^ (h1 >>> 7 | h1 << 25), P);
+    out[2 * p + 1] = Math.imul(h2 ^ (h3 >>> 13 | h3 << 19), 0x27d4eb2d);
+  }
+  return out;
+}
 
 /** a hash of each 64 KiB page of the module's memory up to its heap top (four FNV-1a chains over the words in turn, for speed) */
 export function pageHashes(m: CheckpointMemory): Uint32Array {
@@ -46,20 +71,53 @@ export class Checkpoints {
   private kept: Checkpoint[] = [];
   /** rows to keep a checkpoint at when the match gets there */
   private marks = new Set<number>();
+  /** how many are kept (KEEP unless the host says), and, when the host says where its match is (near), which one is dropped when there
+   *  are more: the farthest from there (else one at random) */
+  private max = KEEP;
+  private near: (() => number) | null = null;
 
   /** `back`: the rows between a place's restart row and the nearer of the two checkpoints kept for it (backMarks). `keepEarliest`: when
    *  more than KEEP are kept, the earliest is never the one dropped (a host that goes back to one place again and again, the start of a
    *  range it loops, marks it first: each loop back stays a rewind to it) */
   constructor(readonly back: number, readonly keepEarliest = false) {}
 
+  /** keep up to `max`, and when there are more drop the one farthest from the row `near` says (the row the host's match is at: the ones a
+   *  seek or a scrub around it needs stay) */
+  limit(max: number, near?: () => number): void {
+    this.max = Math.max(1, max);
+    this.near = near ?? null;
+    this.trim();
+  }
+
+  private trim(): void {
+    const from = this.keepEarliest ? 1 : 0;
+    while (this.kept.length > this.max) {
+      let drop = from + Math.floor(Math.random() * (this.kept.length - from));
+      if (this.near) {
+        const at = this.near();
+        let far = -1;
+        for (let i = from; i < this.kept.length; i++) {
+          const d = Math.abs(this.kept[i].row - at);
+          if (d > far) { far = d; drop = i; }
+        }
+      }
+      this.kept.splice(drop, 1);
+    }
+  }
+
   /** a baseline is taken: checkpoints can be kept and rewound to */
   get ready(): boolean { return this.base !== null; }
 
-  /** The baseline: the module's memory now, after the match's first row. Every checkpoint and mark of an earlier baseline is dropped. */
-  baseline(m: CheckpointMemory): void {
+  /** The baseline: the module's memory now, after the match's first row. Every checkpoint and mark of an earlier baseline is dropped.
+   *  `hashes`: this very state's page hashes taken before (pageHashes: a stored set's, made by the same module playing the same tape - the
+   *  state after the first row is the same bytes in every instance), so no pass is made now. */
+  baseline(m: CheckpointMemory, hashes?: Uint32Array): void {
     this.drop();
-    this.base = this.hashes(m);
+    this.base = hashes ? hashes.slice() : this.hashes(m);
   }
+
+  /** the baseline's page hashes (null before one is taken) */
+  get baseHashes(): Uint32Array | null { return this.base; }
 
   /** nothing kept, no baseline */
   drop(): void { this.base = null; this.basePages.clear(); this.kept = []; this.marks.clear(); }
@@ -101,10 +159,31 @@ export class Checkpoints {
     if (!this.base || this.kept.some((c) => c.row === index)) return;
     const pages = new Map<number, Uint8Array>();
     for (const p of this.changed(this.hashes(m))) pages.set(p, this.page(m, p));
-    this.kept.push({ row: index, pages });
+    this.put({ row: index, pages });
+  }
+
+  /** keep the module's state before row `index` as a checkpoint of exactly `pages`, the pages that differ from the baseline at that row,
+   *  known without a pass (a stored set's list, made by a pass at that row when the same module played the same tape: stored.ts) */
+  keepPages(m: CheckpointMemory, index: number, pages: Iterable<number>): void {
+    if (!this.base || this.kept.some((c) => c.row === index)) return;
+    const out = new Map<number, Uint8Array>();
+    for (const p of pages) out.set(p, this.page(m, p));
+    this.put({ row: index, pages: out });
+  }
+
+  /** a checkpoint made elsewhere (by another instance of the same module playing the same tape, against the same first row: stored.ts) */
+  add(c: Checkpoint): void {
+    if (!this.base || this.kept.some((k) => k.row === c.row)) return;
+    this.put(c);
+  }
+
+  /** whether a checkpoint at row `row` is kept */
+  has(row: number): boolean { return this.kept.some((c) => c.row === row); }
+
+  private put(c: Checkpoint): void {
+    this.kept.push(c);
     this.kept.sort((a, b) => a.row - b.row);
-    const from = this.keepEarliest ? 1 : 0;
-    while (this.kept.length > KEEP) this.kept.splice(from + Math.floor(Math.random() * (this.kept.length - from)), 1);
+    this.trim();
   }
 
   /** (the checks) the pages that differ from the baseline now: after the match is opened again, those it does not put back */
@@ -139,6 +218,20 @@ export class Checkpoints {
       for (const p of now) if (!want.has(p)) m.HEAPU8.set(this.basePages.get(p)!, p * PAGE);
     }
     for (const [p, bytes] of want) m.HEAPU8.set(bytes, p * PAGE);
+    return m;
+  }
+
+  /**
+   * The module's memory back to checkpoint `c` (null: the state after the first row) without a pass over it: `reopen` opens the match
+   * again (every page then the baseline's) and resolves the module's memory, or null when the caller has gone; the checkpoint's pages are
+   * written into it. For a module that opens a match again in milliseconds (core.ts canReopen). Resolves the memory written, or null.
+   */
+  async rewindFresh(c: Checkpoint | null, reopen: () => Promise<CheckpointMemory | null>): Promise<CheckpointMemory | null> {
+    this.stats.rewinds++;
+    this.stats.reopens++;
+    const m = await reopen();
+    if (!m) return null;
+    if (c) for (const [p, bytes] of c.pages) m.HEAPU8.set(bytes, p * PAGE);
     return m;
   }
 
