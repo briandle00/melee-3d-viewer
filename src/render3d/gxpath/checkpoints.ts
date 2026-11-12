@@ -44,11 +44,12 @@ export interface KeepInfoMemory extends CheckpointMemory { _msl_gxw_keep_info?(i
 
 /** The pages a match can change: every page of the module's memory but the game data's ranges the match only reads (the translated
  *  files, the DAT graphs, the fighters' sampled animations - msl_gxw_load_game keeps them as hashes, and the game's one write to them is
- *  logged: gameDataWrites) and the block the module keeps its state in; null without a kept state (every page, then) */
+ *  logged: gameDataWrites); null without a kept state (every page, then). (The block the module keeps its state in is not left out: the
+ *  module writes its own record in it as a match plays - 2 of its pages differed from the match opened again on a fixture game.) */
 export function matchPages(m: KeepInfoMemory): number[] | null {
   const info = m._msl_gxw_keep_info;
   if (!info || info.call(m, 0) < 0) return null;
-  const skip: [number, number][] = [[Math.floor(info.call(m, 0) / PAGE), Math.ceil(info.call(m, 1) / PAGE)]];
+  const skip: [number, number][] = [];
   for (let r = 0; r < 6; r++) {
     const b = info.call(m, 100 + 3 * r), e = info.call(m, 101 + 3 * r);
     // (a range's whole pages only: a page it shares with other data is a page a match may change)

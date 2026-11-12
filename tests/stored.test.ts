@@ -346,5 +346,16 @@ test("the real module: rewinds by the pass over the pages a match can change pla
     await go(Math.min(r + 60, tape.count));
   }
   assert.ok(reopens <= 2, `reopens ${reopens}`);
+  // back to the first row's state by the pass: the memory the match opened again has, every page (the stack's unused bytes aside: at most
+  // that page) - the module's own kept block included, which it writes as a match plays
+  await k.rewindPass(mem, null, o);
+  const passed = mem.HEAPU8.slice();
+  await o.reopen();
+  const differ: number[] = [];
+  for (let p = 0; p * PAGE < passed.length; p++) {
+    const x = passed.subarray(p * PAGE, (p + 1) * PAGE), y = mem.HEAPU8.subarray(p * PAGE, (p + 1) * PAGE);
+    if (x.some((v, i) => v !== y[i])) differ.push(p);
+  }
+  assert.ok(differ.length <= 1, `pages that differ from the match opened again: ${differ.join(", ")}`);
   for (const x of [ref, play]) x.destroy();
 });
