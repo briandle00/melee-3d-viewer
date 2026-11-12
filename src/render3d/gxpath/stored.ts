@@ -182,14 +182,16 @@ export async function makeStored(core: GxCore, whole: Uint8Array, count: number,
 
 /** Whether the state in `m` (a match opened, its first row stepped) is the manifest's baseline, on a sample: `sample` pages spread over the
  *  memory and every page the first list names (the pages a match changes), each hashed and held to the manifest's - a few MiB, not the
- *  ~0.9 GiB a whole pass reads. A set made with another module, other game files or another way of opening the match fails it. */
-export function sameBaseline(m: CheckpointMemory, manifest: StoredManifest, sample = 256): boolean {
+ *  ~0.9 GiB a whole pass reads. A set made with another module, other game files or another way of opening the match fails it. `skip`:
+ *  pages the host knows may differ with nothing of the match in them (a match opened again in an instance that played another: the
+ *  stack's unused bytes, what earlier calls left there, and the module's own record of its kept state) */
+export function sameBaseline(m: CheckpointMemory, manifest: StoredManifest, sample = 256, skip?: (page: number) => boolean): boolean {
   const n = Math.ceil(m._msl_gxw_heap_top() / PAGE);
   if (n !== manifest.base.length) return false;
   const pages = new Set<number>();
   for (let k = 0; k < sample; k++) pages.add(Math.floor((k + 0.5) * n / sample));
   const first = [...manifest.lists.keys()].sort((a, b) => a - b)[0];
   if (first !== undefined) for (const p of manifest.lists.get(first)!) if (p < n) pages.add(p);
-  for (const p of pages) if (pageHash(m, p) !== manifest.base[p]) return false;
+  for (const p of pages) if (!skip?.(p) && pageHash(m, p) !== manifest.base[p]) return false;
   return true;
 }

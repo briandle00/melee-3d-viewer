@@ -212,6 +212,8 @@ test("the real module: a stored set written into a fresh instance plays on as th
   const other = { ...m, base: m.base.slice() };
   other.base[[...m.lists.get(40)!][0]] ^= 1;
   assert.ok(!sameBaseline(ref.mod as unknown as CheckpointMemory, other), "a baseline that differs in a page a match changes fails it");
+  const odd = [...m.lists.get(40)!][0];
+  assert.ok(sameBaseline(ref.mod as unknown as CheckpointMemory, other, 256, (p) => p === odd), "unless the host says that page may differ");
   const want = new Map<number, string>();
   for (let r = 1; r < tape.count; r++) { ref.step(nativeRow(whole, r)); want.set(r, await rowKey(ref)); }
   const end = ref.snapshot();
