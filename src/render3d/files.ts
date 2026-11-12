@@ -54,6 +54,9 @@ export type FileSource = ((name: string) => Promise<ArrayBuffer>) & {
    *  source cannot tell. Only what the browser may keep (gamecache.ts) is
    *  keyed by it, so a source without one is never cached */
   identity?: (name: string) => Promise<string | null>;
+  /** many files read together (a host's server answering a whole set in one request, and the browser keeping it: the app's
+   *  host does so); a name the answer lacks is missing from the map. Without it, each file is read on its own (file) */
+  many?: (names: string[]) => Promise<Map<string, Uint8Array>>;
 };
 
 /** files fetched from a folder at this URL (relative to the page) */
@@ -159,6 +162,15 @@ export function file(name: string): Promise<ArrayBuffer> {
   // (the page keeps the last few dozen)
   trim(files, 48);
   return p;
+}
+
+/** the named files read together where the source can (FileSource.many), the ones it did not have missing from the map; null
+ *  where it cannot: read each one (file) */
+export function manyFiles(names: string[]): Promise<Map<string, Uint8Array>> | null {
+  const src = currentSource();
+  if (!src.many) return null;
+  sourceUsed = true;
+  return src.many(names);
 }
 
 let dol: Promise<ArrayBuffer> | undefined;
