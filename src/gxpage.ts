@@ -12,7 +12,7 @@
  */
 import { decode } from "@shelacek/ubjson";
 import { CpuBackend } from "./render3d/gxr/cpu";
-import { gxMissing, gxNames, namesToRead, readGameFiles, readSoundFiles } from "./sim/gamefiles";
+import { gxMissing, gxNames, namesToRead, readGameFiles, readSoundFiles, datBases } from "./sim/gamefiles";
 import type { GameFilesFrom } from "./sim/protocol";
 import { readTape } from "./sim/tape";
 import { isPlaybackMode, PLAYBACK_MODES, type GxCoreFactory, type PlaybackMode } from "./render3d/gxpath/core";
@@ -192,7 +192,10 @@ async function loadReplay(url: string, frame: number, play = q.get("paused") !==
     info("reading the game files...");
     // (a picked folder: the names the draw path reads, from what is in it; a folder by URL: the module's own list beside it)
     const names = filesFrom.kind === "files" ? gxNames(filesFrom.list.map((f) => f.name)) : await namesToRead(filesFrom, new URL("sim-files.json", coreUrl).href);
-    gameFiles = { names, files: await readGameFiles(filesFrom, names) };
+    const files = await readGameFiles(filesFrom, names);
+    // (the module's console bases for its files, when it has them beside it: a match's load then reads like a whole one - gamefiles.ts)
+    for (const [n, b] of await datBases(coreUrl)) { files.set(n, b); names.push(n); }
+    gameFiles = { names, files };
   }
   mark("gameFiles");
   info("starting the simulator...");

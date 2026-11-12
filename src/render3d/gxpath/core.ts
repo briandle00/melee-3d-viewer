@@ -15,6 +15,10 @@
  *   msl_gxw_output_ptr/_size          the step's MslCoreCompare (src/sim/compare.ts holds it against the replay)
  *   msl_gxw_load_game(root)           (newer builds) the game files read once, and the module's state right after kept: msl_gxw_rewind() puts
  *                                     the module back to it, so the next match opens in milliseconds instead of reading the files again
+ *   msl_gxw_load_game_for(root, tape, size)  (newer builds) the same with only that tape's match's game data read - its fighters, Kirby's
+ *                                     copies of them, its stage - instead of every supported fighter's, stage's and copy's: the files
+ *                                     matchFiles names (gamefiles.ts) are then all it reads
+ *   msl_gxw_covers(tape, size)        1 when a match of that tape can be opened on the game data loaded (msl_gxw_open answers -6 if not)
  */
 import type { GxUpdate } from "../gxr/dff";
 import { DATA_ROOT } from "../../sim/engine";
@@ -27,6 +31,8 @@ export interface GxCoreModule {
   _free(ptr: number): void;
   _msl_gxw_open(tape: number, size: number, root: number): number;
   _msl_gxw_load_game?(root: number): number;
+  _msl_gxw_load_game_for?(root: number, tape: number, size: number): number;
+  _msl_gxw_covers?(tape: number, size: number): number;
   _msl_gxw_rewind?(): number;
   _msl_gxw_kept_bytes?(): number;
   _msl_gxw_set_playback(name: number): number;
@@ -86,7 +92,7 @@ export type GxCoreFactory = (options?: Record<string, unknown>) => Promise<GxCor
 /** the register files the stream starts from (gxr GxInitial) */
 export interface GxInitial { bp: Uint32Array; cp: Uint32Array; xfMem: Uint32Array; xfRegs: Uint32Array; texMem: Uint8Array }
 
-const RESULTS: Record<number, string> = { 1: "end of tape", [-1]: "not open", [-2]: "step failed", [-3]: "game data failed", [-4]: "match failed" };
+const RESULTS: Record<number, string> = { 1: "end of tape", [-1]: "not open", [-2]: "step failed", [-3]: "game data failed", [-4]: "match failed", [-6]: "the game data loaded is another match's" };
 
 const SNAP_PAGE = 65536;
 /** GxCore.snapshot(): the module's memory (its non-zero pages) and the JavaScript side's own state */
@@ -133,16 +139,20 @@ export class GxCore {
 
   /** Read the game files once and keep the module's state right after (builds with msl_gxw_load_game; others: nothing, false). The files
    *  are then dropped from the file system: every later match of this instance opens from the kept game data (rewind, then openMatch). */
-  loadGame(names: string[]): boolean {
+  loadGame(names: string[], whole?: Uint8Array): boolean {
     const m = this.mod;
     if (!m._msl_gxw_load_game || !m._msl_gxw_rewind) return false;
-    const root = m._malloc(DATA_ROOT.length + 1);
+    // (with the match's whole tape, only its game data where the module can - msl_gxw_load_game_for; an older module loads all of it)
+    const only = !!whole && !!m._msl_gxw_load_game_for;
+    const root = m._malloc(DATA_ROOT.length + 1), tape = only ? m._malloc(whole!.length) : 0;
     let r: number;
     try {
       m.HEAPU8.set(new TextEncoder().encode(DATA_ROOT + "\0"), root);
-      r = m._msl_gxw_load_game(root);
+      if (only) m.HEAPU8.set(whole!, tape);
+      r = only ? m._msl_gxw_load_game_for!(root, tape, whole!.length) : m._msl_gxw_load_game(root);
     } finally {
       m._free(root);
+      if (tape) m._free(tape);
     }
     if (r === -3) throw new Error("msl_gxw_load_game: game data failed");
     if (r !== 0) return false;
@@ -166,6 +176,20 @@ export class GxCore {
 
   /** another match can be opened in this instance in milliseconds (rewind(), then openMatch): the game data loaded and its state kept */
   get canReopen(): boolean { return this.kept && !!this.mod._msl_gxw_rewind; }
+
+  /** whether a match of this whole tape can be opened on the game data loaded: false when it was loaded for another match's fighters or
+   *  stage (loadGame with a tape) - a new instance loads its own. True before any load, and for a module that loads every match's */
+  covers(whole: Uint8Array): boolean {
+    const m = this.mod;
+    if (!m._msl_gxw_covers) return true;
+    const tape = m._malloc(whole.length);
+    try {
+      m.HEAPU8.set(whole, tape);
+      return m._msl_gxw_covers(tape, whole.length) === 1;
+    } finally {
+      m._free(tape);
+    }
+  }
 
   /** bytes kept for rewind() */
   get keptBytes(): number { return this.kept ? this.mod._msl_gxw_kept_bytes?.() ?? 0 : 0; }

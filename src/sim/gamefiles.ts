@@ -127,3 +127,93 @@ export async function readGameFiles(from: GameFilesFrom, names: string[]): Promi
   for (let i = 0; i < names.length; i += 8) await Promise.all(names.slice(i, i + 8).map(one));
   return out;
 }
+
+/** sim-files-match.json beside a module that loads one match's game data (msl_gxw_load_game_for): which of sim-files.json's files that
+ *  load reads, by part - every match's, each fighter's (by external character id: Popo's has Nana's), Kirby's copy of each fighter
+ *  (read when Kirby plays against it), each stage's (by stage id). Made by the module's own loads (tools/gx-match-files.ts) */
+export interface MatchFileList {
+  version: 1;
+  /** the module it was made for (the first 16 hex digits of gx-core.wasm's SHA-256) */
+  module: string;
+  always: string[];
+  fighters: Record<string, string[]>;
+  kirby: Record<string, string[]>;
+  stages: Record<string, string[]>;
+}
+
+const KIRBY = 4, ZELDA = 19, SHEIK = 7;
+
+/** the stage and fighters of a native tape's match (render3d/gxpath/tapebridge.ts TapeConfig: stage_id at 4, num_players at 24, each
+ *  player's char_id at 41 + 8 p); Zelda's match has Sheik and the other way round (they change into each other during play) */
+export function tapeMatch(whole: Uint8Array): { stage: number; chars: number[] } {
+  const v = new DataView(whole.buffer, whole.byteOffset, whole.byteLength);
+  const stage = v.getInt32(4, true), n = Math.min(4, whole[24]);
+  const chars: number[] = [];
+  for (let p = 0; p < n; p++) {
+    const c = whole[41 + 8 * p];
+    for (const k of c === ZELDA ? [ZELDA, SHEIK] : c === SHEIK ? [SHEIK, ZELDA] : [c]) if (!chars.includes(k)) chars.push(k);
+  }
+  return { stage, chars };
+}
+
+/** the parts of the list one match reads, each a list of names (the parts a page keeps apart: another match shares most of them);
+ *  null when the list does not know one of its fighters or its stage (read every file then) */
+export function matchParts(list: MatchFileList, whole: Uint8Array): string[][] | null {
+  if (list?.version !== 1) return null;
+  const { stage, chars } = tapeMatch(whole);
+  const parts = [list.always];
+  for (const c of chars) {
+    const f = list.fighters[c];
+    if (!f) return null;
+    parts.push(f);
+  }
+  if (chars.includes(KIRBY)) {
+    for (const c of chars) {
+      if (c === KIRBY) continue;
+      const k = list.kirby[c];
+      if (!k) return null;
+      parts.push(k);
+    }
+  }
+  const s = list.stages[stage];
+  if (!s) return null;
+  parts.push(s);
+  return parts.filter((p) => p.length);
+}
+
+/** msl-dat-bases.bin: each file's console base as a load of every match's gives it (the module's native_dat.c dat_base_for), in that
+ *  load's order: with it in the game files folder a one-match load (GxCore.loadGame with the tape) reads like a whole one; without it
+ *  the module reads every match's game data. Made from a whole load's record (datBasesOf), on the player's own files: nothing of it
+ *  ships. A page may keep it (the app does) or a folder may hold one beside the module (tools/gx-match-files.ts writes one) */
+export const DAT_BASES = "msl-dat-bases.bin";
+export async function datBases(moduleUrl: string | URL): Promise<[string, Uint8Array][]> {
+  try {
+    const r = await fetch(new URL(DAT_BASES, moduleUrl));
+    return r.ok ? [[DAT_BASES, new Uint8Array(await r.arrayBuffer())]] : [];
+  } catch {
+    return [];
+  }
+}
+
+/** a module's record of the bases its load gave (msl_native_dat_base_*), as msl-dat-bases.bin: "MSLB", the count, the base for a file
+ *  not in it (past every one), then per file its key (u64) and base, little-endian. null for a module without the record or with none */
+export function datBasesOf(mod: unknown): Uint8Array | null {
+  const m = mod as Record<string, ((i?: number) => number) | undefined>;
+  if (!m._msl_native_dat_base_count || !m._msl_native_dat_base_at || !m._msl_native_dat_base_key_lo || !m._msl_native_dat_base_key_hi) return null;
+  const n = m._msl_native_dat_base_count();
+  if (!n) return null;
+  const out = new Uint8Array(12 + 12 * n), v = new DataView(out.buffer);
+  out.set(new TextEncoder().encode("MSLB"));
+  v.setUint32(4, n, true);
+  let end = 0;
+  for (let i = 0; i < n; i++) {
+    const b = m._msl_native_dat_base_at(i) >>> 0;
+    v.setUint32(12 + 12 * i, m._msl_native_dat_base_key_lo(i) >>> 0, true);
+    v.setUint32(16 + 12 * i, m._msl_native_dat_base_key_hi(i) >>> 0, true);
+    v.setUint32(20 + 12 * i, b, true);
+    end = Math.max(end, b);
+  }
+  // (a file the table does not have - another disc's - is placed well past every one it has)
+  v.setUint32(8, (end + 0x4000000) >>> 0, true);
+  return out;
+}

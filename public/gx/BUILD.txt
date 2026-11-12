@@ -1,7 +1,10 @@
-The GX player's simulator module (gx-core.js, gx-core.wasm) and its game file list (sim-files.json).
+The GX player's simulator module (gx-core.js, gx-core.wasm), its game file list (sim-files.json) and which of those one match's load
+reads (sim-files-match.json).
 
 Built from melee-sim-light (https://github.com/briandle00/melee-sim-light, a fork of https://github.com/kyhavlov/melee-sim-light),
-branch sound/w54 at 99a0cddc (local; sound/w41 0b6fd0c6 with the sound core's two fixes from the upstream port: the stage's music
+branch w94/lazy-game-data at 59a3feb8 (local; sound/w54 99a0cddc with the one-match game data load, msl_gxw_load_game_for and
+msl_gxw_covers: the preload's own steps for the tape's fighters, Kirby's copies of them and its stage only, at the bases a whole load
+gives each file (msl-dat-bases.bin; msl_native_dat_base_* record them); sound/w54 99a0cddc is sound/w41 0b6fd0c6 with the sound core's two fixes from the upstream port: the stage's music
 read from its table with no write to the stage's state, and a second start of the sound in the same module begins as a first start;
 on perf/open 7018279c: the float rule for a sum's own product, native libm calls, fighter facing in
 the effect callback): the viewer build with the HUD layout option (msl_gxw_set_hud_layout), the stream restart and memory-top
@@ -15,8 +18,16 @@ module (the page hands it the user's own files, main.dol included; the sound fil
 Source-file names are relative (prefix maps); gx-core.js is written with LF line ends.
 
 sha256
-  gx-core.js    424e3ca1ce883e3aa8f21bafb6ac0745655375ddb07e6a69bb7351cf51c5e979
-  gx-core.wasm  83844640109a00d422913169eb1e66a9875a48c8d9a24775c30f400b80e25a62
+  gx-core.js    e5c3688d5a6a4ba001c6394167c5d04ffc07bb012a1b554d1cdbdadd43fd1eb3
+  gx-core.wasm  75677dc6c264390193a084de4da0020969fdde3426c32fe9dcf6360d32093ac8
 
 sim-files.json lists the game files the module reads (names only), for a game folder given by URL (?files=). The sound files are not in
 it: the module names them when the sound starts (audio/us/smash2.sem, the match's audio/us/*.ssm banks, the stage's audio/*.hps).
+
+sim-files-match.json is made by the module itself, from a folder of the game's files:
+  deno run -A --sloppy-imports tools/gx-match-files.ts <game files folder> [--keep-bases]
+(a load of every match's records each file's console base; then each fighter's, Kirby copy's and stage's load notes the files it
+opens, and a spread of matches is checked to read nothing beyond their parts). It holds file names only. A match loads only its own
+game data when the folder holds those bases as msl-dat-bases.bin (sim/gamefiles.ts datBasesOf makes it from a whole load's record;
+--keep-bases writes one beside the module for a local build): it is made from the player's own files and never committed. Without
+it the module loads every match's game data, as before. Make sim-files-match.json again with every new module.

@@ -58,7 +58,8 @@ export async function fitCstick(o: FitOptions): Promise<{ rawC: RawC; drives: nu
     if (!opened?.rewind()) {
       opened?.destroy();
       opened = await GxCore.create(make, files);
-      opened.loadGame([...files.keys()]);
+      // (only this match's game data: every drive is the same match, its C-stick aside)
+      opened.loadGame([...files.keys()], whole);
     }
     opened.openMatch(whole, [...files.keys()], "original");
     return opened;

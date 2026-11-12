@@ -17,3 +17,6 @@ public/effect-table.json
 # the Melee decompilation, for scripts/generate-item-animations.py: see README.md
 vendor/
 __pycache__/
+
+# made from the player's own game files (tools/gx-match-files.ts --keep-bases): never committed
+public/gx/msl-dat-bases.bin

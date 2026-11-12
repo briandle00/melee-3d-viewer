@@ -145,13 +145,14 @@ export class GxSession {
    *  first load), else in a fresh instance that loads the game data (GxCore.loadGame). */
   private async openIn(reuse: GxCore | null, whole: Uint8Array, mode: PlaybackMode, sound = true): Promise<GxCore> {
     let core = reuse;
-    if (!core?.rewind()) {
+    // (an instance whose game data is another match's - loaded for that match's fighters and stage only - cannot open this one)
+    if (!core?.covers(whole) || !core.rewind()) {
       core?.destroy();
       core = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), this.o.files.files);
       // (and put back to the state the load kept at once: the load's own call frees memory after it keeps the state, so a match opened
       // straight after it has its allocator elsewhere - pages of the match's memory differ from those of every later opening of this
       // instance, which all follow a rewind; the first match is then one of those)
-      if (core.loadGame(this.o.files.names)) core.rewind();
+      if (core.loadGame(this.o.files.names, whole)) core.rewind();
     }
     core.openMatch(whole, this.o.files.names, mode);
     if (sound && this.o.sound && (this.soundState === "off" || this.soundState === "on")) return await this.startSound(core, whole, mode);

@@ -9,3 +9,5 @@
 *.md text eol=lf
 *.css text eol=lf
 *.html text eol=lf
+# the module as emscripten writes it (two CRLF line ends), byte for byte the build BUILD.txt hashes
+public/gx/gx-core.js -text
