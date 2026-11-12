@@ -410,7 +410,10 @@ export class Stage {
     const info = STAGES[stageId];
     if (!info) throw new Error(`no 3D model for stage ${stageId}`);
     this.info = info;
-    const a = (this.archive = parseArchive(buf));
+    // (a copy: the file's bytes are the page's, shared with its other players - render3d/files.ts - and the render modes are set in
+    // them below; the GX player's simulator, handed the same bytes, then read the stage's file with RENDER_SHADOW already set where the
+    // game's file has none, and its memory was not the game's)
+    const a = (this.archive = parseArchive(buf.slice(0)));
     // grGroundParam starts with the stage's scale (Battlefield 0.8, Yoshi's 0.7, ...)
     const gp = a.publics.get("grGroundParam");
     this.scale = gp === undefined ? 1 : a.data.getFloat32(gp);
