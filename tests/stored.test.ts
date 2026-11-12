@@ -11,7 +11,7 @@ import { driveOrder, readTape, type Tape } from "../src/sim/tape.ts";
 import { GxCore, type GxCoreFactory } from "../src/render3d/gxpath/core.ts";
 import { nativeRow, nativeTape } from "../src/render3d/gxpath/tapebridge.ts";
 import { Checkpoints, PAGE, pageHash, pageHashes, pageHashes2, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
-import { decodeCheckpoint, decodeManifest, encodeCheckpoint, encodeManifest, makeStored, sameBaseline, type StoredManifest } from "../src/render3d/gxpath/stored.ts";
+import { decodeCheckpoint, decodeManifest, encodeCheckpoint, encodeManifest, extendStored, makeStored, sameBaseline, type StoredManifest } from "../src/render3d/gxpath/stored.ts";
 import { fastPageHasher } from "../src/render3d/gxpath/pagehash.ts";
 import { gxNames } from "../src/sim/gamefiles.ts";
 import { gameFiles, withGameFiles } from "./game-files.ts";
@@ -244,4 +244,39 @@ test("the real module: a stored set written into a fresh instance plays on as th
   for (let r = 320; r < tape.count; r++) { play.step(nativeRow(whole, r)); assert.equal(await rowKey(play), want.get(r), `again row ${r}`); }
   assert.equal(k.stats.hashes, 0, "no pass over the memory by the player");
   for (const x of [ref, play]) x.destroy();
+});
+
+test("the real module: rows given whole checkpoints when the set is made, or added to it later, are the same checkpoints", withGameFiles, async () => {
+  const ROWS = 420, tape = tapeOf(ROWS), whole = nativeTape(tape, driveOrder(tape, 1)[0]);
+  const mod = await realModule();
+  const keep = new Map<number, Map<number, Uint8Array>>();
+  // made with them
+  const a = await mod.open(whole);
+  const withExtra = (await makeStored(a, whole, tape.count, { id: "t", every: 120, dense: 40, extra: [200, 330, 360],
+                                                              onCheckpoint: (c) => { keep.set(c.row, c.pages); } }))!;
+  a.destroy();
+  assert.deepEqual(withExtra.stored, [120, 200, 240, 330, 360]);
+  // made without, then added: from the stored one nearest before each, the simulator alone
+  const b = await mod.open(whole);
+  const plainKept = new Map<number, Map<number, Uint8Array>>();
+  const plain = (await makeStored(b, whole, tape.count, { id: "t", every: 120, dense: 40, onCheckpoint: (c) => { plainKept.set(c.row, c.pages); } }))!;
+  b.destroy();
+  const c = await mod.open(whole);
+  const added = new Map<number, Map<number, Uint8Array>>();
+  let gets = 0, reopens = 0;
+  const extended = await extendStored(c, whole, plain, [330, 200, 360], {
+    get: async (row) => { gets++; return { row, pages: plainKept.get(row)! }; },
+    reopen: async () => { reopens++; c.rewind(); c.openMatch(whole, mod.names, "slippi"); c.step(nativeRow(whole, 0)); },
+    onCheckpoint: (k) => { added.set(k.row, k.pages); },
+  });
+  c.destroy();
+  assert.deepEqual(extended.stored, [120, 200, 240, 330, 360]);
+  assert.ok(gets >= 2 && reopens >= 2, JSON.stringify({ gets, reopens }));
+  for (const row of [200, 330]) {
+    assert.deepEqual([...extended.lists.get(row)!], [...withExtra.lists.get(row)!], `list ${row}`);
+    const x = added.get(row)!, y = keep.get(row)!;
+    // (the stack's unused bytes: at most that page differs)
+    const differ = [...x.keys()].filter((p) => !y.has(p) || x.get(p)!.some((v, i) => v !== y.get(p)![i]));
+    assert.ok(differ.length <= 1, `checkpoint ${row}: pages ${differ.join(", ")}`);
+  }
 });
