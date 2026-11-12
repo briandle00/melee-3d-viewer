@@ -10,7 +10,7 @@ import path from "node:path";
 import { driveOrder, readTape, type Tape } from "../src/sim/tape.ts";
 import { GxCore, type GxCoreFactory } from "../src/render3d/gxpath/core.ts";
 import { nativeRow, nativeTape } from "../src/render3d/gxpath/tapebridge.ts";
-import { Checkpoints, PAGE, pageHash, pageHashes, pageHashes2, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
+import { Checkpoints, gameDataWrites, matchPages, PAGE, pageHash, pageHashes, pageHashes2, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
 import { decodeCheckpoint, decodeManifest, encodeCheckpoint, encodeManifest, extendStored, makeStored, sameBaseline, type StoredManifest } from "../src/render3d/gxpath/stored.ts";
 import { fastPageHasher } from "../src/render3d/gxpath/pagehash.ts";
 import { gxNames } from "../src/sim/gamefiles.ts";
@@ -279,4 +279,72 @@ test("the real module: rows given whole checkpoints when the set is made, or add
     const differ = [...x.keys()].filter((p) => !y.has(p) || x.get(p)!.some((v, i) => v !== y.get(p)![i]));
     assert.ok(differ.length <= 1, `checkpoint ${row}: pages ${differ.join(", ")}`);
   }
+});
+
+test("rewindPass: back to a checkpoint by a pass over the pages a match can change, the match opened again only when it must", async () => {
+  const m = memory(), k = new Checkpoints(120);
+  const h = (p: number) => BigInt(pageHash(m, p)) * 7919n + BigInt(m.HEAPU8[p * PAGE + 9]);
+  k.baseline(m);
+  put(m, 2, 50); put(m, 4, 60);
+  k.keep(m, 600);
+  put(m, 2, 51); put(m, 5, 70);
+  let reopens = 0, unchanged = true;
+  const reopen = async () => { reopens++; for (let p = 0; p < PAGES; p++) put(m, p, p); return m; };
+  const o = { hash: h, pages: [0, 1, 2, 3, 4, 5, 6], unchanged: () => unchanged, reopen };
+  // the first: opened again (the baseline's hashes taken from it)
+  await k.rewindPass(m, k.latest(700), o);
+  assert.equal(reopens, 1);
+  assert.deepEqual([2, 4, 5].map((p) => at(m, p)), [50, 60, 5]);
+  // then by the pass alone: pages changed since back as they started (page 5 seen at the first), the checkpoint's written
+  put(m, 2, 52); put(m, 4, 61);
+  await k.rewindPass(m, k.latest(700), o);
+  assert.equal(reopens, 1);
+  assert.deepEqual([2, 4, 5].map((p) => at(m, p)), [50, 60, 5]);
+  // a page never seen as it started: opened again, then kept
+  put(m, 5, 71); put(m, 6, 80);
+  await k.rewindPass(m, null, o);
+  assert.equal(reopens, 2);
+  assert.deepEqual([2, 4, 5, 6].map((p) => at(m, p)), [2, 4, 5, 6]);
+  put(m, 5, 72); put(m, 6, 81);
+  await k.rewindPass(m, null, o);
+  assert.equal(reopens, 2, "pages 5 and 6 were seen as they started: no reopen");
+  assert.deepEqual([5, 6].map((p) => at(m, p)), [5, 6]);
+  // a page outside the ones the host says a match can change is never looked at (the game data the module keeps)
+  put(m, 7, 90);
+  await k.rewindPass(m, k.latest(700), o);
+  assert.equal(at(m, 7), 90);
+  // the game data the pass leaves out changed (the host says so): opened again
+  unchanged = false;
+  await k.rewindPass(m, k.latest(700), o);
+  assert.equal(reopens, 3);
+  assert.deepEqual([2, 4].map((p) => at(m, p)), [50, 60]);
+});
+
+test("the real module: rewinds by the pass over the pages a match can change play on as the straight play", withGameFiles, async () => {
+  const ROWS = 420, tape = tapeOf(ROWS), whole = nativeTape(tape, driveOrder(tape, 1)[0]);
+  const mod = await realModule();
+  const ref = await mod.open(whole);
+  const want = new Map<number, string>();
+  for (let r = 1; r < tape.count; r++) { ref.step(nativeRow(whole, r)); want.set(r, await rowKey(ref)); }
+  const play = await mod.open(whole), mem = play.mod as unknown as CheckpointMemory;
+  const hash = fastPageHasher(mod.memory())!;
+  const pages = matchPages(play.mod as never)!;
+  assert.ok(pages && pages.length < Math.ceil(mem.HEAPU8.length / PAGE) * 0.8, "the game data's ranges are left out");
+  const writes0 = gameDataWrites(play.mod as never);
+  const k = new Checkpoints(120);
+  k.baseline(mem);
+  let reopens = 0, at = 1;
+  const o = { hash, pages, unchanged: () => gameDataWrites(play.mod as never) === writes0,
+              reopen: async () => { reopens++; play.rewind(); play.openMatch(whole, mod.names, "slippi"); play.step(nativeRow(whole, 0)); return mem; } };
+  const go = async (to: number) => { for (; at < to; at++) { play.step(nativeRow(whole, at)); assert.equal(await rowKey(play), want.get(at), `row ${at}`); } };
+  for (const r of [100, 200, 300]) { await go(r); k.keep(mem, r); }
+  await go(400);
+  // back and forth: 200, 100, 300, 200 - each played on and held to the straight play
+  for (const r of [200, 100, 300, 200, 300]) {
+    await k.rewindPass(mem, k.latest(r), o);
+    at = r;
+    await go(Math.min(r + 60, tape.count));
+  }
+  assert.ok(reopens <= 2, `reopens ${reopens}`);
+  for (const x of [ref, play]) x.destroy();
 });
