@@ -17,7 +17,7 @@
  */
 import { GxCore } from "./core";
 import { nativeRow } from "./tapebridge";
-import { PAGE, pageHashes, pageHashes2, type Checkpoint, type CheckpointMemory } from "./checkpoints";
+import { PAGE, pageHash, pageHashes, pageHashes2, type Checkpoint, type CheckpointMemory } from "./checkpoints";
 
 export const STORED_VERSION = 1;
 const CK = 0x4b435847, CM = 0x4d435847;
@@ -154,4 +154,18 @@ export async function makeStored(core: GxCore, whole: Uint8Array, count: number,
   }
   o.onProgress?.(count);
   return { id: o.id, rows: count, every: o.every, dense: o.dense, base, stored, lists };
+}
+
+/** Whether the state in `m` (a match opened, its first row stepped) is the manifest's baseline, on a sample: `sample` pages spread over the
+ *  memory and every page the first list names (the pages a match changes), each hashed and held to the manifest's - a few MiB, not the
+ *  ~0.9 GiB a whole pass reads. A set made with another module, other game files or another way of opening the match fails it. */
+export function sameBaseline(m: CheckpointMemory, manifest: StoredManifest, sample = 256): boolean {
+  const n = Math.ceil(m._msl_gxw_heap_top() / PAGE);
+  if (n !== manifest.base.length) return false;
+  const pages = new Set<number>();
+  for (let k = 0; k < sample; k++) pages.add(Math.floor((k + 0.5) * n / sample));
+  const first = [...manifest.lists.keys()].sort((a, b) => a - b)[0];
+  if (first !== undefined) for (const p of manifest.lists.get(first)!) if (p < n) pages.add(p);
+  for (const p of pages) if (pageHash(m, p) !== manifest.base[p]) return false;
+  return true;
 }

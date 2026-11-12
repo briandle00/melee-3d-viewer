@@ -26,6 +26,18 @@ export const PAGE = 65536;
 /** checkpoints kept, and rows a checkpoint serves for (none is taken within this many rows after another) */
 export const KEEP = 10, SPACING = 300;
 
+/** page `p`'s hash as pageHashes makes it (a few pages checked against hashes taken before: a stored set's baseline, stored.ts) */
+export function pageHash(m: CheckpointMemory, p: number): number {
+  const u32 = new Uint32Array(m.HEAPU8.buffer, 0, m.HEAPU8.length >> 2);
+  const P = 16777619;
+  let h0 = 2166136261, h1 = 0x01000193, h2 = 0x9e3779b9, h3 = 0x85ebca6b;
+  const a = p * (PAGE / 4), end = Math.min(a + PAGE / 4, u32.length);
+  let i = a;
+  for (; i + 3 < end; i += 4) { h0 = Math.imul(h0 ^ u32[i], P); h1 = Math.imul(h1 ^ u32[i + 1], P); h2 = Math.imul(h2 ^ u32[i + 2], P); h3 = Math.imul(h3 ^ u32[i + 3], P); }
+  for (; i < end; i++) h0 = Math.imul(h0 ^ u32[i], P);
+  return (Math.imul(h0 ^ (h1 >>> 7 | h1 << 25), P) ^ Math.imul(h2 ^ (h3 >>> 13 | h3 << 19), 0x27d4eb2d)) >>> 0;
+}
+
 /** a pass over the module's memory with two 32-bit hashes a page: the [2p] and [2p + 1] words are page p's. A list of the pages that
  *  differ from the baseline made from it is kept for good (stored.ts), so a page is taken as unchanged only when 64 bits say so */
 export function pageHashes2(m: CheckpointMemory): Uint32Array {

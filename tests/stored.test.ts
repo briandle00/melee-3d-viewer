@@ -10,8 +10,8 @@ import path from "node:path";
 import { driveOrder, readTape, type Tape } from "../src/sim/tape.ts";
 import { GxCore, type GxCoreFactory } from "../src/render3d/gxpath/core.ts";
 import { nativeRow, nativeTape } from "../src/render3d/gxpath/tapebridge.ts";
-import { Checkpoints, PAGE, pageHashes, pageHashes2, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
-import { decodeCheckpoint, decodeManifest, encodeCheckpoint, encodeManifest, makeStored, type StoredManifest } from "../src/render3d/gxpath/stored.ts";
+import { Checkpoints, PAGE, pageHash, pageHashes, pageHashes2, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
+import { decodeCheckpoint, decodeManifest, encodeCheckpoint, encodeManifest, makeStored, sameBaseline, type StoredManifest } from "../src/render3d/gxpath/stored.ts";
 import { gxNames } from "../src/sim/gamefiles.ts";
 import { gameFiles, withGameFiles } from "./game-files.ts";
 
@@ -84,6 +84,13 @@ test("a checkpoint and a manifest read back as written; anything else is refused
                    { ...m, base: [...m.base], lists: [...m.lists].map(([r, l]) => [r, [...l]]) });
   await assert.rejects(decodeCheckpoint(await encodeManifest(m)));
   await assert.rejects(decodeManifest(await encodeCheckpoint({ row: 1, pages })));
+});
+
+test("pageHash is pageHashes' word for one page", () => {
+  const m = memory();
+  m.HEAPU8[3 * PAGE + 77] = 5;
+  const all = pageHashes(m);
+  for (let p = 0; p < PAGES; p++) assert.equal(pageHash(m, p), all[p]);
 });
 
 test("pageHashes2: equal memory hashes equal; a change to any one word changes its page's pair", () => {
@@ -171,6 +178,10 @@ test("the real module: a stored set written into a fresh instance plays on as th
   // the reference: a straight play in another instance, each row's stream and updates
   const ref = await mod.open(whole);
   assert.deepEqual([...pageHashes(ref.mod as unknown as CheckpointMemory)], [...m.base], "the first row's state is the same bytes in every instance");
+  assert.ok(sameBaseline(ref.mod as unknown as CheckpointMemory, m), "the sample of the baseline holds");
+  const other = { ...m, base: m.base.slice() };
+  other.base[[...m.lists.get(40)!][0]] ^= 1;
+  assert.ok(!sameBaseline(ref.mod as unknown as CheckpointMemory, other), "a baseline that differs in a page a match changes fails it");
   const want = new Map<number, string>();
   for (let r = 1; r < tape.count; r++) { ref.step(nativeRow(whole, r)); want.set(r, await rowKey(ref)); }
   const end = ref.snapshot();
