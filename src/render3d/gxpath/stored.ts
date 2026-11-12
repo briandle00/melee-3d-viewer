@@ -112,6 +112,11 @@ export interface MakeOptions {
   /** awaited between pieces of about sliceMs (the host's pause: let other work in, wait while a player is busy) */
   pause?: () => Promise<void>;
   sliceMs?: number;
+  /** a page's 64-bit hash by a faster pass (pagehash.ts fastPageHasher, on the module's memory): the page lists made with it; else the
+   *  JavaScript pass (pageHashes2) */
+  pageHash?: (p: number) => bigint;
+  /** (the checks) where the making's time went, ms: stepping, the passes for the lists, the whole checkpoints' copies, onCheckpoint */
+  times?: { step: number; pass: number; copy: number; give: number };
 }
 
 /** The module's memory as the maker reads it (the graphics build: its heap top) */
@@ -125,25 +130,44 @@ type Mem = CheckpointMemory;
 export async function makeStored(core: GxCore, whole: Uint8Array, count: number, o: MakeOptions): Promise<StoredManifest | null> {
   if (o.every % o.dense !== 0) throw new Error("every must be a multiple of dense");
   const m = core.mod as unknown as Mem;
-  const base = pageHashes(m), base2 = pageHashes2(m);
+  const T = o.times ?? { step: 0, pass: 0, copy: 0, give: 0 };
+  // each page's 64-bit hash now (two words a page), by the faster pass when the host has one
+  const pass = (): Uint32Array => {
+    const t0 = performance.now();
+    let out: Uint32Array;
+    if (o.pageHash) {
+      const n = Math.ceil(m._msl_gxw_heap_top() / PAGE), h = new BigUint64Array(n);
+      for (let p = 0; p < n; p++) h[p] = o.pageHash(p);
+      out = new Uint32Array(h.buffer);
+    } else out = pageHashes2(m);
+    T.pass += performance.now() - t0;
+    return out;
+  };
+  const base = pageHashes(m), base2 = pass();
   const lists = new Map<number, Uint32Array>(), stored: number[] = [];
   const slice = o.sliceMs ?? 50;
   let t = performance.now();
   for (let row = 1; row < count; row++) {
     if (row % o.dense === 0) {
-      const now = pageHashes2(m), differ: number[] = [];
+      const now = pass(), differ: number[] = [];
       for (let p = 0; p < now.length / 2; p++) {
         if (2 * p >= base2.length || now[2 * p] !== base2[2 * p] || now[2 * p + 1] !== base2[2 * p + 1]) differ.push(p);
       }
       lists.set(row, Uint32Array.from(differ));
       if (row % o.every === 0) {
+        const t0 = performance.now();
         const pages = new Map<number, Uint8Array>();
         for (const p of differ) pages.set(p, m.HEAPU8.slice(p * PAGE, (p + 1) * PAGE));
         stored.push(row);
+        const t1 = performance.now();
         await o.onCheckpoint({ row, pages });
+        T.copy += t1 - t0;
+        T.give += performance.now() - t1;
       }
     }
+    const ts = performance.now();
     core.step(nativeRow(whole, row));
+    T.step += performance.now() - ts;
     if (performance.now() - t > slice) {
       o.onProgress?.(row + 1);
       if (o.stop?.()) return null;

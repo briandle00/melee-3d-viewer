@@ -12,6 +12,7 @@ import { GxCore, type GxCoreFactory } from "../src/render3d/gxpath/core.ts";
 import { nativeRow, nativeTape } from "../src/render3d/gxpath/tapebridge.ts";
 import { Checkpoints, PAGE, pageHash, pageHashes, pageHashes2, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
 import { decodeCheckpoint, decodeManifest, encodeCheckpoint, encodeManifest, makeStored, sameBaseline, type StoredManifest } from "../src/render3d/gxpath/stored.ts";
+import { fastPageHasher } from "../src/render3d/gxpath/pagehash.ts";
 import { gxNames } from "../src/sim/gamefiles.ts";
 import { gameFiles, withGameFiles } from "./game-files.ts";
 
@@ -93,6 +94,21 @@ test("pageHash is pageHashes' word for one page", () => {
   for (let p = 0; p < PAGES; p++) assert.equal(pageHash(m, p), all[p]);
 });
 
+test("fastPageHasher: a change to any one word of a page changes its hash, and only that page's", () => {
+  const memory = new WebAssembly.Memory({ initial: 4 });
+  const h = fastPageHasher(memory)!;
+  assert.ok(h, "this engine has SIMD");
+  const before = [0, 1, 2, 3].map((p) => h(p));
+  const u32 = new Uint32Array(memory.buffer);
+  for (const word of [0, 1, 5, 15, 16, 1000, PAGE / 4 - 1]) {
+    u32[2 * PAGE / 4 + word] ^= 0x80;
+    assert.notEqual(h(2), before[2], `word ${word}`);
+    assert.deepEqual([0, 1, 3].map((p) => h(p)), [before[0], before[1], before[3]]);
+    u32[2 * PAGE / 4 + word] ^= 0x80;
+    assert.equal(h(2), before[2]);
+  }
+});
+
 test("pageHashes2: equal memory hashes equal; a change to any one word changes its page's pair", () => {
   const a = memory(), b = memory();
   assert.deepEqual(pageHashes2(a), pageHashes2(b));
@@ -140,15 +156,19 @@ test("limit: more than the limit drops the one farthest from where the match is"
 });
 
 // ---- the real module
-async function realModule(): Promise<{ open: (whole: Uint8Array) => Promise<GxCore>; names: string[] }> {
+async function realModule(): Promise<{ open: (whole: Uint8Array) => Promise<GxCore>; names: string[]; memory: () => WebAssembly.Memory }> {
   const dir = path.join(import.meta.dirname!, "..", "public", "gx");
   const names = gxNames(fs.readdirSync(gameFiles!));
   const files = new Map(names.map((n) => [n, new Uint8Array(fs.readFileSync(path.join(gameFiles!, n)))]));
   const wasm = await WebAssembly.compile(fs.readFileSync(path.join(dir, "gx-core.wasm")));
   const factory = (await import(new URL("../public/gx/gx-core.js", import.meta.url).href)).default as GxCoreFactory;
-  const options = { instantiateWasm: (imports: WebAssembly.Imports, ok: (i: WebAssembly.Instance) => void) => { WebAssembly.instantiate(wasm, imports).then(ok); return {}; } };
+  let memory: WebAssembly.Memory | null = null;
+  const options = { instantiateWasm: (imports: WebAssembly.Imports, ok: (i: WebAssembly.Instance) => void) => {
+    WebAssembly.instantiate(wasm, imports).then((i) => { memory = i.exports.memory as WebAssembly.Memory; ok(i); }); return {}; } };
   return {
     names,
+    // (the last instance's memory, for the faster pass)
+    memory: () => memory!,
     // (a fresh instance, the game data loaded and put back at once, as the players open a match: session.ts openIn)
     async open(whole) {
       const core = await GxCore.create(factory, files, options);
@@ -170,8 +190,18 @@ test("the real module: a stored set written into a fresh instance plays on as th
   // made by one instance
   const maker = await mod.open(whole);
   const made = new Map<number, Uint8Array>();
-  const manifest = (await makeStored(maker, whole, tape.count, { id: "t", every: 120, dense: 40, onCheckpoint: async (c) => { made.set(c.row, await encodeCheckpoint(c)); } }))!;
+  const hasher = fastPageHasher(mod.memory());
+  assert.ok(hasher, "this engine has SIMD");
+  const times = { step: 0, pass: 0, copy: 0, give: 0 };
+  const manifest = (await makeStored(maker, whole, tape.count, { id: "t", every: 120, dense: 40, pageHash: hasher!, times,
+                                                                 onCheckpoint: async (c) => { made.set(c.row, await encodeCheckpoint(c)); } }))!;
   maker.destroy();
+  assert.ok(times.step > 0 && times.pass > 0 && times.copy > 0, JSON.stringify(times));
+  // (the faster pass's lists are the JavaScript pass's)
+  const slow = await mod.open(whole);
+  const again = (await makeStored(slow, whole, tape.count, { id: "t", every: 120, dense: 40, onCheckpoint: () => {} }))!;
+  slow.destroy();
+  assert.deepEqual([...again.lists].map(([r, l]) => [r, [...l]]), [...manifest.lists].map(([r, l]) => [r, [...l]]));
   assert.deepEqual(manifest.stored, [120, 240, 360]);
   assert.deepEqual([...manifest.lists.keys()], [40, 80, 120, 160, 200, 240, 280, 320, 360, 400]);
   const m = await decodeManifest(await encodeManifest(manifest));
