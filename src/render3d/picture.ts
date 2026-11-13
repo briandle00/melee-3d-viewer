@@ -13,7 +13,8 @@
  * 528 x 73 / 60 across.
  *
  * So the scene is drawn into a frame buffer of the game's 640 x 480 at the
- * scale the canvas has of Dolphin's 640 x 528 (bind()), then stretched over
+ * scale the canvas has of Dolphin's 640 x 528, never under 1 (pictureSize,
+ * bind()), then stretched over
  * the canvas, filtered linearly (present()). Without anti-aliasing, as the
  * game's frame buffer (its render modes' aa off; Dolphin's MSAA off): its
  * edges and the textures' level of detail come out as the game's.
@@ -33,9 +34,12 @@ export const EFB_W = 640, EFB_H = 528;
 /** the game's own frame buffer: the lines it draws and the video shows */
 export const GAME_W = 640, GAME_H = 480;
 
-/** the size the scene is drawn at for a canvas of w x h pixels */
+/** the size the scene is drawn at for a canvas of w x h pixels: never under the game's own 640 x 480, as Dolphin
+ *  never draws under its native resolution - a smaller canvas has that stretched down over it. Drawn at a canvas's
+ *  scale under it (a player 310 lines tall drew 282), the HUD's lettering, made for 480 lines, came out with rows
+ *  of its glyphs missing: Slippi's name plates read as cut through */
 export function pictureSize(w: number, h: number): [number, number] {
-  const s = Math.min(w / EFB_W, h / EFB_H);
+  const s = Math.max(1, Math.min(w / EFB_W, h / EFB_H));
   return [Math.max(1, Math.round(GAME_W * s)), Math.max(1, Math.round(GAME_H * s))];
 }
 
