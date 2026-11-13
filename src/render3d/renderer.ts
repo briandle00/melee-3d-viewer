@@ -33,7 +33,7 @@ import {
 import { CNST_ALPHA, CNST_BLEND, CNST_DIFFUSE, CNST_SPECULAR, CNST_TEXREG, IN_CNST, IN_RAS, IN_STAGE, IN_TEX, IN_VALUE, type TevProgram, compileTExp, packTev } from "./texp";
 import { DEFAULT_LIGHTS, LightSet, Lighting } from "./lightset";
 import { LOOK_H, LOOK_W, Look480 } from "./look480";
-import { GamePicture, type PictureOptions } from "./picture";
+import { EFB_H, GamePicture, type PictureOptions } from "./picture";
 import { CRT_LOOKS, type CrtPreset, crtPixels } from "./crt";
 import { drawingSize } from "./drawsize";
 import { pageWeak } from "../state/pageCache";
@@ -1462,7 +1462,11 @@ void main() {
       this.maxDim = v ? Math.min(v[0], v[1]) : 4096;
     }
     const exact = !!(this.look && this.crt !== "off" && device && device[0] > 0 && device[1] > 0);
-    const [w, h] = drawingSize(cssW, cssH, window.devicePixelRatio || 1, { device, exact, maxDim: this.maxDim });
+    let [w, h] = drawingSize(cssW, cssH, window.devicePixelRatio || 1, { device, exact, maxDim: this.maxDim });
+    // (a canvas under Dolphin's native 528 lines is made that tall, at its own shape, and the browser shows it
+    // smaller, as GX's player does: the scene never drawn under the game's 640 x 480, and the picture shrunk once,
+    // smoothly - stretched down by the picture's own linear filter, a name plate's letters came out thin and dim)
+    if (!this.look && h < EFB_H) { w = Math.min(this.maxDim, Math.max(1, Math.round((w * EFB_H) / h))); h = EFB_H; }
     if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
     this.size = [w, h];
     // the scene into the 480p look's 640 x 480 frame buffer (look480.ts), else into one of the game's shape at
