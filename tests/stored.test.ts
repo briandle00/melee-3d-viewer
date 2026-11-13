@@ -500,3 +500,22 @@ test("the real module: the match's arena past what it has used is as the match o
   }
   core.destroy();
 });
+
+test("keepPass: a checkpoint of the pages that differ from a baseline taken by the faster pass, whatever the instance did before", () => {
+  const m = memory(), k = new Checkpoints(120);
+  const h = (p: number) => BigInt(pageHash(m, p)) * 7919n + BigInt(m.HEAPU8[p * PAGE + 9]);
+  k.baseline(m, pageHashes(m));
+  assert.equal(k.keepPass(m, 500, { hash: h, pages: [0, 1, 2, 3, 4, 5, 6] }), false, "no faster baseline yet");
+  k.passBase(m, { hash: h, pages: [0, 1, 2, 3, 4, 5, 6] });
+  put(m, 2, 50); put(m, 6, 60); put(m, 7, 70);
+  assert.ok(k.keepPass(m, 600, { hash: h, pages: [0, 1, 2, 3, 4, 5, 6] }));
+  put(m, 2, 51); put(m, 3, 52);
+  const c = k.latest(600)!;
+  assert.deepEqual([...c.pages.keys()].sort(), [2, 6], "the pages that differ, of those a match can change");
+  assert.deepEqual([at(m, 2), c.pages.get(2)![123]], [51, 50], "a copy");
+  // (a page in the unused range is not read: as it was)
+  put(m, 5, 90);
+  assert.ok(k.keepPass(m, 700, { hash: h, pages: [0, 1, 2, 3, 4, 5, 6], unused: () => [5, 6] }));
+  assert.ok(!k.latest(700)!.pages.has(5));
+  assert.equal(k.stats.hashes, 0);
+});

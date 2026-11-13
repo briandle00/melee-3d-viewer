@@ -327,6 +327,34 @@ export class Checkpoints {
   /** the faster pass's baseline: each page's 64-bit hash after the first row, for the pages a match can change (rewindPass) */
   private base64: Map<number, bigint> | null = null;
 
+  /** The faster pass's baseline taken now - the module at its baseline (the match just opened, its first row stepped) - for `pages`, the
+   *  pages a match can change (every one read: the match's arena past what it has used too, which later passes leave out while it stays
+   *  unused). Then keepPass can keep a checkpoint by the faster pass before the first rewind. */
+  passBase(m: CheckpointMemory, o: { hash: (p: number) => bigint; pages: number[] }): void {
+    const t0 = performance.now();
+    this.base64 = new Map();
+    for (const p of o.pages) this.base64.set(p, o.hash(p));
+    this.stats.passMs += performance.now() - t0;
+    this.stats.passes++;
+  }
+
+  /** Keep the module's state before row `index` as a checkpoint of the pages a match can change that differ from the baseline, found by
+   *  the faster pass (`pages`, `unused` as rewindPass takes them; the game data the pass leaves out must be as it was - the host checks its
+   *  rewrites). Exact for any history of the instance - unlike keepPages, whose list describes the instance that made it. False (nothing
+   *  kept) before the faster pass has a baseline (passBase, or a first rewindPass). */
+  keepPass(m: CheckpointMemory, index: number, o: { hash: (p: number) => bigint; pages: number[]; unused?: () => [number, number] | null }): boolean {
+    if (!this.base || !this.base64) return false;
+    if (this.kept.some((c) => c.row === index)) return true;
+    const t0 = performance.now();
+    const [ua, uz] = o.unused?.() ?? [0, 0];
+    const pages = new Map<number, Uint8Array>();
+    for (const p of o.pages) if ((p < ua || p >= uz) && o.hash(p) !== this.base64.get(p)) pages.set(p, this.page(m, p));
+    this.stats.passMs += performance.now() - t0;
+    this.stats.passes++;
+    this.put({ row: index, pages });
+    return true;
+  }
+
   /**
    * The module's memory back to checkpoint `c` (null: the state after the first row) by a faster pass over only the pages a match can
    * change (`pages`: the module's memory but the game data it reads and never writes, and the module's own record of its kept state),
