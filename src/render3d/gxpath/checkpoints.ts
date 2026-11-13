@@ -59,6 +59,12 @@ export function matchPages(m: KeepInfoMemory): number[] | null {
     // (a range's whole pages only: a page it shares with other data is a page a match may change)
     if (e > b) skip.push([Math.ceil(b / PAGE), Math.floor(e / PAGE)]);
   }
+  // (and the game data's two arenas past their used bytes, which nothing writes after the load - the module's own rewind does not look at
+  // them either: msl_gxw_keep_info 200 + 2r, 201 + 2r; a module without them answers -1)
+  for (let r = 0; r < 2; r++) {
+    const b = info.call(m, 200 + 2 * r), e = info.call(m, 201 + 2 * r);
+    if (b > 0 && e > b) skip.push([Math.ceil(b / PAGE), Math.floor(e / PAGE)]);
+  }
   const out: number[] = [];
   for (let p = 0, n = Math.ceil(m.HEAPU8.length / PAGE); p < n; p++) if (!skip.some(([a, z]) => p >= a && p < z)) out.push(p);
   return out;

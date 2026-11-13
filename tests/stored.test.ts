@@ -11,7 +11,7 @@ import { driveOrder, readTape, type Tape } from "../src/sim/tape.ts";
 import { GxCore, type GxCoreFactory } from "../src/render3d/gxpath/core.ts";
 import { nativeRow, nativeTape } from "../src/render3d/gxpath/tapebridge.ts";
 import { Checkpoints, gameDataWrites, matchPages, PAGE, pageHash, pageHashes, pageHashes2, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
-import { decodeCheckpoint, decodeManifest, encodeCheckpoint, encodeManifest, extendStored, makeStored, sameBaseline, type StoredManifest } from "../src/render3d/gxpath/stored.ts";
+import { deadBytes, decodeCheckpoint, decodeManifest, encodeCheckpoint, encodeManifest, extendStored, makeStored, sameBaseline, type StoredManifest } from "../src/render3d/gxpath/stored.ts";
 import { fastPageHasher } from "../src/render3d/gxpath/pagehash.ts";
 import { gxNames } from "../src/sim/gamefiles.ts";
 import { gameFiles, withGameFiles } from "./game-files.ts";
@@ -429,4 +429,35 @@ test("the real module: rewinds by a set's lists (the module stepped on to a list
   }
   assert.ok(differ.length <= 1, `pages that differ from the checkpoint written into the match opened again: ${differ.join(", ")}`);
   for (const x of [ref, play]) x.destroy();
+});
+
+test("deadBytes: the last frame's FIFO bytes zeroed in a checkpoint's copies, nothing else", () => {
+  const pages = new Map([[2, new Uint8Array(PAGE).fill(7)], [3, new Uint8Array(PAGE).fill(8)], [5, new Uint8Array(PAGE).fill(9)]]);
+  const m = { ...memory(), _msl_gxw_stream_ptr: () => 2 * PAGE + 100, _msl_gxw_stream_len: () => PAGE + 50 };
+  deadBytes(m, pages);
+  const p2 = pages.get(2)!, p3 = pages.get(3)!, p5 = pages.get(5)!;
+  assert.equal(p2[99], 7);
+  assert.ok(p2.subarray(100).every((v) => v === 0));
+  assert.ok(p3.subarray(0, 150).every((v) => v === 0));
+  assert.equal(p3[150], 8);
+  assert.ok(p5.every((v) => v === 9));
+});
+
+test("the real module: the game data arenas' unused parts are left out of the pages a match can change, and nothing writes them", withGameFiles, async () => {
+  const ROWS = 300, tape = tapeOf(ROWS), whole = nativeTape(tape, driveOrder(tape, 1)[0]);
+  const mod = await realModule();
+  const core = await mod.open(whole), m = core.mod as unknown as CheckpointMemory & { _msl_gxw_keep_info(i: number): number };
+  const sealed: [number, number][] = [0, 1].map((r) => [m._msl_gxw_keep_info(200 + 2 * r), m._msl_gxw_keep_info(201 + 2 * r)]);
+  const pages = new Set(matchPages(m as never)!);
+  for (const [b, e] of sealed) {
+    assert.ok(e > b && b > 0, `a sealed part: ${b}..${e}`);
+    for (let p = Math.ceil(b / PAGE); p < Math.floor(e / PAGE); p++) assert.ok(!pages.has(p), `page ${p} is left out`);
+  }
+  const hash = fastPageHasher(mod.memory())!;
+  const inside: number[] = [];
+  for (const [b, e] of sealed) for (let p = Math.ceil(b / PAGE); p < Math.floor(e / PAGE); p++) inside.push(p);
+  const before = inside.map((p) => hash(p));
+  for (let r = 1; r < tape.count; r++) core.step(nativeRow(whole, r));
+  assert.deepEqual(inside.map((p) => hash(p)), before, "the match wrote none of them");
+  core.destroy();
 });

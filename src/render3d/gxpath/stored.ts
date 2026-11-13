@@ -17,13 +17,15 @@
  *
  * Encoding (both deflate-raw, CompressionStream): a checkpoint is "GXCK", version, row, n, n page numbers, n pages of PAGE bytes; a
  * manifest is "GXCM", version, the id's length and bytes (UTF-8), rows, every, dense, the baseline's page count and hashes, the stored
- * rows' count and rows, the lists' count and each list's row, length and pages - little-endian 32-bit words.
+ * rows' count and rows, the lists' count and each list's row, length and pages - little-endian 32-bit words. A set of another version
+ * is refused, never read as this one (version 2: a checkpoint's dead bytes zeroed, deadBytes).
  */
 import { GxCore } from "./core";
 import { nativeRow } from "./tapebridge";
-import { PAGE, pageHash, pageHashes, pageHashes2, type Checkpoint, type CheckpointMemory } from "./checkpoints";
+import { gameDataWrites, matchPages, PAGE, pageHash, pageHashes, pageHashes2, type Checkpoint, type CheckpointMemory, type KeepInfoMemory } from "./checkpoints";
 
-export const STORED_VERSION = 1;
+/** 2: the last frame's FIFO bytes zeroed in a stored checkpoint (deadBytes), the module zeroing what its recorder frees */
+export const STORED_VERSION = 2;
 const CK = 0x4b435847, CM = 0x4d435847;
 
 export interface StoredManifest {
@@ -126,11 +128,24 @@ export interface MakeOptions {
 }
 
 /** each page's 64-bit hash now (two words a page): by the faster pass when there is one, else the JavaScript one */
-function passOf(m: CheckpointMemory, pageHash: ((p: number) => bigint) | undefined): Uint32Array {
+function passOf(m: CheckpointMemory, pageHash: ((p: number) => bigint) | undefined, unwritten?: Uint8Array | null, base2?: Uint32Array): Uint32Array {
   if (!pageHash) return pageHashes2(m);
   const n = Math.ceil(m._msl_gxw_heap_top() / PAGE), h = new BigUint64Array(n);
-  for (let p = 0; p < n; p++) h[p] = pageHash(p);
+  // (a page nothing writes after the load is as it was: the baseline's hash, not read again)
+  const b = unwritten && base2 ? new BigUint64Array(base2.buffer, base2.byteOffset, base2.length >> 1) : null;
+  for (let p = 0; p < n; p++) h[p] = b && p < b.length && p < unwritten!.length && unwritten![p] ? b[p] : pageHash(p);
   return new Uint32Array(h.buffer);
+}
+
+/** The pages nothing writes once the game data is loaded (1 each), while the module's log of the game's rewrites of its game data says
+ *  none came since (checkpoints.ts matchPages: the game data the match reads, the game data arenas' unused parts): a pass for a list
+ *  reads the rest. Null without a kept state. */
+function unwrittenOf(m: CheckpointMemory): Uint8Array | null {
+  const pages = matchPages(m as KeepInfoMemory);
+  if (!pages) return null;
+  const out = new Uint8Array(Math.ceil(m._msl_gxw_heap_top() / PAGE)).fill(1);
+  for (const p of pages) if (p < out.length) out[p] = 0;
+  return out;
 }
 
 /** the pages whose two hash words differ from the baseline's */
@@ -142,8 +157,21 @@ function differing(now: Uint32Array, base2: Uint32Array): number[] {
   return out;
 }
 
-/** The module's memory as the maker reads it (the graphics build: its heap top) */
-type Mem = CheckpointMemory;
+/** The module's memory as the maker reads it (the graphics build: its heap top, and where the last frame's FIFO bytes are) */
+type Mem = CheckpointMemory & { _msl_gxw_stream_ptr?(): number; _msl_gxw_stream_len?(): number };
+
+/** A checkpoint's copies with the bytes no later row reads zeroed: the last frame's FIFO bytes (msl_gxw_stream_ptr/len), there for the
+ *  page to read after the step and freed unread by the next one (the module's recorder, msl_gx.c free_frame: the browser build zeroes
+ *  what it frees, and the pipe past what it carries). A stored checkpoint holds a third of a MiB less of the module's busiest bytes. */
+export function deadBytes(m: Mem, pages: Map<number, Uint8Array>): void {
+  if (!m._msl_gxw_stream_ptr || !m._msl_gxw_stream_len) return;
+  const a = m._msl_gxw_stream_ptr(), n = m._msl_gxw_stream_len();
+  if (!a || n <= 0) return;
+  for (let p = Math.floor(a / PAGE); p * PAGE < a + n; p++) {
+    const b = pages.get(p);
+    if (b) b.fill(0, Math.max(a, p * PAGE) - p * PAGE, Math.min(a + n, (p + 1) * PAGE) - p * PAGE);
+  }
+}
 
 /**
  * A stored set for the match open in `core`, its first row (row 0) stepped and nothing after it: the rest of the tape played with nothing
@@ -154,15 +182,21 @@ export async function makeStored(core: GxCore, whole: Uint8Array, count: number,
   if (o.every % o.dense !== 0) throw new Error("every must be a multiple of dense");
   const m = core.mod as unknown as Mem;
   const T = o.times ?? { step: 0, pass: 0, copy: 0, give: 0 };
-  // each page's 64-bit hash now (two words a page), by the faster pass when the host has one
+  // (the baseline's hashes before any call into the module: a call leaves its locals in the stack's unused bytes, and the set's baseline
+  // is a match just opened, as a player has it)
+  const base = pageHashes(m);
+  // each page's 64-bit hash now (two words a page), by the faster pass when the host has one - over the pages a match can write while
+  // the game's rewrites of its game data are the first row's (else over every page)
+  let base2: Uint32Array | undefined;
   const pass = (): Uint32Array => {
     const t0 = performance.now();
-    const out = passOf(m, o.pageHash);
+    const out = passOf(m, o.pageHash, base2 && gameDataWrites(m as KeepInfoMemory) === writes0 ? unwritten : null, base2);
     T.pass += performance.now() - t0;
     return out;
   };
+  base2 = pass();
+  const unwritten = unwrittenOf(m), writes0 = gameDataWrites(m as KeepInfoMemory);
   const extra = new Set((o.extra ?? []).filter((r) => r >= 1 && r < count));
-  const base = pageHashes(m), base2 = pass();
   const lists = new Map<number, Uint32Array>(), stored: number[] = [];
   const slice = o.sliceMs ?? 50;
   let t = performance.now();
@@ -174,6 +208,7 @@ export async function makeStored(core: GxCore, whole: Uint8Array, count: number,
         const t0 = performance.now();
         const pages = new Map<number, Uint8Array>();
         for (const p of differ) pages.set(p, m.HEAPU8.slice(p * PAGE, (p + 1) * PAGE));
+        deadBytes(m, pages);
         stored.push(row);
         const t1 = performance.now();
         await o.onCheckpoint({ row, pages });
@@ -229,7 +264,7 @@ export interface ExtendOptions {
  */
 export async function extendStored(core: GxCore, whole: Uint8Array, manifest: StoredManifest, rows: number[], o: ExtendOptions): Promise<StoredManifest> {
   const m = core.mod as unknown as Mem;
-  const base2 = passOf(m, o.pageHash);
+  const base2 = passOf(m, o.pageHash), unwritten = unwrittenOf(m), writes0 = gameDataWrites(m as KeepInfoMemory);
   const stored = [...manifest.stored], lists = new Map(manifest.lists);
   const made = new Map<number, Checkpoint>();
   // (the row the instance is at: the next to step; 1, the baseline, now)
@@ -245,9 +280,10 @@ export async function extendStored(core: GxCore, whole: Uint8Array, manifest: St
       at = c ? c.row : 1;
     }
     for (; at < row; at++) core.step(nativeRow(whole, at));
-    const differ = differing(passOf(m, o.pageHash), base2);
+    const differ = differing(passOf(m, o.pageHash, gameDataWrites(m as KeepInfoMemory) === writes0 ? unwritten : null, base2), base2);
     const pages = new Map<number, Uint8Array>();
     for (const p of differ) pages.set(p, m.HEAPU8.slice(p * PAGE, (p + 1) * PAGE));
+    deadBytes(m, pages);
     const c = { row, pages };
     made.set(row, c);
     lists.set(row, Uint32Array.from(differ));
