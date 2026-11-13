@@ -142,23 +142,39 @@ export class Checkpoints {
   constructor(readonly back: number, readonly keepEarliest = false) {}
 
   /** keep up to `max`, and when there are more drop the one farthest from the row `near` says (the row the host's match is at: the ones a
-   *  seek or a scrub around it needs stay) */
-  limit(max: number, near?: () => number): void {
+   *  seek or a scrub around it needs stay), or with `spread` thin out the ones farther than that from it (see spread) */
+  limit(max: number, near?: () => number, spread?: number): void {
     this.max = Math.max(1, max);
     this.near = near ?? null;
+    this.spread = spread ?? null;
     this.trim();
   }
+
+  /** (limit's `spread`, rows) instead of the farthest going first: the ones within `spread` rows of where the match is stay (each step
+   *  of a drag starts from one), and of the others the one dropped leaves the smallest hole (the rows from the one before it to the one
+   *  after), so the rest stay spread over where the match has been (a jump back there starts from one of them, not from a stored one up
+   *  to its spacing before); when all are near, the farthest goes */
+  private spread: number | null = null;
 
   private trim(): void {
     const from = this.keepEarliest ? 1 : 0;
     while (this.kept.length > this.max) {
       let drop = from + Math.floor(Math.random() * (this.kept.length - from));
       if (this.near) {
-        const at = this.near();
-        let far = -1;
-        for (let i = from; i < this.kept.length; i++) {
-          const d = Math.abs(this.kept[i].row - at);
-          if (d > far) { far = d; drop = i; }
+        const at = this.near(), k = this.kept;
+        let far = -1, least = Infinity;
+        for (let i = from; i < k.length; i++) {
+          const d = Math.abs(k[i].row - at);
+          if (this.spread === null) {
+            if (d > far) { far = d; drop = i; }
+          } else {
+            // (the hole it leaves: from the one before it to the one after it; at an end, twice its gap to its one neighbor)
+            const before = i > 0 ? k[i].row - k[i - 1].row : -1, after = i + 1 < k.length ? k[i + 1].row - k[i].row : -1;
+            const hole = before >= 0 && after >= 0 ? before + after : 2 * Math.max(before, after, 0);
+            // (within `spread` of the match: kept while any farther one can go, then the farthest of them first)
+            const score = d <= this.spread ? 1e12 - d : hole;
+            if (score < least) { least = score; drop = i; }
+          }
         }
       }
       this.kept.splice(drop, 1);

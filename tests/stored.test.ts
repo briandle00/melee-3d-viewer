@@ -461,3 +461,21 @@ test("the real module: the game data arenas' unused parts are left out of the pa
   assert.deepEqual(inside.map((p) => hash(p)), before, "the match wrote none of them");
   core.destroy();
 });
+
+test("limit with a spread: the ones near the match stay dense, the rest spread over where it has been", () => {
+  const m = memory(), k = new Checkpoints(120);
+  k.baseline(m);
+  let at = 0;
+  k.limit(40, () => at, 600);
+  // (played 15000-16200, a checkpoint every 30 rows; then dragged back to 12000, three kept every 120 rows)
+  for (at = 15000; at <= 16200; at += 30) k.keepPages(m, at, []);
+  for (let t = 15600; t >= 12000; t -= 120) { at = t; for (let r = t - 60; r <= t; r += 30) k.keepPages(m, r, []); }
+  const rows: number[] = [];
+  for (let r = 0; r < 20000; r += 30) if (k.has(r)) rows.push(r);
+  assert.equal(rows.length, 40);
+  const near = rows.filter((r) => Math.abs(r - at) <= 600);
+  assert.ok(near.every((r, i) => i === 0 || r - near[i - 1] <= 60), `near ${near.join(",")}`);
+  const holes = rows.slice(1).map((r, i) => r - rows[i]);
+  assert.ok(Math.max(...holes) <= 240, `kept ${rows.join(",")}`);
+  assert.equal(rows[rows.length - 1], 16200, "where it was played to stays covered");
+});
