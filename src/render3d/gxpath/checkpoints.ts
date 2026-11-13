@@ -15,6 +15,10 @@
  * a fifth of the time of the pass over the module's ~0.9 GiB the rewind above starts with. Checkpoints can be kept without a pass too, when
  * the pages that differ from the baseline at that row are known (keepPages: a list made once by a pass at that row, stored.ts), and added
  * whole (add: one made elsewhere, by another instance of the same module playing the same tape, stored.ts).
+ *
+ * Going back without a pass and without opening the match again (rewindKnown): at a row whose list of changed pages is known (a stored
+ * set's: the module stepped on to the next listed row first), those pages are written back as the match opened (keepBase, copied then)
+ * and the checkpoint's after them - a copy of a few MiB.
  */
 
 /** the module's memory as the checkpoints read and write it (the graphics build: its heap top, msl_gxw_heap_top) */
@@ -114,7 +118,7 @@ export function pageHashes(m: CheckpointMemory): Uint32Array {
 export class Checkpoints {
   /** (the checks) passes over the module's memory and their ms; rewinds, and those that opened the match again; the faster passes over
    *  the pages a match can change (rewindPass) and their ms */
-  stats = { hashes: 0, hashMs: 0, rewinds: 0, reopens: 0, passes: 0, passMs: 0 };
+  stats = { hashes: 0, hashMs: 0, rewinds: 0, reopens: 0, passes: 0, passMs: 0, known: 0 };
   /** page hashes after the first row, and the pages as they were then (those seen changed since) */
   private base: Uint32Array | null = null;
   private basePages = new Map<number, Uint8Array>();
@@ -333,6 +337,34 @@ export class Checkpoints {
     for (const p of want.keys()) if (!this.basePages.has(p)) this.basePages.set(p, this.page(r, p));
     for (const [p, bytes] of want) r.HEAPU8.set(bytes, p * PAGE);
     return r;
+  }
+
+  /** the pages `pages` as they are now, kept as the first row's (the module is at its baseline: the match just opened, its first row
+   *  stepped): a rewind that knows the pages changed since (rewindKnown) writes them back without a pass */
+  keepBase(m: CheckpointMemory, pages: Iterable<number>): void {
+    for (const p of pages) if (!this.basePages.has(p)) this.basePages.set(p, this.page(m, p));
+  }
+
+  /**
+   * The module's memory back to checkpoint `c` (null: the state after the first row) without a pass, when the pages that differ from
+   * the baseline now are known: `now`, a stored set's list for the row the module is at (made by a pass at that row when the same module
+   * played the same tape from the same first row: stored.ts - the very list keepPages trusts). Each page of it the checkpoint does not
+   * hold is written back as it was after the first row, then the checkpoint's pages: a copy of a few MiB instead of a pass over the
+   * module's memory. False when a page of `now` was never kept as it started (keepBase): nothing is written.
+   */
+  rewindKnown(m: CheckpointMemory, c: Checkpoint | null, now: Iterable<number>): boolean {
+    const want = c ? c.pages : new Map<number, Uint8Array>();
+    const back: number[] = [];
+    for (const p of now) {
+      if (want.has(p)) continue;
+      if (!this.basePages.has(p)) return false;
+      back.push(p);
+    }
+    this.stats.rewinds++;
+    this.stats.known++;
+    for (const p of back) m.HEAPU8.set(this.basePages.get(p)!, p * PAGE);
+    for (const [p, bytes] of want) m.HEAPU8.set(bytes, p * PAGE);
+    return true;
   }
 
   /** (the checks) the checkpoints' pages and the first row's pages kept, MiB */

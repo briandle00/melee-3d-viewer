@@ -359,3 +359,74 @@ test("the real module: rewinds by the pass over the pages a match can change pla
   assert.ok(differ.length <= 1, `pages that differ from the match opened again: ${differ.join(", ")}`);
   for (const x of [ref, play]) x.destroy();
 });
+
+test("rewindKnown: back to a checkpoint with the pages changed since known, no pass; a page never kept as it started refuses", () => {
+  const m = memory(), k = new Checkpoints(120);
+  k.baseline(m, pageHashes(m));
+  k.keepBase(m, [2, 4, 5]);
+  put(m, 2, 50); put(m, 4, 60);
+  k.keepPages(m, 600, [2, 4]);
+  put(m, 2, 51); put(m, 5, 70);
+  assert.ok(k.rewindKnown(m, k.latest(700), [2, 4, 5]));
+  assert.deepEqual([2, 4, 5].map((p) => at(m, p)), [50, 60, 5]);
+  put(m, 4, 61); put(m, 5, 71);
+  assert.ok(k.rewindKnown(m, null, [2, 4, 5]));
+  assert.deepEqual([2, 4, 5].map((p) => at(m, p)), [2, 4, 5]);
+  put(m, 6, 80);
+  assert.equal(k.rewindKnown(m, null, [6]), false, "page 6 was never kept as it started");
+  assert.equal(at(m, 6), 80, "nothing written");
+  assert.equal(k.stats.hashes, 0);
+  assert.equal(k.stats.known, 2);
+});
+
+test("the real module: rewinds by a set's lists (the module stepped on to a listed row, no pass) play on as the straight play", withGameFiles, async () => {
+  const ROWS = 420, tape = tapeOf(ROWS), whole = nativeTape(tape, driveOrder(tape, 1)[0]);
+  const mod = await realModule();
+  const maker = await mod.open(whole);
+  const made = new Map<number, Uint8Array>();
+  const manifest = (await makeStored(maker, whole, tape.count, { id: "t", every: 120, dense: 20, pageHash: fastPageHasher(mod.memory())!,
+                                                                 onCheckpoint: async (c) => { made.set(c.row, await encodeCheckpoint(c)); } }))!;
+  maker.destroy();
+  const ref = await mod.open(whole);
+  const want = new Map<number, string>();
+  for (let r = 1; r < tape.count; r++) { ref.step(nativeRow(whole, r)); want.set(r, await rowKey(ref)); }
+  const play = await mod.open(whole), mem = play.mod as unknown as CheckpointMemory;
+  const k = new Checkpoints(120);
+  k.baseline(mem, manifest.base);
+  const union = new Set<number>();
+  for (const l of manifest.lists.values()) for (const p of l) union.add(p);
+  k.keepBase(mem, union);
+  k.add(await decodeCheckpoint(made.get(240)!));
+  const listed = [...manifest.lists.keys()].sort((a, b) => a - b);
+  let at = 1;
+  const go = async (to: number) => {
+    for (; at < to; at++) {
+      const l = manifest.lists.get(at);
+      if (l) k.keepPages(mem, at, l);
+      play.step(nativeRow(whole, at));
+      assert.equal(await rowKey(play), want.get(at), `row ${at}`);
+    }
+  };
+  // (a drag: each place sought back to is reached from the latest checkpoint before it; before each rewind the module is stepped on to the
+  // next listed row, whose list says every page that differs from the first row's state)
+  const back = async (to: number) => {
+    const e = listed.find((r) => r >= at)!;
+    await go(e);
+    assert.ok(k.rewindKnown(mem, k.latest(to), manifest.lists.get(e)!), `rewind to ${to} from ${e}`);
+    at = k.latest(to)?.row ?? 1;
+  };
+  await go(373);
+  for (const r of [365, 333, 301, 250, 247, 200, 120, 60, 5, 380, 290]) { await back(r); await go(r + 3); }
+  assert.equal(k.stats.hashes, 0, "no pass over the memory");
+  // the memory then, against the same checkpoint written into the match opened again: every page equal (the stack's unused bytes aside)
+  await back(250);
+  const known = mem.HEAPU8.slice();
+  await k.rewindFresh(k.latest(250), async () => { play.rewind(); play.openMatch(whole, mod.names, "slippi"); play.step(nativeRow(whole, 0)); return mem; });
+  const differ: number[] = [];
+  for (let p = 0; p * PAGE < known.length; p++) {
+    const x = known.subarray(p * PAGE, (p + 1) * PAGE), y = mem.HEAPU8.subarray(p * PAGE, (p + 1) * PAGE);
+    if (x.some((v, i) => v !== y[i])) differ.push(p);
+  }
+  assert.ok(differ.length <= 1, `pages that differ from the checkpoint written into the match opened again: ${differ.join(", ")}`);
+  for (const x of [ref, play]) x.destroy();
+});
