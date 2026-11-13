@@ -62,6 +62,16 @@ const BLOCK: Record<string, [number, number, number]> = {
   R4: [3, 3, 32], RA4: [3, 2, 32], RA8: [2, 2, 32], A8: [3, 2, 32], R8: [3, 2, 32], G8: [3, 2, 32], B8: [3, 2, 32], RG8: [2, 2, 32], GB8: [2, 2, 32],
 };
 
+/** the memory a copy to memory writes: [its first byte, how many] ([dest, 0] for an encoding it does not have) */
+export function copyBytes(p: CopyParams): [number, number] {
+  const fmt = copyFormatFor(p);
+  if (fmt === "none") return [p.dest, 0];
+  const [kw, kh, bsize] = BLOCK[fmt];
+  const wm = p.wm >> (p.half ? 1 : 0), hm = p.hm >> (p.half ? 1 : 0);
+  const bx = (wm >> kw) + 1, by = (hm >> kh) + 1;
+  return [p.dest, (by - 1) * p.stride + bx * bsize];
+}
+
 /** the pixel at linear EFB index p as r, g, b, a (half size: the average of the 2 x 2 box at p) */
 function texelAt(efb: Efb, p: number, half: boolean, fmt: number, out: number[]): void {
   const get = (i: number, o: number[]): void => {

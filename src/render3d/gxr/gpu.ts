@@ -6,6 +6,7 @@
  * each of them); a register command ends the run.
  */
 import { GxFrame, GxInitial, Memory } from "./dff";
+import type { FreshWatch } from "./fresh";
 import { bits, GxRegs } from "./state";
 import { VertexData, VertexLayout, vertexLayout } from "./vertex";
 
@@ -43,6 +44,8 @@ export class GxGpu {
   timers = { vertex: 0, memory: 0 };
   /** whether `timers` are kept (reading the clock per run costs about 1% of a frame) */
   measure = false;
+  /** (a stream started mid-game) what the frames drawn read that this GPU was not given: fresh.ts */
+  watch: FreshWatch | null = null;
   private cpVersion = 0;
   private layouts = new Map<number, { v: number; l: VertexLayout; w0: number; w1: number; w2: number; w3: number; w4: number }>();
   private vd = new VertexData(null as never);
@@ -89,6 +92,7 @@ export class GxGpu {
     if (!r) return;
     this.run = null;
     this.drawCount++;
+    this.watch?.draw(this.regs);
     this.renderer.draw(this.regs, this.mem, r.vd, r.tris, r.lines, r.points, r.prims, r.raw);
   }
 
@@ -115,7 +119,9 @@ export class GxGpu {
       while (ui < ups.length && ups[ui].pos <= pos) {
         // (a run's undecoded vertices read the memory as it was before this write)
         if (this.run?.raw) this.decodeRaw();
-        const t0 = this.measure ? performance.now() : 0; this.mem.write(ups[ui].addr, ups[ui].data); if (this.measure) this.timers.memory += performance.now() - t0; ui++;
+        const t0 = this.measure ? performance.now() : 0; this.mem.write(ups[ui].addr, ups[ui].data); if (this.measure) this.timers.memory += performance.now() - t0;
+        this.watch?.wrote(ups[ui].addr, ups[ui].data.length);
+        ui++;
       }
     };
     this.execute(data, apply);
@@ -178,12 +184,15 @@ export class GxGpu {
           const ev = regs.loadBp(dv.getUint32(pos + 1));
           if (ev.kind === "tlut") {
             regs.tluts.set(ev.tmem, this.mem.read(ev.addr, ev.count).slice());
+            this.watch?.tlut(ev.tmem);
           } else if (ev.kind === "preload") {
             regs.tmem.set(this.mem.read(ev.src, ev.bytes).subarray(0, Math.max(0, regs.tmem.length - ev.tmem)), ev.tmem);
             regs.tmemVersion++;
           } else if (ev.kind === "copy" && (this.renderer as { fastForward?: boolean }).fastForward === true) {
             // (fast-forwarding: the frame's copies are the next frame's own to make)
+            this.watch?.skipped(regs.bp);
           } else if (ev.kind === "copy") {
+            this.watch?.copied(regs.bp, (this.renderer as { drawing?: boolean }).drawing !== false);
             const c = this.renderer.copy(regs, this.mem, ev.value);
             if (c.toXfb) { this.events.push({ kind: "xfb", rect: c.rect }); this.onXfb?.(c.rect); }
             else this.events.push({ kind: "texture", rect: c.rect });
