@@ -70,6 +70,19 @@ export function matchPages(m: KeepInfoMemory): number[] | null {
   return out;
 }
 
+/** The open match's arena past its used bytes now, as pages [first, end) (msl_gxw_keep_info 204, 205), or null (a module without it, or
+ *  none): the arena only grows by a bump, nothing freed before the match ends, so nothing has written those pages since the match opened -
+ *  as the memory is now (a rewind of the whole memory puts back the used count with the bytes). Read it for each pass: it shrinks as the
+ *  match allocates. */
+export function unusedArena(m: KeepInfoMemory): [number, number] | null {
+  const info = m._msl_gxw_keep_info;
+  if (!info) return null;
+  const b = info.call(m, 204), e = info.call(m, 205);
+  if (!(b > 0 && e > b)) return null;
+  const first = Math.ceil(b / PAGE), end = Math.floor(e / PAGE);
+  return end > first ? [first, end] : null;
+}
+
 /** Pages a match opened in an instance that played another (msl_gxw_rewind) may hold otherwise than one opened in a fresh instance, with
  *  nothing of the match in them: the stack's unused bytes (emscripten lays the stack just below the heap, whose first block is the game
  *  data's arena, range 0: what earlier calls left there) and the block the module keeps its state in (its own record, rewinds counted).
@@ -325,12 +338,15 @@ export class Checkpoints {
    * Resolves the memory written, or null when the caller has gone.
    */
   async rewindPass(m: CheckpointMemory, c: Checkpoint | null, o: { hash: (p: number) => bigint; pages: number[]; unchanged: () => boolean;
-                                                                  reopen: () => Promise<CheckpointMemory | null> }): Promise<CheckpointMemory | null> {
+                                                                  reopen: () => Promise<CheckpointMemory | null>;
+                                                                  unused?: () => [number, number] | null }): Promise<CheckpointMemory | null> {
     const want = c ? c.pages : new Map<number, Uint8Array>();
     if (this.base64 && o.unchanged()) {
       const t0 = performance.now();
       const changed: number[] = [];
-      for (const p of o.pages) if (o.hash(p) !== this.base64.get(p)) changed.push(p);
+      // (pages nothing has written since the match opened, as the memory is now - unusedArena - are as they were: not read)
+      const [ua, uz] = o.unused?.() ?? [0, 0];
+      for (const p of o.pages) if ((p < ua || p >= uz) && o.hash(p) !== this.base64.get(p)) changed.push(p);
       this.stats.passMs += performance.now() - t0;
       this.stats.passes++;
       if (changed.every((p) => want.has(p) || this.basePages.has(p))) {

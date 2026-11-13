@@ -10,7 +10,7 @@ import path from "node:path";
 import { driveOrder, readTape, type Tape } from "../src/sim/tape.ts";
 import { GxCore, type GxCoreFactory } from "../src/render3d/gxpath/core.ts";
 import { nativeRow, nativeTape } from "../src/render3d/gxpath/tapebridge.ts";
-import { Checkpoints, gameDataWrites, matchPages, PAGE, pageHash, pageHashes, pageHashes2, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
+import { Checkpoints, gameDataWrites, matchPages, PAGE, pageHash, pageHashes, pageHashes2, unusedArena, type CheckpointMemory, type KeepInfoMemory } from "../src/render3d/gxpath/checkpoints.ts";
 import { deadBytes, decodeCheckpoint, decodeManifest, encodeCheckpoint, encodeManifest, extendStored, makeStored, sameBaseline, type StoredManifest } from "../src/render3d/gxpath/stored.ts";
 import { fastPageHasher } from "../src/render3d/gxpath/pagehash.ts";
 import { gxNames } from "../src/sim/gamefiles.ts";
@@ -334,7 +334,7 @@ test("the real module: rewinds by the pass over the pages a match can change pla
   const k = new Checkpoints(120);
   k.baseline(mem);
   let reopens = 0, at = 1;
-  const o = { hash, pages, unchanged: () => gameDataWrites(play.mod as never) === writes0,
+  const o = { hash, pages, unchanged: () => gameDataWrites(play.mod as never) === writes0, unused: () => unusedArena(play.mod as never),
               reopen: async () => { reopens++; play.rewind(); play.openMatch(whole, mod.names, "slippi"); play.step(nativeRow(whole, 0)); return mem; } };
   const go = async (to: number) => { for (; at < to; at++) { play.step(nativeRow(whole, at)); assert.equal(await rowKey(play), want.get(at), `row ${at}`); } };
   for (const r of [100, 200, 300]) { await go(r); k.keep(mem, r); }
@@ -478,4 +478,25 @@ test("limit with a spread: the ones near the match stay dense, the rest spread o
   const holes = rows.slice(1).map((r, i) => r - rows[i]);
   assert.ok(Math.max(...holes) <= 240, `kept ${rows.join(",")}`);
   assert.equal(rows[rows.length - 1], 16200, "where it was played to stays covered");
+});
+
+test("the real module: the match's arena past what it has used is as the match opened it, row after row", withGameFiles, async () => {
+  const ROWS = 400, tape = tapeOf(ROWS), whole = nativeTape(tape, driveOrder(tape, 1)[0]);
+  const mod = await realModule();
+  const core = await mod.open(whole), m = core.mod as unknown as KeepInfoMemory;
+  const hash = fastPageHasher(mod.memory())!;
+  const first = unusedArena(m)!;
+  assert.ok(first && first[1] - first[0] > 100, `the unused part: ${first}`);
+  const base = new Map<number, bigint>();
+  for (let p = first[0]; p < first[1]; p++) base.set(p, hash(p));
+  let last = first;
+  for (let r = 1; r < tape.count; r++) {
+    core.step(nativeRow(whole, r));
+    if (r % 20) continue;
+    const now = unusedArena(m)!;
+    assert.ok(now[0] >= last[0] && now[1] === first[1], `row ${r}: ${now} after ${last}`);
+    for (let p = now[0]; p < now[1]; p++) assert.equal(hash(p), base.get(p), `row ${r}: page ${p}`);
+    last = now;
+  }
+  core.destroy();
 });

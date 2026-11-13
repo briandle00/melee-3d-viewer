@@ -22,7 +22,7 @@
  */
 import { GxCore } from "./core";
 import { nativeRow } from "./tapebridge";
-import { gameDataWrites, matchPages, PAGE, pageHash, pageHashes, pageHashes2, type Checkpoint, type CheckpointMemory, type KeepInfoMemory } from "./checkpoints";
+import { gameDataWrites, matchPages, PAGE, unusedArena, pageHash, pageHashes, pageHashes2, type Checkpoint, type CheckpointMemory, type KeepInfoMemory } from "./checkpoints";
 
 /** 2: the last frame's FIFO bytes zeroed in a stored checkpoint (deadBytes), the module zeroing what its recorder frees */
 export const STORED_VERSION = 2;
@@ -131,9 +131,11 @@ export interface MakeOptions {
 function passOf(m: CheckpointMemory, pageHash: ((p: number) => bigint) | undefined, unwritten?: Uint8Array | null, base2?: Uint32Array): Uint32Array {
   if (!pageHash) return pageHashes2(m);
   const n = Math.ceil(m._msl_gxw_heap_top() / PAGE), h = new BigUint64Array(n);
-  // (a page nothing writes after the load is as it was: the baseline's hash, not read again)
+  // (a page nothing writes after the load, or nothing has written since the match opened - its arena past what it has used now - is as
+  // it was: the baseline's hash, not read again)
   const b = unwritten && base2 ? new BigUint64Array(base2.buffer, base2.byteOffset, base2.length >> 1) : null;
-  for (let p = 0; p < n; p++) h[p] = b && p < b.length && p < unwritten!.length && unwritten![p] ? b[p] : pageHash(p);
+  const [ua, uz] = b ? unusedArena(m as KeepInfoMemory) ?? [0, 0] : [0, 0];
+  for (let p = 0; p < n; p++) h[p] = b && p < b.length && ((p < unwritten!.length && unwritten![p]) || (p >= ua && p < uz)) ? b[p] : pageHash(p);
   return new Uint32Array(h.buffer);
 }
 
