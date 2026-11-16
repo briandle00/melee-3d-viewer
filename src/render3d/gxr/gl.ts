@@ -200,6 +200,17 @@ export class GxGl implements GxBackend {
     return out;
   }
 
+  /** the GPU's copy of main memory's first `n` bytes set to zero (whole rows: main memory is a whole number of them), on the card */
+  private clearMain(n: number): void {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.memFbo);
+    gl.viewport(0, 0, MEM_ROW, MEM_ROWS);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, MEM_ROW, Math.ceil(n / MEM_ROW));
+    gl.clearBufferuiv(gl.COLOR, 0, new Uint32Array([0, 0, 0, 0]));
+    gl.disable(gl.SCISSOR_TEST);
+  }
+
   /** back to a fresh processor: an empty frame buffer, no memory attached */
   reset(): void {
     const gl = this.gl;
@@ -355,21 +366,25 @@ export class GxGl implements GxBackend {
   // memory
 
   /** upload main memory and TMEM to the GPU now, rather than at the first draw (which then would take a frame's time for it): call it once the memory holds the game's first state, off the frame loop */
-  prepareMemory(mem: Memory, regs: GxRegs): void { this.attach(mem, regs); }
+  prepareMemory(mem: Memory, regs: GxRegs, zero = false): void { this.attach(mem, regs, zero); }
 
-  private attach(mem: Memory, regs: GxRegs): void {
-    if (this.attached === mem) return;
+  /** `zero`: the caller says its main memory is all zero bytes now (a GxGpu started fresh: a stream started again) - the GPU's copy
+   *  and the workers' mirror are cleared, not sent the 24 MiB (34-60 ms of every seek and every loop back of a moment) */
+  private attach(mem: Memory, regs: GxRegs, zero = false): void {
+    if (this.attached === mem && !zero) return;
     if (this.attached) { this.attached.onTouch = null; this.attached.beforeWrite = null; }
     this.attached = mem;
     const gl = this.gl;
     // the whole main memory, then TMEM
-    uploadRows(gl, this.mem, 0, 0, MEM_ROW, mem.data.length / MEM_ROW, mem.data);
+    if (zero) this.clearMain(mem.data.length);
+    else uploadRows(gl, this.mem, 0, 0, MEM_ROW, mem.data.length / MEM_ROW, mem.data);
     this.uploadTmem(regs);
     this.dirty = [];
     // (the worker threads' mirror of it, which the raw draws' indexed vertex attributes read: written only once every raw draw published
     // has read its vertices, frontpool.ts)
     const fp = this.fp, drain = () => this.drainFront();
-    fp?.writeMirror(mem.data, 0, mem.data.length, drain);
+    if (zero) fp?.zeroMirror(0, mem.data.length, drain);
+    else fp?.writeMirror(mem.data, 0, mem.data.length, drain);
     mem.onTouch = fp ? (a, n) => { this.dirty.push(a, n); fp.writeMirror(mem.data, a, n, drain); } : (a, n) => { this.dirty.push(a, n); };
     mem.beforeWrite = (a, n) => {
       for (const [start, len] of this.used) {

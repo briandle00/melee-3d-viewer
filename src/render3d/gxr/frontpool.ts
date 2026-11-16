@@ -454,6 +454,14 @@ export class FrontPool {
     return true;
   }
 
+  /** bytes [a, a + n) of the mirror set to zero, as writeMirror of zero bytes does */
+  zeroMirror(a: number, n: number, drainFirst: () => void): void {
+    this.stats.memWrites++;
+    if (this.beforeMirrorWrite()) drainFirst();
+    const end = Math.min(a + n, MEM_SIZE);
+    if (end > a) this.sh.mem.fill(0, a, end);
+  }
+
   /** bytes [a, a + n) of `src` (a memory of MEM_SIZE bytes) into the mirror; `drainFirst` is called when published jobs must be drained before */
   writeMirror(src: Uint8Array, a: number, n: number, drainFirst: () => void): void {
     this.stats.memWrites++;

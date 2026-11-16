@@ -40,7 +40,7 @@ export interface SessionBackend extends GxBackend {
   /** the number of pictures the game has copied to the screen so far */
   pictures: number;
   /** (GxGl) memory the renderer mirrors, before the first frame; and the shaders for the features a stream may need */
-  prepareMemory?(mem: unknown, regs: unknown): void;
+  prepareMemory?(mem: unknown, regs: unknown, zero?: boolean): void;
   /** (GxGl) draw the last picture into the renderer's own canvas, no read-back */
   present?(): void;
   /** back to the state before any frame (GxGl has it) */
@@ -339,10 +339,12 @@ export class GxSession {
   /** the renderer started fresh on the stream of the row the module last stepped (not drawn); true when that row's copy to the screen
    *  made a picture */
   private feedHere(): boolean {
-    const b = this.backend!;
-    b.reset!();
-    this.gpu = new GxGpu(b, this.core!.initial() as unknown as Dff);
-    b.prepareMemory?.(this.gpu.mem, this.gpu.regs);
+    const b = this.backend!, init = this.core!.initial() as unknown as Dff;
+    // (the last stream's processor put back to its constructor's state - main memory zero again - rather than a new 24 MiB one, and the
+    // card's copy of that memory cleared on the card instead of sent: prepareMemory's `zero`)
+    if (this.gpu && this.gpu.renderer === b) { this.gpu.reset(init); this.gpu.watch = null; }
+    else { b.reset!(); this.gpu = new GxGpu(b, init); }
+    b.prepareMemory?.(this.gpu.mem, this.gpu.regs, true);
     b.drawing = false;
     b.fastForward = false;
     const before = b.pictures;
