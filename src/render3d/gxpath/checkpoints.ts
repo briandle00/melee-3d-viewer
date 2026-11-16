@@ -326,6 +326,12 @@ export class Checkpoints {
 
   /** the faster pass's baseline: each page's 64-bit hash after the first row, for the pages a match can change (rewindPass) */
   private base64: Map<number, bigint> | null = null;
+  /** the pages the last rewindPass found changed since the first row, before it wrote anything (null: that rewind made no such pass). A
+   *  host that brings the module to the same state again the same way - the same checkpoint, the same rows stepped - finds the same pages
+   *  changed, and can rewind by rewindKnown with them instead of a pass (the simulator is deterministic) */
+  lastChanged: number[] | null = null;
+  /** whether the faster pass has its baseline (passBase, or a first rewindPass) */
+  get hasPassBase(): boolean { return this.base64 !== null; }
 
   /** The faster pass's baseline taken now - the module at its baseline (the match just opened, its first row stepped) - for `pages`, the
    *  pages a match can change (every one read: the match's arena past what it has used too, which later passes leave out while it stays
@@ -369,6 +375,7 @@ export class Checkpoints {
                                                                   reopen: () => Promise<CheckpointMemory | null>;
                                                                   unused?: () => [number, number] | null }): Promise<CheckpointMemory | null> {
     const want = c ? c.pages : new Map<number, Uint8Array>();
+    this.lastChanged = null;
     if (this.base64 && o.unchanged()) {
       const t0 = performance.now();
       const changed: number[] = [];
@@ -377,6 +384,7 @@ export class Checkpoints {
       for (const p of o.pages) if ((p < ua || p >= uz) && o.hash(p) !== this.base64.get(p)) changed.push(p);
       this.stats.passMs += performance.now() - t0;
       this.stats.passes++;
+      this.lastChanged = changed;
       if (changed.every((p) => want.has(p) || this.basePages.has(p))) {
         this.stats.rewinds++;
         for (const p of changed) if (!want.has(p)) m.HEAPU8.set(this.basePages.get(p)!, p * PAGE);
