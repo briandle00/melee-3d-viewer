@@ -134,6 +134,21 @@ export function pageHashes(m: CheckpointMemory): Uint32Array {
   return out;
 }
 
+/** pageHashes made a piece at a time, for a host that must not hold its page's thread for a whole pass (another player plays beside it):
+ *  the same numbers, page by page. The module's memory must not change until it is done. */
+export class PiecedHashes {
+  readonly hashes: Uint32Array;
+  private p = 0;
+  constructor(private readonly m: CheckpointMemory) { this.hashes = new Uint32Array(Math.ceil(m._msl_gxw_heap_top() / PAGE)); }
+  /** pages hashed until `deadline` (performance.now()), at least one; whether every page is */
+  step(deadline: number): boolean {
+    const n = this.hashes.length;
+    if (this.p < n) do { this.hashes[this.p] = pageHash(this.m, this.p); this.p++; } while (this.p < n && performance.now() < deadline);
+    return this.p >= n;
+  }
+  get done(): boolean { return this.p >= this.hashes.length; }
+}
+
 export class Checkpoints {
   /** (the checks) passes over the module's memory and their ms; rewinds, and those that opened the match again; the faster passes over
    *  the pages a match can change (rewindPass) and their ms */
@@ -248,6 +263,15 @@ export class Checkpoints {
     if (!this.base || this.kept.some((c) => c.row === index)) return;
     const pages = new Map<number, Uint8Array>();
     for (const p of this.changed(this.hashes(m))) pages.set(p, this.page(m, p));
+    this.put({ row: index, pages });
+  }
+
+  /** keep the module's state before row `index` as a checkpoint, from `hashes` of the memory as it is now (pageHashes' numbers: a
+   *  PiecedHashes done with nothing changed since) - as keep makes it, without its pass */
+  keepHashed(m: CheckpointMemory, index: number, hashes: Uint32Array): void {
+    if (!this.base || this.kept.some((c) => c.row === index)) return;
+    const pages = new Map<number, Uint8Array>();
+    for (const p of this.changed(hashes)) pages.set(p, this.page(m, p));
     this.put({ row: index, pages });
   }
 

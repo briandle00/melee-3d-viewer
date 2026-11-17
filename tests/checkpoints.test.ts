@@ -5,7 +5,7 @@
 //   deno test -A --no-check --sloppy-imports tests/checkpoints.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Checkpoints, KEEP, PAGE, SPACING, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
+import { Checkpoints, KEEP, PAGE, pageHashes, PiecedHashes, SPACING, type CheckpointMemory } from "../src/render3d/gxpath/checkpoints.ts";
 
 const PAGES = 8;
 function memory(): CheckpointMemory {
@@ -87,4 +87,28 @@ test("at most KEEP are kept; with keepEarliest the earliest is never the one dro
     if (keepEarliest) assert.equal(earliestKept, 40);
     else assert.ok(earliestKept < 40, "without keepEarliest the earliest may go");
   }
+});
+
+test("a pass made in pieces is pageHashes' numbers, and a checkpoint kept from it is keep's", () => {
+  const m = memory();
+  for (let p = 0; p < PAGES; p++) m.HEAPU8[p * PAGE + 7 * p] = 200 + p;
+  const pieces = new PiecedHashes(m);
+  let calls = 0;
+  // (a deadline already gone: one page a call)
+  while (!pieces.step(0)) calls++;
+  assert.equal(calls, PAGES - 1);
+  assert.ok(pieces.done);
+  assert.deepEqual([...pieces.hashes], [...pageHashes(m)]);
+  const a = new Checkpoints(120), b = new Checkpoints(120);
+  a.baseline(m, pieces.hashes);
+  b.baseline(m);
+  put(m, 1, 40); put(m, 6, 41);
+  const now = new PiecedHashes(m);
+  while (!now.step(performance.now() + 1000)) { /* on */ }
+  a.keepHashed(m, 300, now.hashes);
+  b.keep(m, 300);
+  const pa = a.latest(300)!.pages, pb = b.latest(300)!.pages;
+  assert.deepEqual([...pa.keys()], [1, 6]);
+  assert.deepEqual([...pa.keys()], [...pb.keys()]);
+  for (const [p, bytes] of pa) assert.deepEqual(bytes, pb.get(p));
 });
