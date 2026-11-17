@@ -48,6 +48,9 @@ const fakePlayer = `export class ReplayPlayer extends EventTarget {
   setMusic(music) {
     this.music = music;
   }
+  setVolume(gain) {
+    this.gain = gain;
+  }
   destroy() {
     this.destroyed = true;
     this.ready = false;
@@ -59,7 +62,7 @@ const fakePlayer = `export class ReplayPlayer extends EventTarget {
   }
 }`;
 
-test("optional audio follows acknowledged seeks, pauses, speed, music and teardown", async () => {
+test("optional audio follows acknowledged seeks, pauses, speed, music, volume and teardown", async () => {
   // what a browser page has, and the host page's configuration
   const hadWindow = "window" in globalThis;
   if (!hadWindow) globalThis.window = new EventTarget();
@@ -120,6 +123,15 @@ test("optional audio follows acknowledged seeks, pauses, speed, music and teardo
     sound.music(false);
     assert.equal(p.music, false);
 
+    // the volume: a slider's level, given as its square (the start gave the level set before it: full)
+    assert.equal(p.gain, 1);
+    sound.volume(0.5);
+    assert.equal(p.gain, 0.25);
+    sound.volume(2);
+    assert.equal(p.gain, 1);
+    sound.volume(0);
+    assert.equal(p.gain, 0);
+
     // sound off: the host player is destroyed and the viewer's clock is back
     sound.disable();
     assert(p.destroyed);
@@ -134,6 +146,8 @@ test("optional audio follows acknowledged seeks, pauses, speed, music and teardo
     finish();
     await opening;
     assert(globalThis.__audioPlayers[1].destroyed);
+    // (a start that was turned off never took a volume)
+    assert.equal(globalThis.__audioPlayers[1].gain, undefined);
     assert.equal(globalThis.__audioPlayers[1].seeks.length, 0);
     assert.equal(soundState(), "off");
   } finally {

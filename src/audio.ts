@@ -36,6 +36,10 @@ export const [soundState, setSoundState] = createSignal<
 /** the host's player module has loaded: sound can be turned on */
 export const [soundAvailable, setSoundAvailable] = createSignal(false);
 export const [musicEnabled, setMusicEnabled] = createSignal(true);
+/** the volume slider's level, 0 to 1 (sound.volume) */
+export const [volumeLevel, setVolumeLevel] = createSignal(1);
+/** a slider's level as the gain the host player is given: squared, so the slider's moves sound even (as soundout.ts volumeGain) */
+const gainOf = (level: number) => level * level;
 
 let Player: AudioPlayerClass | undefined;
 // the host player while sound is on or starting, null while it is off
@@ -164,6 +168,7 @@ export const sound = {
       // (sound was turned off, or the replay changed, while it started)
       if (id !== generation || player !== p) return;
       p.setSpeed(speed);
+      p.setVolume?.(gainOf(volumeLevel()));
       setSoundState("on");
       align();
     } catch (error) {
@@ -223,6 +228,17 @@ export const sound = {
   music(on: boolean): void {
     setMusicEnabled(on);
     player?.setMusic(on);
+  },
+
+  /** the volume: a slider's level from 0 to 1, to the host player when it takes one (the optional setVolume of the contract) and kept
+   *  for the next start */
+  volume(level: number): void {
+    const v = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 1;
+    setVolumeLevel(v);
+    const p = player;
+    if (p?.ready && p.setVolume) {
+      try { p.setVolume(gainOf(v)); } catch { fail(p); }
+    }
   },
 };
 

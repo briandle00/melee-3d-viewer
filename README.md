@@ -482,6 +482,10 @@ The module exports `ReplayPlayer`:
   drifts from the picture. An optional `setPlayback(mode)` takes a change while
   sound is on; the viewer then seeks the sound to the frame shown. A backend
   may ignore both: without `setPlayback` the mode reaches it at the next start.
+- `setVolume(gain)` (optional): the volume as a linear gain from 0 to 1,
+  given when sound starts and on every change (the viewer squares a slider's
+  level first, so its moves sound even). Without it the backend plays at full
+  volume.
 - `error` and `audiointerrupted` events turn sound off; the viewer keeps
   playing without it.
 - `stage-frames` events (optional) carry Fountain of Dreams' platform heights

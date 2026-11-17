@@ -6,6 +6,9 @@
  * plays silence until the next row). A seek, a pause or a step clears it. The rows are played at the player's pace and speed, so the
  * sound is resampled from 32000 * pace / 59.94 * speed (the game's sound is in console time, 60000/1001 frames a second) to the
  * device's rate by linear interpolation (ours: rate conversion of the console's own output).
+ *
+ * The volume is one gain after the worklet (setVolume: a slider's level from 0 to 1, heard as level squared so equal moves of a slider
+ * sound like equal steps). It touches only what the speakers play: a video's sound is the session's own samples (exportsound.ts).
  */
 import { SOUND_RATE } from "./core";
 
@@ -59,15 +62,37 @@ export function deinterleave(pcm: Int16Array): { l: Float32Array; r: Float32Arra
 /** input samples per output sample: the sound played at `fps` rows a second and `speed`, on a device at `deviceRate` */
 export const stepFor = (fps: number, speed: number, deviceRate: number) => (SOUND_RATE * (fps / CONSOLE_FPS) * speed) / deviceRate;
 
+/** a volume slider's level (0 to 1) as a gain: squared (halfway is -12 dB), so the slider's moves sound even; a linear gain does
+ *  little over the slider's top half */
+export const volumeGain = (level: number) => {
+  const v = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 1;
+  return v * v;
+};
+/** seconds a change of volume takes to settle (no click from a sudden step) */
+const VOLUME_GLIDE = 0.015;
+
 export class SoundOut {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
+  private gain: GainNode | null = null;
   private starting: Promise<boolean> | null = null;
+  private level = 1;
   /** the rows' rate (frames a second) and speed the sound is played at */
   fps = 60;
   speed = 1;
 
   get on(): boolean { return this.node !== null; }
+
+  /** the volume slider's level, 0 to 1 */
+  get volume(): number { return this.level; }
+  /** the gain the speakers play at now (null while off) */
+  get gainNow(): number | null { return this.gain ? this.gain.gain.value : null; }
+
+  /** the volume: a slider's level from 0 to 1, kept for the next start while off */
+  setVolume(level: number): void {
+    this.level = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 1;
+    if (this.gain && this.ctx) this.gain.gain.setTargetAtTime(volumeGain(this.level), this.ctx.currentTime, VOLUME_GLIDE);
+  }
 
   /** Start the output (from a click: browsers start audio only then). False when this browser cannot. */
   start(): Promise<boolean> {
@@ -82,9 +107,11 @@ export class SoundOut {
         try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
         await resumed;
         const node = new AudioWorkletNode(ctx, "melee-sound", { numberOfInputs: 0, outputChannelCount: [2] });
-        node.connect(ctx.destination);
+        const gain = new GainNode(ctx, { gain: volumeGain(this.level) });
+        node.connect(gain).connect(ctx.destination);
         this.ctx = ctx;
         this.node = node;
+        this.gain = gain;
         return true;
       } catch (e) {
         console.warn("gx: the sound could not start", e);
@@ -108,8 +135,10 @@ export class SoundOut {
 
   stop(): void {
     this.node?.disconnect();
+    this.gain?.disconnect();
     void this.ctx?.close();
     this.node = null;
+    this.gain = null;
     this.ctx = null;
   }
 }

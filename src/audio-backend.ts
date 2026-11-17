@@ -39,6 +39,9 @@ export interface AudioPlayer extends EventTarget {
    *  console recorded it). The two can play some replays differently (the C-stick of a replay from before Slippi 3.17); a backend that
    *  simulates the game plays it the same way, or its sound drifts from the picture. A backend may ignore it */
   setPlayback?(mode: PlaybackMode): void;
+  /** (optional) the volume as a linear gain from 0 (silent) to 1 (as made), given at the start and on every change. A backend without it
+   *  plays at full volume */
+  setVolume?(gain: number): void;
   destroy(): unknown;
 }
 
