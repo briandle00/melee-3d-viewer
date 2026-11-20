@@ -1,16 +1,15 @@
 The GX player's simulator module (gx-core.js, gx-core.wasm), its game file list (sim-files.json) and which of those one match's load
 reads (sim-files-match.json).
 
-Built from melee-sim-light (https://github.com/briandle00/melee-sim-light, a fork of https://github.com/kyhavlov/melee-sim-light),
-branch w95/recorder-zero at 7baa4617 (local; w94/lazy-game-data 59a3feb8 with the recorder's dead bytes zeroed - what it frees, and the
-pipe past the bytes it carries to the next frame - and msl_gxw_keep_info 200-205, the game data arenas' unused parts and the open
-match's arena past its used bytes, which no write reaches;
-w94/lazy-game-data 59a3feb8 is sound/w54 99a0cddc with the one-match game data load, msl_gxw_load_game_for and
+Built from melee-sim-light (https://github.com/briandle00/melee-sim-light, a fork of https://github.com/kyhavlov/melee-sim-light)
+at commit 7baa4617 (local). From newest to oldest, it carries: the recorder's dead bytes zeroed - what it frees, and the pipe past
+the bytes it carries to the next frame - and msl_gxw_keep_info 200-205, the game data arenas' unused parts and the open match's
+arena past its used bytes, which no write reaches (on 59a3feb8); the one-match game data load, msl_gxw_load_game_for and
 msl_gxw_covers: the preload's own steps for the tape's fighters, Kirby's copies of them and its stage only, at the bases a whole load
-gives each file (msl-dat-bases.bin; msl_native_dat_base_* record them); sound/w54 99a0cddc is sound/w41 0b6fd0c6 with the sound core's two fixes from the upstream port: the stage's music
-read from its table with no write to the stage's state, and a second start of the sound in the same module begins as a first start;
-on perf/open 7018279c: the float rule for a sum's own product, native libm calls, fighter facing in
-the effect callback): the viewer build with the HUD layout option (msl_gxw_set_hud_layout), the stream restart and memory-top
+gives each file (msl-dat-bases.bin; msl_native_dat_base_* record them) (on 99a0cddc); the sound core's two fixes from the upstream
+port: the stage's music read from its table with no write to the stage's state, and a second start of the sound in the same module
+begins as a first start (on 0b6fd0c6); and, from 7018279c, the float rule for a sum's own product, native libm calls, fighter facing
+in the effect callback, the viewer build with the HUD layout option (msl_gxw_set_hud_layout), the stream restart and memory-top
 calls the app's player seeks with (msl_gxw_restart_stream, msl_gxw_heap_top), the game data load kept for the next match
 (msl_gxw_load_game, msl_gxw_rewind: a restart or a C-stick fit drive opens in milliseconds), and the sound core (src/sound: the game's
 own sound code, off unless the page starts it: msl_gxw_sound_start, msl_gxw_sound_need, msl_gxw_sound_pcm, msl_gxw_sound_frames,
