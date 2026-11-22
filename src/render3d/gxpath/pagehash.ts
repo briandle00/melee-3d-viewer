@@ -9,6 +9,23 @@
  */
 const WASM = "AGFzbQEAAAABBgFgAX8BfgIIAQFlAW0CAAADAgEABwUBAWgAAArFAgHCAgICfwV7IABBEHQhASABQYCABGohAv0MxZ0cgZMBAAG5eTeea8rrhSED/Qwt69QnsWdWFjWussItNet/IQT9DIumbISV6dFbbTwbLDkteikhBf0MpB3jaE16KbXpxFYb0GNsniEG/QyTAQABkwEAAZMBAAGTAQABIQcDQCADIAH9AAQA/VEgB/21ASEDIAQgAf0ABBD9USAH/bUBIQQgBSAB/QAEIP1RIAf9tQEhBSAGIAH9AAQw/VEgB/21ASEGIAFBwABqIQEgASACSQ0ACyADIAT9Uf0MFXxKf7l5N55P69QnPa6ywv3VASEDIAUgBv1R/Qz5eTeesWdWFs2MVe3Xr1H//dUBIQUgAyAFQR39zQH9USEDIAMgBf1R/QxT7IUa/rnOxOsRMRO7SdCU/dUBIQMgA/0dACAD/R0BQh+JhQs=";
 
+/** `options` for the module's factory that hand `noted` the memory the instance is made with (the options' own instantiateWasm, when they
+ *  have one, still makes it; else the module's file is fetched and instantiated here, from `locateFile`'s address for it) */
+export function withMemory(options: Record<string, unknown>, noted: (memory: WebAssembly.Memory) => void): Record<string, unknown> {
+  type Inst = (imports: WebAssembly.Imports, ok: (i: WebAssembly.Instance, m: WebAssembly.Module) => void) => object;
+  const own = options.instantiateWasm as Inst | undefined;
+  const note = (i: WebAssembly.Instance) => { if (i.exports.memory instanceof WebAssembly.Memory) noted(i.exports.memory); };
+  const instantiateWasm: Inst = own
+    ? (imports, ok) => own(imports, (i, m) => { note(i); ok(i, m); })
+    : (imports, ok) => {
+        const url = typeof options.locateFile === "function" ? (options.locateFile as (p: string, d: string) => string)("gx-core.wasm", "") : "gx-core.wasm";
+        WebAssembly.instantiateStreaming(fetch(url), imports).then((r) => { note(r.instance); ok(r.instance, r.module); })
+          .catch((e) => console.warn("simulator:", e));
+        return {};
+      };
+  return { ...options, instantiateWasm };
+}
+
 /** page p's hash, for the memory given (null: this engine has no SIMD) */
 export function fastPageHasher(memory: WebAssembly.Memory): ((p: number) => bigint) | null {
   try {

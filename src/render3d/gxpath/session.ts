@@ -27,7 +27,8 @@ import { driveOrder, type DriveOptions, type Tape } from "../../sim/tape";
 import { fitCstick, type RawC } from "./cfit";
 import { GxCore, type GxCoreFactory, type PlaybackMode } from "./core";
 import { nativeRow, nativeTape } from "./tapebridge";
-import { Checkpoints, type Checkpoint, type CheckpointMemory } from "./checkpoints";
+import { Checkpoints, gameDataWrites, matchPages, PassPages, unusedArena, type Checkpoint, type CheckpointMemory, type KeepInfoMemory } from "./checkpoints";
+import { fastPageHasher, withMemory } from "./pagehash";
 
 /** what the session needs of a renderer (CpuBackend, GxGl) */
 export interface SessionBackend extends GxBackend {
@@ -148,7 +149,10 @@ export class GxSession {
     // (an instance whose game data is another match's - loaded for that match's fighters and stage only - cannot open this one)
     if (!core?.covers(whole) || !core.rewind()) {
       core?.destroy();
-      core = await GxCore.create((opt) => this.o.factory({ ...opt, ...this.o.coreOptions }), this.o.files.files);
+      let memory = null as WebAssembly.Memory | null;
+      core = await GxCore.create((opt) => this.o.factory(withMemory({ ...opt, ...this.o.coreOptions }, (m) => { memory = m; })), this.o.files.files);
+      // (the faster pass over this instance's memory, for the checkpoints kept at marked rows: keepByPass)
+      this.hashers.set(core, memory ? fastPageHasher(memory) : null);
       // (and put back to the state the load kept at once: the load's own call frees memory after it keeps the state, so a match opened
       // straight after it has its allocator elsewhere - pages of the match's memory differ from those of every later opening of this
       // instance, which all follow a rewind; the first match is then one of those)
@@ -233,7 +237,7 @@ export class GxSession {
     // second or two), so a far seek forward keeps checkpoints on its way and the first seek back from there is a rewind to one near.
     // (Taken at the first seek back instead, that seek played the match from the first row with the simulator alone: seconds far in
     // the game. The first open is a reopen's match - openIn - so a reopen's pages are this baseline's.)
-    if (this.canRewind) this.cps.baseline(this.wasm as unknown as CheckpointMemory);
+    if (this.canRewind) { this.cps.baseline(this.wasm as unknown as CheckpointMemory); this.passBase(); }
     else this.cps.drop();
     this.index = 0;
     this.diverged = null;
@@ -297,8 +301,37 @@ export class GxSession {
   /** the module has the calls and the renderer can start fresh: seeks rewind and restart the stream */
   private get canRewind(): boolean { const m = this.wasm; return !!m && !!m._msl_gxw_heap_top && !!m._msl_gxw_restart_stream && !!this.backend?.reset; }
 
-  /** the match is at the next row to step: a checkpoint kept when one is marked there */
-  private atMark(): void { const m = this.wasm; if (m) this.cps.passing(m as unknown as CheckpointMemory, this.index); }
+  /** the match is at the next row to step: a checkpoint kept when one is marked there (by the faster pass when it can: keepByPass) */
+  private atMark(): void { const m = this.wasm; if (m) this.cps.passing(m as unknown as CheckpointMemory, this.index, () => this.keepByPass()); }
+
+  /** each instance's faster pass over its memory (pagehash.ts; null: none here) */
+  private hashers = new WeakMap<GxCore, ((p: number) => bigint) | null>();
+  /** the pages a match can change, for the memory's size they were made for; the game data's rewrites logged after the first row */
+  private pagesOf: { bytes: number; pages: number[] | null } = { bytes: -1, pages: null };
+  private writesBase = -1;
+  private passPages = new PassPages();
+  private matchPagesNow(): number[] | null {
+    const m = this.wasm as unknown as KeepInfoMemory, n = m.HEAPU8.length;
+    if (this.pagesOf.bytes !== n) this.pagesOf = { bytes: n, pages: matchPages(m) };
+    return this.pagesOf.pages;
+  }
+  /** The faster pass's baseline, the match as it opened (its first row stepped): the checkpoints kept at marked rows are then found by it
+   *  (keepByPass) - each a few hundredths of a second instead of a pass over the whole memory, about a fifth of a second */
+  private passBase(): void {
+    const hash = this.core ? this.hashers.get(this.core) ?? null : null, pages = hash ? this.matchPagesNow() : null;
+    this.writesBase = gameDataWrites(this.wasm as unknown as KeepInfoMemory);
+    this.passPages.clear();
+    if (hash && pages) this.cps.passBase(this.wasm as unknown as CheckpointMemory, { hash, pages });
+  }
+  /** a checkpoint before the next row by the faster pass over the pages a match can change (checkpoints.ts keepPass: exact whatever the
+   *  instance did before), and the game data the game rewrote since the first row (PassPages); whether one is kept */
+  private keepByPass(): boolean {
+    const m = this.wasm as unknown as KeepInfoMemory, hash = this.core ? this.hashers.get(this.core) ?? null : null;
+    const match = hash ? this.matchPagesNow() : null;
+    if (!hash || !match) return false;
+    const pages = this.passPages.pages(this.cps, m, match, this.writesBase);
+    return this.cps.keepPass(m, this.index, { hash, pages, unused: () => unusedArena(m) });
+  }
 
   /** the module back to a checkpoint (null: the state after the first row); the renderer is not fed until the stream starts again */
   private async rewind(c: Checkpoint | null): Promise<void> {

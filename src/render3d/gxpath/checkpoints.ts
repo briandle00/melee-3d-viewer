@@ -98,6 +98,22 @@ export function notTheMatch(m: KeepInfoMemory, stackPages = 80): (page: number) 
 /** the game data's rewrites logged so far (msl_gxw_keep_info 5): the same count, the ranges matchPages leaves out are as they were */
 export function gameDataWrites(m: KeepInfoMemory): number { return m._msl_gxw_keep_info ? m._msl_gxw_keep_info(5) : -1; }
 
+/** The pages a checkpoint by the faster pass reads (Checkpoints.keepPass's `pages`): the pages a match can change (`match`: matchPages) while
+ *  the game data's rewrites logged are the baseline's count (`writesBase`); after the game rewrote some of its game data (Pokemon Stadium
+ *  does, as the match starts), those and the game data pages that now differ from the baseline (Checkpoints.rewritten: one pass over the
+ *  game data, made once for each count of rewrites). The count is in the module's own record, which lies in the pages a match can change,
+ *  so a state brought back by a checkpoint carries the count of the rewrites its memory holds. Drop it (clear) with the baseline. */
+export class PassPages {
+  private at: { writes: number; match: number[]; pages: number[] } | null = null;
+  pages(cps: Checkpoints, m: KeepInfoMemory, match: number[], writesBase: number): number[] {
+    const w = gameDataWrites(m);
+    if (w === writesBase) return match;
+    if (!this.at || this.at.writes !== w || this.at.match !== match) this.at = { writes: w, match, pages: match.concat(cps.rewritten(m, match)) };
+    return this.at.pages;
+  }
+  clear(): void { this.at = null; }
+}
+
 /** a pass over the module's memory with two 32-bit hashes a page: the [2p] and [2p + 1] words are page p's. A list of the pages that
  *  differ from the baseline made from it is kept for good (stored.ts), so a page is taken as unchanged only when 64 bits say so */
 export function pageHashes2(m: CheckpointMemory): Uint32Array {
@@ -255,8 +271,11 @@ export class Checkpoints {
     this.markAt(from - this.back);
   }
 
-  /** the match is at row `index` (the next to step): a checkpoint kept when one is marked here */
-  passing(m: CheckpointMemory, index: number): void { if (this.marks.delete(index)) this.keep(m, index); }
+  /** the match is at row `index` (the next to step): a checkpoint kept when one is marked here - by `faster` when it is given and keeps
+   *  one (keepPass: a few hundredths of a second, against keep's pass over the whole memory, a quarter of a second), else by keep */
+  passing(m: CheckpointMemory, index: number, faster?: () => boolean): void {
+    if (this.marks.delete(index) && !(faster?.() && this.has(index))) this.keep(m, index);
+  }
 
   /** keep the module's state before row `index` (the next to step) as a checkpoint */
   keep(m: CheckpointMemory, index: number): void {
@@ -301,6 +320,21 @@ export class Checkpoints {
 
   /** (the checks) the pages that differ from the baseline now: after the match is opened again, those it does not put back */
   differs(m: CheckpointMemory): number[] { return this.changed(this.hashes(m)); }
+
+  /** The pages up to the heap top that are not in `match` (the game data the match only reads: matchPages leaves it out) and differ from
+   *  the baseline now - what the game's rewrites of its game data changed (the module logs them: gameDataWrites). A pass over those pages
+   *  with the baseline's hashes (keep's, page by page); empty before a baseline. */
+  rewritten(m: CheckpointMemory, match: number[]): number[] {
+    const b = this.base;
+    if (!b) return [];
+    const t0 = performance.now();
+    const n = Math.ceil(m._msl_gxw_heap_top() / PAGE), inMatch = new Uint8Array(n), out: number[] = [];
+    for (const p of match) if (p < n) inMatch[p] = 1;
+    for (let p = 0; p < n; p++) if (!inMatch[p] && (p >= b.length || pageHash(m, p) !== b[p])) out.push(p);
+    this.stats.hashMs += performance.now() - t0;
+    this.stats.hashes++;
+    return out;
+  }
 
   /** the latest checkpoint at or before row `row` and after row `after` (null: none) */
   latest(row: number, after = -1): Checkpoint | null {
