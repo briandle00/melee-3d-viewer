@@ -9,29 +9,62 @@
  * on its own) the cache is the player's own. */
 
 type Shared = Record<string, Map<string, unknown>>;
+type Host = { __viewerShared?: Shared; __viewerWeak?: Record<string, WeakMap<object, unknown>>; Object: ObjectConstructor; Map: MapConstructor; WeakMap: WeakMapConstructor };
 
-function host(): { __viewerShared?: Shared } {
+function host(): Host {
   const self = globalThis as unknown as { top?: { location: { origin: string } }; location?: { origin: string } };
   try {
     const top = self.top;
     // (the page above, when it is on this origin; asking a foreign one throws)
-    if (top && top !== self && top.location.origin === self.location?.origin) return top as unknown as { __viewerShared?: Shared };
+    if (top && top !== self && top.location.origin === self.location?.origin) return top as unknown as Host;
   } catch { /* another origin's page: this player's own */ }
-  return self as unknown as { __viewerShared?: Shared };
+  return self as unknown as Host;
+}
+
+/* A frame's objects keep its whole realm alive: everything the frame's script reaches - a 3D player's simulator memory (most of a GiB),
+ * its parsed replay, its renderer. So what the page above keeps lasts no longer than the frame that made it: the containers are made in
+ * the page's own realm (its Object, Map and WeakMap), and when a frame goes (pagehide: its frame removed, or sent to another address) it
+ * takes its own entries out of them - every value (and key) made in its realm. A page that made a frame for each game it opened kept
+ * every one of them, the simulator's memory with it: about 1 GiB more for each game. */
+let leaving = false;
+const weakKeys: { m: WeakMap<object, unknown>; key: object }[] = [];
+function releaseOnLeave(h: Host): void {
+  if (leaving || (h as unknown) === globalThis || typeof addEventListener !== "function") return;
+  leaving = true;
+  addEventListener("pagehide", (e) => {
+    // (a page kept to come back to - the browser's back-forward cache - keeps its frames: nothing is let go)
+    if ((e as PageTransitionEvent | undefined)?.persisted) return;
+    // (made in this frame: an object whose prototype chain ends in this realm's Object.prototype)
+    const mine = (v: unknown) => ((typeof v === "object" && v !== null) || typeof v === "function") && v instanceof Object;
+    try {
+      for (const m of Object.values(h.__viewerShared ?? {})) for (const [k, v] of [...m]) if (mine(v) || mine(k)) m.delete(k);
+      for (const { m, key } of weakKeys) if (mine(m.get(key))) m.delete(key);
+      weakKeys.length = 0;
+    } catch { /* the page above is gone too */ }
+  });
 }
 
 /** the page's cache of this name (made on first use) */
 export function pageCache<V>(name: string): Map<string, V> {
   const h = host();
-  const all = (h.__viewerShared ??= {});
-  return (all[name] ??= new Map()) as Map<string, V>;
+  releaseOnLeave(h);
+  const all = (h.__viewerShared ??= h.Object.create(null) as Shared);
+  return (all[name] ??= new h.Map()) as Map<string, V>;
 }
 
 /** the page's weak cache of this name: kept as long as its keys are (a game file's bytes, say) */
 export function pageWeak<K extends object, V>(name: string): WeakMap<K, V> {
-  const h = host() as { __viewerWeak?: Record<string, WeakMap<object, unknown>> };
-  const all = (h.__viewerWeak ??= {});
-  return (all[name] ??= new WeakMap()) as WeakMap<K, V>;
+  const h = host();
+  releaseOnLeave(h);
+  const all = (h.__viewerWeak ??= h.Object.create(null) as Record<string, WeakMap<object, unknown>>);
+  const m = (all[name] ??= new h.WeakMap()) as WeakMap<K, V>;
+  if ((h as unknown) === globalThis) return m;
+  // (the keys this frame sets are noted, so it can take its own values out when it goes: a weak map cannot be walked)
+  return {
+    get: (k: K) => m.get(k), has: (k: K) => m.has(k), delete: (k: K) => m.delete(k),
+    set(k: K, v: V) { m.set(k, v); weakKeys.push({ m: m as WeakMap<object, unknown>, key: k }); return this; },
+    [Symbol.toStringTag]: "WeakMap",
+  } as WeakMap<K, V>;
 }
 
 /** keep a cache to its last `n` entries (the oldest go) */
