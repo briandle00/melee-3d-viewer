@@ -1,0 +1,46 @@
+(module
+  (import "e" "m" (memory 0))
+  ;; checkpoints.ts pageHash's numbers, with SIMD: its four FNV-1a chains (each over every fourth word of a 64 KiB page) are the four
+  ;; lanes of one vector, a 16-byte load xored in and multiplied each step - the same words in the same order, so the same bits. h4 runs
+  ;; four pages' chains side by side (one chain waits on its multiply: four keep the multiplier busy) and returns the first page's hash,
+  ;; the other three in r1, r2, r3; h1 one page. Nothing is written to the memory.
+  (global $r1 (export "r1") (mut i32) (i32.const 0))
+  (global $r2 (export "r2") (mut i32) (i32.const 0))
+  (global $r3 (export "r3") (mut i32) (i32.const 0))
+  ;; Math.imul(h0 ^ (h1 >>> 7 | h1 << 25), P) ^ Math.imul(h2 ^ (h3 >>> 13 | h3 << 19), 0x27d4eb2d)
+  (func $fold (param $v v128) (result i32)
+    (i32.xor
+      (i32.mul (i32.xor (i32x4.extract_lane 0 (local.get $v)) (i32.rotr (i32x4.extract_lane 1 (local.get $v)) (i32.const 7))) (i32.const 16777619))
+      (i32.mul (i32.xor (i32x4.extract_lane 2 (local.get $v)) (i32.rotr (i32x4.extract_lane 3 (local.get $v)) (i32.const 13))) (i32.const 0x27d4eb2d))))
+  (func (export "h1") (param $p i32) (result i32)
+    (local $a i32) (local $end i32) (local $x v128) (local $k v128)
+    (local.set $a (i32.shl (local.get $p) (i32.const 16)))
+    (local.set $end (i32.add (local.get $a) (i32.const 65536)))
+    (local.set $x (v128.const i32x4 0x811c9dc5 0x01000193 0x9e3779b9 0x85ebca6b))
+    (local.set $k (v128.const i32x4 16777619 16777619 16777619 16777619))
+    (loop $l
+      (local.set $x (i32x4.mul (v128.xor (local.get $x) (v128.load (local.get $a))) (local.get $k)))
+      (local.set $a (i32.add (local.get $a) (i32.const 16)))
+      (br_if $l (i32.lt_u (local.get $a) (local.get $end))))
+    (call $fold (local.get $x)))
+  (func (export "h4") (param $p i32) (result i32)
+    (local $a i32) (local $end i32) (local $x v128) (local $y v128) (local $z v128) (local $w v128) (local $k v128)
+    (local.set $a (i32.shl (local.get $p) (i32.const 16)))
+    (local.set $end (i32.add (local.get $a) (i32.const 65536)))
+    (local.set $x (v128.const i32x4 0x811c9dc5 0x01000193 0x9e3779b9 0x85ebca6b))
+    (local.set $y (local.get $x))
+    (local.set $z (local.get $x))
+    (local.set $w (local.get $x))
+    (local.set $k (v128.const i32x4 16777619 16777619 16777619 16777619))
+    (loop $l
+      (local.set $x (i32x4.mul (v128.xor (local.get $x) (v128.load offset=0 (local.get $a))) (local.get $k)))
+      (local.set $y (i32x4.mul (v128.xor (local.get $y) (v128.load offset=65536 (local.get $a))) (local.get $k)))
+      (local.set $z (i32x4.mul (v128.xor (local.get $z) (v128.load offset=131072 (local.get $a))) (local.get $k)))
+      (local.set $w (i32x4.mul (v128.xor (local.get $w) (v128.load offset=196608 (local.get $a))) (local.get $k)))
+      (local.set $a (i32.add (local.get $a) (i32.const 16)))
+      (br_if $l (i32.lt_u (local.get $a) (local.get $end))))
+    (global.set $r1 (call $fold (local.get $y)))
+    (global.set $r2 (call $fold (local.get $z)))
+    (global.set $r3 (call $fold (local.get $w)))
+    (call $fold (local.get $x)))
+)

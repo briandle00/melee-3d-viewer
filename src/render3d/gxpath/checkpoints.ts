@@ -21,6 +21,8 @@
  * and the checkpoint's after them - a copy of a few MiB.
  */
 
+import { pageHashes32 } from "./pagehash";
+
 /** the module's memory as the checkpoints read and write it (the graphics build: its heap top, msl_gxw_heap_top) */
 export interface CheckpointMemory { HEAPU8: Uint8Array; _msl_gxw_heap_top(): number }
 
@@ -32,6 +34,13 @@ export const KEEP = 10, SPACING = 300;
 
 /** page `p`'s hash as pageHashes makes it (a few pages checked against hashes taken before: a stored set's baseline, stored.ts) */
 export function pageHash(m: CheckpointMemory, p: number): number {
+  const fast = pageHashes32(m.HEAPU8.buffer);
+  if (fast) return fast.one(p);
+  return pageHashJs(m, p);
+}
+
+/** pageHash by the JavaScript pass (the numbers every faster way of making them is held to) */
+export function pageHashJs(m: CheckpointMemory, p: number): number {
   const u32 = new Uint32Array(m.HEAPU8.buffer, 0, m.HEAPU8.length >> 2);
   const P = 16777619;
   let h0 = 2166136261, h1 = 0x01000193, h2 = 0x9e3779b9, h3 = 0x85ebca6b;
@@ -133,8 +142,17 @@ export function pageHashes2(m: CheckpointMemory): Uint32Array {
   return out;
 }
 
-/** a hash of each 64 KiB page of the module's memory up to its heap top (four FNV-1a chains over the words in turn, for speed) */
+/** a hash of each 64 KiB page of the module's memory up to its heap top (four FNV-1a chains over the words in turn, for speed); by the
+ *  SIMD routine when one was made for this memory (pagehash.ts pageHashes32: the same numbers, about four times as fast) */
 export function pageHashes(m: CheckpointMemory): Uint32Array {
+  const top = m._msl_gxw_heap_top(), n = Math.ceil(top / PAGE);
+  const fast = n * PAGE <= m.HEAPU8.length ? pageHashes32(m.HEAPU8.buffer) : null;
+  if (fast) { const out = new Uint32Array(n); fast.many(0, n, out); return out; }
+  return pageHashesJs(m);
+}
+
+/** pageHashes by the JavaScript pass */
+export function pageHashesJs(m: CheckpointMemory): Uint32Array {
   const top = m._msl_gxw_heap_top(), n = Math.ceil(top / PAGE), out = new Uint32Array(n);
   // (whole pages: a page is kept and written back whole)
   const u32 = new Uint32Array(m.HEAPU8.buffer, 0, Math.min(n * (PAGE / 4), m.HEAPU8.length >> 2));
@@ -159,7 +177,11 @@ export class PiecedHashes {
   /** pages hashed until `deadline` (performance.now()), at least one; whether every page is */
   step(deadline: number): boolean {
     const n = this.hashes.length;
-    if (this.p < n) do { this.hashes[this.p] = pageHash(this.m, this.p); this.p++; } while (this.p < n && performance.now() < deadline);
+    // (by the SIMD routine when there is one: four pages at a time, the same numbers)
+    const fast = pageHashes32(this.m.HEAPU8.buffer);
+    if (fast) {
+      if (this.p < n) do { const k = Math.min(4, n - this.p); fast.many(this.p, k, this.hashes); this.p += k; } while (this.p < n && performance.now() < deadline);
+    } else if (this.p < n) do { this.hashes[this.p] = pageHashJs(this.m, this.p); this.p++; } while (this.p < n && performance.now() < deadline);
     return this.p >= n;
   }
   get done(): boolean { return this.p >= this.hashes.length; }
@@ -330,7 +352,8 @@ export class Checkpoints {
     const t0 = performance.now();
     const n = Math.ceil(m._msl_gxw_heap_top() / PAGE), inMatch = new Uint8Array(n), out: number[] = [];
     for (const p of match) if (p < n) inMatch[p] = 1;
-    for (let p = 0; p < n; p++) if (!inMatch[p] && (p >= b.length || pageHash(m, p) !== b[p])) out.push(p);
+    const fast = pageHashes32(m.HEAPU8.buffer), one = fast ? fast.one : (p: number) => pageHashJs(m, p);
+    for (let p = 0; p < n; p++) if (!inMatch[p] && (p >= b.length || one(p) !== b[p])) out.push(p);
     this.stats.hashMs += performance.now() - t0;
     this.stats.hashes++;
     return out;
