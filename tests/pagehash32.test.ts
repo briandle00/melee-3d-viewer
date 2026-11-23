@@ -46,6 +46,32 @@ test("the SIMD routine gives the JavaScript pass's numbers, page by page", () =>
   assert.deepEqual(pieced.hashes, js);
 });
 
+test("a memory nobody keeps goes, and its passes with it", async () => {
+  // (the passes' instances import the memory they read: kept in a list, they kept every simulator instance's memory a page ever made -
+  // most of a GiB each, game after game in a player that stays open. Run in a Deno of its own, whose collector can be asked to run)
+  const here = new URL("../src/render3d/gxpath/pagehash.ts", import.meta.url).href;
+  const script = `import { fastPageHasher, pageHashes32 } from ${JSON.stringify(here)};
+    let ref;
+    (() => {
+      const memory = new WebAssembly.Memory({ initial: 64 });
+      if (!fastPageHasher(memory) || !pageHashes32(memory.buffer)) throw new Error("no faster pass here");
+      ref = new WeakRef(memory);
+    })();
+    for (let i = 0; i < 10 && ref.deref(); i++) { await new Promise((r) => setTimeout(r, 0)); globalThis.gc(); }
+    console.log(ref.deref() ? "kept" : "gone");`;
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(`${dir}/gone.ts`, script);
+    const r = await new Deno.Command(Deno.execPath(), { args: ["run", "-A", "--no-check", "--sloppy-imports", "--v8-flags=--expose-gc", `${dir}/gone.ts`],
+                                                        stdout: "piped", stderr: "piped" }).output();
+    const out = new TextDecoder().decode(r.stdout).trim(), err = new TextDecoder().decode(r.stderr);
+    if (/no faster pass here/.test(err)) return;
+    assert.equal(out, "gone", err);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 test("the SIMD routine follows the memory as it grows", () => {
   const { memory, m } = memoryOf(9, (u8) => u8.fill(7));
   fastPageHasher(memory);

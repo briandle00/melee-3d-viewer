@@ -23,22 +23,30 @@ export function withMemory(options: Record<string, unknown>, noted: (memory: Web
  * JavaScript pass, about four times as fast - four pages' chains side by side. Every memory a faster pass is made for (fastPageHasher)
  * gets one, and checkpoints.ts pageHashes, pageHash and PiecedHashes use it for that memory. */
 const WASM32 = "AGFzbQEAAAABCwJgAX8Bf2ABewF/AggBAWUBbQIAAAMEAwEAAAYQA38BQQALfwFBAAt/AUEACwcaBQJyMQMAAnIyAwECcjMDAgJoMQABAmg0AAIK0AIDLAAgAP0bACAA/RsBQQd4c0GTg4AIbCAA/RsCIAD9GwNBDXhzQa3W074CbHMLZAICfwJ7IABBEHQhASABQYCABGohAv0MxZ0cgZMBAAG5eTeea8rrhSED/QyTAQABkwEAAZMBAAGTAQABIQQDQCADIAH9AAQA/VEgBP21ASEDIAFBEGohASABIAJJDQALIAMQAAu7AQICfwV7IABBEHQhASABQYCABGohAv0MxZ0cgZMBAAG5eTeea8rrhSEDIAMhBCADIQUgAyEG/QyTAQABkwEAAZMBAAGTAQABIQcDQCADIAH9AAQA/VEgB/21ASEDIAQgAf0ABICABP1RIAf9tQEhBCAFIAH9AASAgAj9USAH/bUBIQUgBiAB/QAEgIAM/VEgB/21ASEGIAFBEGohASABIAJJDQALIAQQACQAIAUQACQBIAYQACQCIAMQAAs=";
-const hashers32: { memory: WeakRef<WebAssembly.Memory>; h1: (p: number) => number; h4: (p: number) => number; r: WebAssembly.Global[] }[] = [];
+// (each pass's instance imports the memory it reads, so it keeps that memory alive: the passes are kept in a weak map by their memory, which
+// lets both go together once the simulator's instance is gone - a page that opened one simulator instance after another, in the same
+// frame, kept every one's memory, most of a GiB each, through a list of the passes)
+type Pass32 = { h1: (p: number) => number; h4: (p: number) => number; r: WebAssembly.Global[] };
+const memories32: WeakRef<WebAssembly.Memory>[] = [];
+const passes32 = new WeakMap<WebAssembly.Memory, Pass32>();
 
 function note32(memory: WebAssembly.Memory): void {
-  for (let k = hashers32.length - 1; k >= 0; k--) { const m = hashers32[k].memory.deref(); if (!m) hashers32.splice(k, 1); else if (m === memory) return; }
+  for (let k = memories32.length - 1; k >= 0; k--) { const m = memories32[k].deref(); if (!m) memories32.splice(k, 1); else if (m === memory) return; }
   try {
     const bytes = Uint8Array.from(atob(WASM32), (c) => c.charCodeAt(0));
     const e = new WebAssembly.Instance(new WebAssembly.Module(bytes), { e: { m: memory } }).exports;
-    hashers32.push({ memory: new WeakRef(memory), h1: e.h1 as (p: number) => number, h4: e.h4 as (p: number) => number, r: [e.r1, e.r2, e.r3] as WebAssembly.Global[] });
+    passes32.set(memory, { h1: e.h1 as (p: number) => number, h4: e.h4 as (p: number) => number, r: [e.r1, e.r2, e.r3] as WebAssembly.Global[] });
+    memories32.push(new WeakRef(memory));
   } catch { /* no SIMD here: the JavaScript pass */ }
 }
 
 /** pageHash's numbers for the memory whose buffer `buffer` is (null: none made for it): pages [first, first + n) into out[first..] (many),
  *  or one page's (one) */
 export function pageHashes32(buffer: ArrayBufferLike): { many(first: number, n: number, out: Uint32Array): void; one(p: number): number } | null {
-  const e = hashers32.find((x) => x.memory.deref()?.buffer === buffer);
-  if (!e) return null;
+  let found: Pass32 | undefined;
+  for (const ref of memories32) { const m = ref.deref(); if (m && m.buffer === buffer) { found = passes32.get(m); break; } }
+  if (!found) return null;
+  const e = found;
   return {
     many(first, n, out) {
       let p = first;
@@ -50,7 +58,8 @@ export function pageHashes32(buffer: ArrayBufferLike): { many(first: number, n: 
   };
 }
 
-/** page p's hash, for the memory given (null: this engine has no SIMD) */
+/** page p's hash, for the memory given (null: this engine has no SIMD). The pass imports the memory: whoever keeps it keeps the memory
+ *  alive (keep it by the memory, in a weak map, as note32 does) */
 export function fastPageHasher(memory: WebAssembly.Memory): ((p: number) => bigint) | null {
   note32(memory);
   try {
