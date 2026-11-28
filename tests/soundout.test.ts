@@ -6,7 +6,7 @@
 //   deno test -A --no-check --sloppy-imports tests/soundout.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CONSOLE_FPS, deinterleave, SoundOut, stepFor, volumeGain, WORKLET } from "../src/render3d/gxpath/soundout.ts";
+import { CONSOLE_FPS, deinterleave, SoundOut, STUCK_MS, stepFor, volumeGain, WORKLET } from "../src/render3d/gxpath/soundout.ts";
 
 type Proc = { port: { onmessage: (e: { data: unknown }) => void }; process(i: unknown[], o: Float32Array[][]): boolean };
 
@@ -100,5 +100,48 @@ test("the speakers play through one gain at the volume's: set at the start from 
     assert.equal(s.volume, 0);
   } finally {
     Object.assign(g, had);
+  }
+});
+
+test("a start that waits for good (asked before any press) is let go by a start asked after STUCK_MS, and that one plays", async () => {
+  const g = globalThis as Record<string, unknown>;
+  const had = { AudioContext: g.AudioContext, GainNode: g.GainNode, AudioWorkletNode: g.AudioWorkletNode };
+  const now = Object.getOwnPropertyDescriptor(performance, "now");
+  let t = 1000;
+  Object.defineProperty(performance, "now", { value: () => t, configurable: true, writable: true });
+  // (the first context's resume never settles - the browser holds the page's audio until a press - until it is closed; later ones run)
+  let made = 0, closed = 0;
+  class Node { connect(n: Node) { return n; } disconnect() {} }
+  g.AudioContext = class {
+    currentTime = 0; sampleRate = 48000; destination = new Node(); audioWorklet = { addModule: async () => {} };
+    private n = ++made; private fail: ((e: Error) => void) | null = null;
+    resume() { return this.n === 1 ? new Promise<void>((_, no) => { this.fail = no; }) : Promise.resolve(); }
+    close() { closed++; this.fail?.(new Error("closed")); return Promise.resolve(); }
+  };
+  g.GainNode = class extends Node { gain: { value: number }; constructor(_c: unknown, o: { gain: number }) { super(); this.gain = { value: o.gain }; } };
+  g.AudioWorkletNode = class extends Node { port = { postMessage() {} }; };
+  try {
+    const s = new SoundOut();
+    const first = s.start();
+    await new Promise((r) => setTimeout(r, 0));
+    // (asked again soon: the same start, still waiting)
+    t += STUCK_MS / 2;
+    assert.equal(s.start(), first);
+    assert.equal(made, 1);
+    assert.equal(s.on, false);
+    // (asked again past STUCK_MS: the waiting start is let go, a new one plays; the first answers with the new one's answer)
+    t += STUCK_MS;
+    const second = s.start();
+    assert.notEqual(second, first);
+    assert.equal(await second, true);
+    assert.equal(await first, true);
+    assert.equal(made, 2);
+    assert.equal(closed, 1);
+    assert.equal(s.on, true);
+    assert.equal(s.gainNow, 1);
+    s.stop();
+  } finally {
+    Object.assign(g, had);
+    if (now) Object.defineProperty(performance, "now", now); else delete (performance as unknown as Record<string, unknown>).now;
   }
 });

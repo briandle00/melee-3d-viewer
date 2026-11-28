@@ -70,12 +70,18 @@ export const volumeGain = (level: number) => {
 };
 /** seconds a change of volume takes to settle (no click from a sudden step) */
 const VOLUME_GLIDE = 0.015;
+/** milliseconds after which a start still under way counts as one that waits for good (see start) */
+export const STUCK_MS = 1500;
 
 export class SoundOut {
   private ctx: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
   private gain: GainNode | null = null;
   private starting: Promise<boolean> | null = null;
+  /** the start under way: when it began, and its context (closed if the start is let go) */
+  private startedAt = 0;
+  private pending: AudioContext | null = null;
+  private tries = 0;
   private level = 1;
   /** the rows' rate (frames a second) and speed the sound is played at */
   fps = 60;
@@ -94,18 +100,27 @@ export class SoundOut {
     if (this.gain && this.ctx) this.gain.gain.setTargetAtTime(volumeGain(this.level), this.ctx.currentTime, VOLUME_GLIDE);
   }
 
-  /** Start the output (from a click: browsers start audio only then). False when this browser cannot. */
+  /** Start the output (from a click: browsers start audio only then). False when this browser cannot.
+   *  A start asked before the page had any press (a page loaded again with the sound left on) waits for good: the browser holds the
+   *  page's audio until a press. A start asked while such a start has waited past STUCK_MS lets it go (its context closed) and starts
+   *  again, so the next press is heard; before, every later start returned the one that waited, and the sound stayed silent. */
   start(): Promise<boolean> {
     if (this.node) return Promise.resolve(true);
-    if (this.starting) return this.starting;
-    this.starting = (async () => {
+    if (this.starting && performance.now() - this.startedAt <= STUCK_MS) return this.starting;
+    if (this.starting) { const old = this.pending; this.pending = null; void old?.close().catch(() => {}); }
+    const me = ++this.tries;
+    this.startedAt = performance.now();
+    const p = (async () => {
+      let ctx: AudioContext | null = null;
       try {
-        const ctx = new AudioContext({ latencyHint: "interactive" });
+        ctx = new AudioContext({ latencyHint: "interactive" });
+        this.pending = ctx;
         // (resumed in the click itself, before any await: the browser lets the context run)
         const resumed = ctx.resume();
         const url = URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" }));
         try { await ctx.audioWorklet.addModule(url); } finally { URL.revokeObjectURL(url); }
         await resumed;
+        if (me !== this.tries) { void ctx.close().catch(() => {}); return this.starting ?? Promise.resolve(this.node !== null); }
         const node = new AudioWorkletNode(ctx, "melee-sound", { numberOfInputs: 0, outputChannelCount: [2] });
         const gain = new GainNode(ctx, { gain: volumeGain(this.level) });
         node.connect(gain).connect(ctx.destination);
@@ -114,13 +129,16 @@ export class SoundOut {
         this.gain = gain;
         return true;
       } catch (e) {
+        // (a start let go for a newer one: its answer is the newer start's)
+        if (me !== this.tries) return this.starting ?? Promise.resolve(this.node !== null);
         console.warn("gx: the sound could not start", e);
         return false;
       } finally {
-        this.starting = null;
+        if (me === this.tries) { this.starting = null; this.pending = null; }
       }
     })();
-    return this.starting;
+    this.starting = p;
+    return p;
   }
 
   /** a row's sound to play next */
