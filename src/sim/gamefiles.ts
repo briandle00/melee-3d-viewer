@@ -198,8 +198,8 @@ export async function datBases(moduleUrl: string | URL): Promise<[string, Uint8A
 /** a module's record of the bases its load gave (msl_native_dat_base_*), as msl-dat-bases.bin: "MSLB", the count, the base for a file
  *  not in it (past every one), then per file its key (u64) and base, little-endian. null for a module without the record or with none */
 export function datBasesOf(mod: unknown): Uint8Array | null {
-  const m = mod as Record<string, ((i?: number) => number) | undefined>;
-  if (!m._msl_native_dat_base_count || !m._msl_native_dat_base_at || !m._msl_native_dat_base_key_lo || !m._msl_native_dat_base_key_hi) return null;
+  const m = mod as Record<string, ((i?: number) => number) | undefined> | null | undefined;
+  if (!m || !m._msl_native_dat_base_count|| !m._msl_native_dat_base_at || !m._msl_native_dat_base_key_lo || !m._msl_native_dat_base_key_hi) return null;
   const n = m._msl_native_dat_base_count();
   if (!n) return null;
   const out = new Uint8Array(12 + 12 * n), v = new DataView(out.buffer);
@@ -216,4 +216,16 @@ export function datBasesOf(mod: unknown): Uint8Array | null {
   // (a file the table does not have - another disc's - is placed well past every one it has)
   v.setUint32(8, (end + 0x4000000) >>> 0, true);
   return out;
+}
+
+/** a module factory for one load: `take()` is the first module made through it (the instance that load's whole load ran in), never one
+ *  another load of the same page made meanwhile; once taken nothing more is kept (the engine keeps the factory for its reopens: a module
+ *  held here would outlive its instance). A module kept page-wide was another load's - or nothing, once that load had read and let it
+ *  go - when two loads overlapped on a page's first open, and the 3D player fell back to the earlier one */
+export function ownModules<O, M>(make: (o: O) => Promise<M>): { make: (o: O) => Promise<M>; take: () => M | null } {
+  let first: M | null = null, taken = false;
+  return {
+    make: (o: O) => make(o).then((m) => { if (!taken) first ??= m; return m; }),
+    take: () => { const m = first; first = null; taken = true; return m; },
+  };
 }
